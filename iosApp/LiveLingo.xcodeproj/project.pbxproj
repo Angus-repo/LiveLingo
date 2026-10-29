@@ -1,0 +1,198 @@
+// !$*UTF8*$!
+{
+    archiveVersion = 1;
+    classes = {};
+    objectVersion = 56;
+    objects = {
+
+/* Begin PBXBuildFile section */
+        A10000000000000000000001 /* LiveLingoApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000001 /* LiveLingoApp.swift */; };
+        A10000000000000000000002 /* AppleServices.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* AppleServices.swift */; };
+        A10000000000000000000003 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000004 /* PrivacyInfo.xcprivacy */; };
+        A10000000000000000000004 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000006 /* Assets.xcassets */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+        A20000000000000000000001 /* LiveLingoApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveLingoApp.swift; sourceTree = "<group>"; };
+        A20000000000000000000002 /* AppleServices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleServices.swift; sourceTree = "<group>"; };
+        A20000000000000000000003 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+        A20000000000000000000004 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+        A20000000000000000000005 /* LiveLingo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LiveLingo.app; sourceTree = BUILT_PRODUCTS_DIR; };
+        A20000000000000000000006 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+        A30000000000000000000001 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+        A40000000000000000000001 = {isa = PBXGroup; children = (A40000000000000000000002 /* LiveLingo */, A40000000000000000000003 /* Products */); sourceTree = "<group>"; };
+        A40000000000000000000002 /* LiveLingo */ = {
+            isa = PBXGroup;
+            children = (A20000000000000000000001 /* LiveLingoApp.swift */, A20000000000000000000002 /* AppleServices.swift */, A20000000000000000000003 /* Info.plist */, A20000000000000000000004 /* PrivacyInfo.xcprivacy */, A20000000000000000000006 /* Assets.xcassets */);
+            path = LiveLingo;
+            sourceTree = "<group>";
+        };
+        A40000000000000000000003 /* Products */ = {isa = PBXGroup; children = (A20000000000000000000005 /* LiveLingo.app */); name = Products; sourceTree = "<group>"; };
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+        A50000000000000000000001 /* LiveLingo */ = {
+            isa = PBXNativeTarget;
+            buildConfigurationList = A90000000000000000000002 /* Build configuration list for PBXNativeTarget "LiveLingo" */;
+            buildPhases = (A70000000000000000000001 /* Compile Kotlin Framework */, A80000000000000000000001 /* Sources */, A30000000000000000000001 /* Frameworks */, A60000000000000000000001 /* Resources */);
+            buildRules = ();
+            dependencies = ();
+            name = LiveLingo;
+            productName = LiveLingo;
+            productReference = A20000000000000000000005 /* LiveLingo.app */;
+            productType = "com.apple.product-type.application";
+        };
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+        A50000000000000000000002 /* Project object */ = {
+            isa = PBXProject;
+            attributes = {
+                BuildIndependentTargetsInParallel = YES;
+                LastSwiftUpdateCheck = 1640;
+                LastUpgradeCheck = 1640;
+                TargetAttributes = {A50000000000000000000001 = {CreatedOnToolsVersion = 16.4; LastSwiftMigration = 1640; }; };
+            };
+            buildConfigurationList = A90000000000000000000001 /* Build configuration list for PBXProject "LiveLingo" */;
+            compatibilityVersion = "Xcode 14.0";
+            developmentRegion = zh_TW;
+            hasScannedForEncodings = 0;
+            knownRegions = (zh_TW, en, Base);
+            mainGroup = A40000000000000000000001;
+            productRefGroup = A40000000000000000000003 /* Products */;
+            projectDirPath = "";
+            projectRoot = "";
+            targets = (A50000000000000000000001 /* LiveLingo */);
+        };
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+        A60000000000000000000001 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000003 /* PrivacyInfo.xcprivacy in Resources */, A10000000000000000000004 /* Assets.xcassets in Resources */); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+        A70000000000000000000001 /* Compile Kotlin Framework */ = {
+            isa = PBXShellScriptBuildPhase;
+            alwaysOutOfDate = 1;
+            buildActionMask = 2147483647;
+            files = ();
+            inputPaths = ();
+            name = "Compile Kotlin Framework";
+            outputPaths = ();
+            runOnlyForDeploymentPostprocessing = 0;
+            shellPath = /bin/sh;
+            shellScript = "set -eu\nif [ \"YES\" = \"${OVERRIDE_KOTLIN_BUILD_IDE_SUPPORTED:-NO}\" ]; then\n  exit 0\nfi\ncd \"$SRCROOT/..\"\n./gradlew :shared:embedAndSignAppleFrameworkForXcode\n";
+        };
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+        A80000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000001 /* LiveLingoApp.swift in Sources */, A10000000000000000000002 /* AppleServices.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+        B10000000000000000000001 /* Debug */ = {
+            isa = XCBuildConfiguration;
+            buildSettings = {
+                ALWAYS_SEARCH_USER_PATHS = NO;
+                CLANG_ENABLE_MODULES = YES;
+                CLANG_ENABLE_OBJC_ARC = YES;
+                CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+                COPY_PHASE_STRIP = NO;
+                DEBUG_INFORMATION_FORMAT = dwarf;
+                ENABLE_STRICT_OBJC_MSGSEND = YES;
+                GCC_C_LANGUAGE_STANDARD = gnu17;
+                GCC_OPTIMIZATION_LEVEL = 0;
+                GCC_PREPROCESSOR_DEFINITIONS = ("DEBUG=1", "$(inherited)");
+                IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+                MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+                ONLY_ACTIVE_ARCH = YES;
+                SDKROOT = iphoneos;
+                SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+                SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+            };
+            name = Debug;
+        };
+        B10000000000000000000002 /* Release */ = {
+            isa = XCBuildConfiguration;
+            buildSettings = {
+                ALWAYS_SEARCH_USER_PATHS = NO;
+                CLANG_ENABLE_MODULES = YES;
+                CLANG_ENABLE_OBJC_ARC = YES;
+                CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+                COPY_PHASE_STRIP = NO;
+                DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+                ENABLE_NS_ASSERTIONS = NO;
+                ENABLE_STRICT_OBJC_MSGSEND = YES;
+                GCC_C_LANGUAGE_STANDARD = gnu17;
+                IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+                MTL_ENABLE_DEBUG_INFO = NO;
+                SDKROOT = iphoneos;
+                SWIFT_COMPILATION_MODE = wholemodule;
+                SWIFT_OPTIMIZATION_LEVEL = "-O";
+                VALIDATE_PRODUCT = YES;
+            };
+            name = Release;
+        };
+        B20000000000000000000001 /* Debug */ = {
+            isa = XCBuildConfiguration;
+            buildSettings = {
+                ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+                CODE_SIGN_STYLE = Automatic;
+                CURRENT_PROJECT_VERSION = 2;
+                DEVELOPMENT_TEAM = "";
+                ENABLE_USER_SCRIPT_SANDBOXING = NO;
+                FRAMEWORK_SEARCH_PATHS = ("$(inherited)", "$(SRCROOT)/../shared/build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)");
+                GENERATE_INFOPLIST_FILE = NO;
+                INFOPLIST_FILE = LiveLingo/Info.plist;
+                LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks");
+                MARKETING_VERSION = 0.1.1;
+                OTHER_LDFLAGS = ("$(inherited)", "-framework", Shared);
+                PRODUCT_BUNDLE_IDENTIFIER = app.livelingo.ios;
+                PRODUCT_NAME = "$(TARGET_NAME)";
+                SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+                SUPPORTS_MACCATALYST = NO;
+                SWIFT_EMIT_LOC_STRINGS = YES;
+                SWIFT_VERSION = 5.0;
+                TARGETED_DEVICE_FAMILY = "1,2";
+            };
+            name = Debug;
+        };
+        B20000000000000000000002 /* Release */ = {
+            isa = XCBuildConfiguration;
+            buildSettings = {
+                ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+                CODE_SIGN_STYLE = Automatic;
+                CURRENT_PROJECT_VERSION = 2;
+                DEVELOPMENT_TEAM = "";
+                ENABLE_USER_SCRIPT_SANDBOXING = NO;
+                FRAMEWORK_SEARCH_PATHS = ("$(inherited)", "$(SRCROOT)/../shared/build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)");
+                GENERATE_INFOPLIST_FILE = NO;
+                INFOPLIST_FILE = LiveLingo/Info.plist;
+                LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks");
+                MARKETING_VERSION = 0.1.1;
+                OTHER_LDFLAGS = ("$(inherited)", "-framework", Shared);
+                PRODUCT_BUNDLE_IDENTIFIER = app.livelingo.ios;
+                PRODUCT_NAME = "$(TARGET_NAME)";
+                SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+                SUPPORTS_MACCATALYST = NO;
+                SWIFT_EMIT_LOC_STRINGS = YES;
+                SWIFT_VERSION = 5.0;
+                TARGETED_DEVICE_FAMILY = "1,2";
+            };
+            name = Release;
+        };
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+        A90000000000000000000001 /* Build configuration list for PBXProject "LiveLingo" */ = {isa = XCConfigurationList; buildConfigurations = (B10000000000000000000001 /* Debug */, B10000000000000000000002 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+        A90000000000000000000002 /* Build configuration list for PBXNativeTarget "LiveLingo" */ = {isa = XCConfigurationList; buildConfigurations = (B20000000000000000000001 /* Debug */, B20000000000000000000002 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+/* End XCConfigurationList section */
+    };
+    rootObject = A50000000000000000000002 /* Project object */;
+}

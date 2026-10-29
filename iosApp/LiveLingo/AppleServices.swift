@@ -12,9 +12,9 @@ final class AppleServices: NSObject, IosNativeServices {
     private let keychainService = "app.livelingo.relay"
 
     func startMicrophone(
-        onPcm: @escaping (KotlinByteArray) -> KotlinUnit,
-        onFailure: @escaping (String) -> KotlinUnit,
-        onStarted: @escaping (String?) -> KotlinUnit
+        onPcm: @escaping (KotlinByteArray) -> Void,
+        onFailure: @escaping (String) -> Void,
+        onStarted: @escaping (String?) -> Void
     ) {
         recorder.start(onPcm: { data in
             let bytes = KotlinByteArray(size: Int32(data.count))
@@ -24,8 +24,8 @@ final class AppleServices: NSObject, IosNativeServices {
                     bytes.set(index: Int32(index), value: Int8(bitPattern: source[index]))
                 }
             }
-            _ = onPcm(bytes)
-        }, onFailure: { _ = onFailure($0) }, onStarted: { _ = onStarted($0) })
+            onPcm(bytes)
+        }, onFailure: onFailure, onStarted: onStarted)
     }
 
     func stopMicrophone() { recorder.stop() }

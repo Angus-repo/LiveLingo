@@ -93,6 +93,8 @@ GPT-Live 回傳的是帶時間範圍的串流片段，沒有每個字的精準�
 
 ## 驗證狀態
 
+53 項單元測試通過；Android APK 與 iOS ARM64 模擬器 App 均已在 GitHub Actions 成功編譯。實機與真實 Foundry 連線尚待驗證。
+
 實際執行結果見 [BUILD_STATUS.md](BUILD_STATUS.md)，實機驗收步驟見 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)。沒有真實 Foundry 憑證時，離線協定與流程測試不能取代模型連線及翻譯品質驗證。
 
 ## 官方介面參考

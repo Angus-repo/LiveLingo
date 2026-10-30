@@ -47,9 +47,13 @@ private enum class Page(val label: String, val glyph: String) {
 }
 
 @Composable
-fun LiveLingoApp(services: PlatformServices) {
-    val controller = remember(services) { AppController(services) }
-    DisposableEffect(controller) { onDispose { controller.dispose() } }
+fun LiveLingoApp(services: PlatformServices, retainedController: AppController? = null) {
+    // Android owns a process-scoped controller so background sessions survive Activity recreation.
+    // Other platforms still dispose their UI-scoped controller as before.
+    val controller = remember(services, retainedController) { retainedController ?: AppController(services) }
+    DisposableEffect(controller, retainedController) {
+        onDispose { if (retainedController == null) controller.dispose() }
+    }
     val state by controller.state.collectAsState()
     var page by remember { mutableStateOf(Page.LIVE) }
     val clipboard = LocalClipboardManager.current
@@ -212,7 +216,7 @@ fun LiveLingoApp(services: PlatformServices) {
                     else -> if (state.current == null) "●  開始即時翻譯" else "●  開始新的一段翻譯"
                 }, fontWeight = FontWeight.SemiBold)
             }
-            Text("音訊與所選背景知識會直接傳至 Microsoft Foundry。此版只顯示字幕；翻譯期間請保持 App 在前景。", style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971))
+            Text("音訊與所選背景知識會直接傳至 Microsoft Foundry。Android 翻譯開始後可切換 App 或鎖定螢幕，從常駐通知停止；iOS 目前仍需保持前景。", style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971))
         } }
         if (state.active) item { SectionCard {
             Text("${source.label} → ${target.label}", fontWeight = FontWeight.Bold)
@@ -233,8 +237,8 @@ fun LiveLingoApp(services: PlatformServices) {
                 Text(when { state.current?.fragments?.isNotEmpty() != true -> "等待對話"; state.transcriptSaved -> "已自動儲存"; state.phase == ConnectionPhase.ERROR -> "請先匯出"; else -> "儲存中" }, style = MaterialTheme.typography.labelMedium, color = Mint)
             }
         }
-        item { TranscriptPanel("譯文", target.label, state.current, TranscriptChannel.OUTPUT, Purple) }
         item { TranscriptPanel("原文", source.label, state.current, TranscriptChannel.INPUT, Mint) }
+        item { TranscriptPanel("譯文", target.label, state.current, TranscriptChannel.OUTPUT, Purple) }
         item { SectionCard("發言者標記", "手動標記接下來收到的原文；不是自動聲紋辨識。字幕可能延遲抵達，結束後可在逐字稿修正。") {
             Choice("接下來收到的原文", state.speaker,
                 listOf("未標記" to "未標記", "發言者 A" to "發言者 A", "發言者 B" to "發言者 B", "發言者 C" to "發言者 C", "CUSTOM" to "自訂姓名…")) {
@@ -251,31 +255,38 @@ fun LiveLingoApp(services: PlatformServices) {
         dismissButton = { TextButton(onClick = { customSpeaker = false }) { Text("取消") } })
 }
 
-private data class DisplayCue(val ids: List<String>, val start: Long, val end: Long, val text: String, val speaker: String?)
-private fun displayCues(record: TranscriptRecord?, channel: TranscriptChannel): List<DisplayCue> {
-    val result = mutableListOf<DisplayCue>()
-    record?.fragments?.filter { it.channel == channel }?.sortedBy { it.startMs }?.forEach { f ->
-        val last = result.lastOrNull()
-        if (last != null && last.speaker == f.speakerLabel && f.startMs >= last.end && f.startMs - last.end <= 600 && f.endMs - last.start <= 6000 && last.text.length + f.text.length <= 180) {
-            result[result.lastIndex] = last.copy(ids = last.ids + f.id, end = f.endMs, text = last.text + f.text)
-        } else result += DisplayCue(listOf(f.id), f.startMs, f.endMs, f.text, f.speakerLabel)
-    }
-    return result.filter { it.text.isNotBlank() }
-}
-
 @Composable private fun TranscriptPanel(title: String, language: String, record: TranscriptRecord?, channel: TranscriptChannel, color: Color) {
+    // All subtitles remain available, chronological. Each track follows its newest line.
+    val cues = displayCues(record, channel)
+    val scroll = rememberLazyListState()
+    LaunchedEffect(record?.id, cues.size, cues.lastOrNull()?.text) {
+        // The trailing item makes the bottom of even a long last cue visible.
+        scroll.scrollToItem(cues.size)
+    }
     SectionCard {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text(title, color = color, fontWeight = FontWeight.Bold)
             Text(language, color = Color(0xFF657971), style = MaterialTheme.typography.labelMedium)
         }
-        val cues = displayCues(record, channel).takeLast(3).asReversed()
-        if (cues.isNotEmpty()) Text("最新字幕在上方", style = MaterialTheme.typography.labelSmall, color = Color(0xFF657971))
-        if (cues.isEmpty()) Text(if (channel == TranscriptChannel.OUTPUT) "開始說話後，翻譯會出現在這裡。" else "原始語音的辨識文字會保留在這裡。", color = Color(0xFF8C9A92), modifier = Modifier.padding(vertical = 18.dp))
-        cues.forEach { cue ->
-            Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                Text("${formatTime(cue.start)} – ${formatTime(cue.end)}${cue.speaker?.let { " · 手動：$it" }.orEmpty()}", style = MaterialTheme.typography.labelSmall, color = Color(0xFF657971))
-                SelectionContainer { Text(cue.text.trim(), fontSize = 18.sp, lineHeight = 28.sp) }
+        if (cues.isEmpty()) {
+            Text(if (channel == TranscriptChannel.OUTPUT) "開始說話後，翻譯會出現在這裡。" else "原始語音的辨識文字會保留在這裡。",
+                color = Color(0xFF8C9A92), modifier = Modifier.padding(vertical = 18.dp))
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxWidth().height(230.dp),
+                state = scroll,
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                items(cues, key = { it.ids.first() }) { cue ->
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        // Timestamp is export/history metadata, never part of live subtitles.
+                        cue.speaker?.let {
+                            Text("手動：$it", style = MaterialTheme.typography.labelSmall, color = Color(0xFF657971))
+                        }
+                        SelectionContainer { Text(cue.text.trim(), fontSize = 18.sp, lineHeight = 28.sp) }
+                    }
+                }
+                item(key = "live-scroll-end") { Spacer(Modifier.height(1.dp)) }
             }
         }
     }
@@ -456,10 +467,10 @@ private fun displayCues(record: TranscriptRecord?, channel: TranscriptChannel): 
         item { SectionCard("資料與收音") {
             Text("逐字稿與背景知識儲存在這台裝置；App 不保存原始錄音。錄音期間音訊會透過加密連線直接送至 Microsoft Foundry。", style = MaterialTheme.typography.bodyMedium)
             Text("API key 僅用於所設定的 Foundry 資源，不會包含在逐字稿或匯出內容中。", style = MaterialTheme.typography.bodySmall)
-            Text("切換到背景、來電或音訊中斷時會停止收音。恢復後請手動開始新的一段。", style = MaterialTheme.typography.bodySmall)
+            Text("Android 開始翻譯後可切換至背景或鎖定螢幕，系統會顯示麥克風前景服務通知及停止操作。來電、音訊中斷、系統強制停止或網路錯誤仍可能中止；iOS 目前需維持前景。", style = MaterialTheme.typography.bodySmall)
             Text("目前提供手動發言者標記。GPT-Live 不回傳多人身分；原文與譯文字幕也可能有辨識或翻譯誤差。", style = MaterialTheme.typography.bodySmall)
         } }
-        item { Text("LiveLingo 0.1.3 · Kotlin Multiplatform\nAndroid / iOS · Microsoft Foundry GPT-Live", style = MaterialTheme.typography.labelSmall, color = Color(0xFF657971), modifier = Modifier.padding(6.dp)) }
+        item { Text("LiveLingo 0.1.4 · Kotlin Multiplatform\nAndroid / iOS · Microsoft Foundry GPT-Live", style = MaterialTheme.typography.labelSmall, color = Color(0xFF657971), modifier = Modifier.padding(6.dp)) }
     }
     if (clearConfirm) ConfirmDelete("移除 Foundry API key？", "之後開始翻譯前，需要重新輸入 API key。", { clearConfirm = false }) { controller.clearApiKey(); clearConfirm = false }
 }

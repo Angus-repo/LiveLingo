@@ -73,10 +73,10 @@ internal fun inferredSourceLanguage(record: TranscriptRecord?): String? {
             in 0x0041..0x005A, in 0x0061..0x007A -> latin++
         }
     }
-    if (hangul >= 2 && hangul >= kana) return "韓文（文字推測）"
-    if (kana >= 2) return "日文（文字推測）"
-    if (devanagari >= 2) return "天城文字語言（待確認）"
-    if (han >= 3 && (han >= latin / 3 || latin < 12)) return "中文（文字推測）"
+    if (hangul >= 2 && hangul >= kana) return "韓文"
+    if (kana >= 2) return "日文"
+    if (devanagari >= 2) return "天城文字語言・待確認"
+    if (han >= 3 && (han >= latin / 3 || latin < 12)) return "中文"
     if (latin >= 8) {
         // Latin letters alone do not identify English: Spanish, French, Hindi
         // transliteration etc. are also Latin. Require some English words.
@@ -87,10 +87,10 @@ internal fun inferredSourceLanguage(record: TranscriptRecord?): String? {
             "not", "can", "would", "could", "should", "you", "your", "for", "with",
             "but", "there", "where", "when", "why", "how", "will", "be", "to",
         )
-        return if (words.count { it in commonEnglish } >= 2) "英文（文字推測）"
-            else "拉丁字母語言（待確認）"
+        return if (words.count { it in commonEnglish } >= 2) "英文"
+            else "拉丁字母語言・待確認"
     }
-    if (han >= 3) return "中文（文字推測）"
+    if (han >= 3) return "中文"
     return null
 }
 

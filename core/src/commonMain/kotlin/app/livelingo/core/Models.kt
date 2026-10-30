@@ -15,11 +15,24 @@ enum class Language(val label: String) {
 @Serializable
 data class BackgroundKnowledge(val id: String, val name: String, val content: String)
 
+/** Prompt strategy only: GPT-Live does not expose Realtime VAD/temperature knobs. */
+@Serializable
+enum class TranslationPace(val label: String) {
+    FAST("優先即時"), BALANCED("平衡")
+}
+
+@Serializable
+enum class TranslationQuality(val label: String) {
+    FAITHFUL("忠實原文"), NATURAL("自然流暢")
+}
+
 @Serializable
 data class SessionSettings(
     val sourceLanguage: Language = Language.AUTO,
     val targetLanguage: Language = Language.ZH_TW,
     val knowledge: BackgroundKnowledge? = null,
+    val pace: TranslationPace = TranslationPace.BALANCED,
+    val quality: TranslationQuality = TranslationQuality.FAITHFUL,
 )
 
 /** Shared by the mobile UI and trusted relay; do not rely on UI-only validation. */

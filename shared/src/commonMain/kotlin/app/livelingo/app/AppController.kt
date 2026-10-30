@@ -90,6 +90,11 @@ class AppController(
         if (!mutable.value.active) changePreferences(mutable.value.preferences.copy(knowledgeId = id))
     }
 
+    fun setTranslationOptions(pace: TranslationPace, quality: TranslationQuality) {
+        if (mutable.value.busy || !mutable.value.storageAvailable) return
+        changePreferences(mutable.value.preferences.copy(pace = pace, quality = quality))
+    }
+
     private fun changePreferences(value: AppPreferences) {
         if (!mutable.value.storageAvailable) return
         try { repository.savePreferences(value); mutable.value = mutable.value.copy(preferences = value) }
@@ -242,8 +247,11 @@ class AppController(
         connection.validationError()?.let { inform("請先到「設定」完成 Foundry 連線。$it"); return }
         if (apiKey.isBlank()) { inform("請先到「設定」儲存 Foundry API key。"); return }
         val sessionApiKey = apiKey
-        val settings = SessionSettings(snapshot.preferences.source, snapshot.preferences.target,
-            snapshot.knowledge.find { it.id == snapshot.preferences.knowledgeId })
+        val settings = SessionSettings(
+            snapshot.preferences.source, snapshot.preferences.target,
+            snapshot.knowledge.find { it.id == snapshot.preferences.knowledgeId },
+            snapshot.preferences.pace, snapshot.preferences.quality,
+        )
         settings.validationError()?.let { inform(it); return }
         val now = services.currentTimeMillis()
         val record = TranscriptRecord(services.uniqueId(), "${settings.sourceLanguage.label} → ${settings.targetLanguage.label}", now, settings)
@@ -454,7 +462,7 @@ private fun connectionReport(connection: FoundryConnection, diagnostic: FoundryD
     val originalTime = Instant.fromEpochMilliseconds(timestamp).toString()
     val taiwanTime = Instant.fromEpochMilliseconds(timestamp + 8 * 60 * 60 * 1000).toString().removeSuffix("Z")
     return buildString {
-        appendLine("LiveLingo 0.1.4 · Foundry 連線診斷")
+        appendLine("LiveLingo 0.1.5 · Foundry 連線診斷")
         appendLine("時間：$originalTime（台灣時間：$taiwanTime +08:00）")
         appendLine("結果：${if (success) "成功" else "失敗"}")
         appendLine("階段：${safeDiagnosticField(diagnostic.stage, secret)}")

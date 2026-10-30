@@ -31,11 +31,11 @@ class LiveSubtitleDisplayTest {
             TranscriptFragment("in", TranscriptChannel.INPUT, 0, 100, input),
             TranscriptFragment("out", TranscriptChannel.OUTPUT, 0, 100, translation)
         ))
-        assertEquals("自動偵測（英文（文字推測））", liveSourceLanguageLabel(Language.AUTO, record("Now this is Taiwan, and India is at 4.9 trillion dollars")))
-        assertEquals("中文（文字推測）", inferredSourceLanguage(record("台灣的供應鏈是什麼？")))
-        assertEquals("日文（文字推測）", inferredSourceLanguage(record("これは日本語です")))
-        assertEquals("韓文（文字推測）", inferredSourceLanguage(record("안녕하세요 모두")))
-        assertEquals("拉丁字母語言（待確認）", inferredSourceLanguage(record("hola buenos dias amigo")))
+        assertEquals("自動偵測（英文）", liveSourceLanguageLabel(Language.AUTO, record("Now this is Taiwan, and India is at 4.9 trillion dollars")))
+        assertEquals("中文", inferredSourceLanguage(record("台灣的供應鏈是什麼？")))
+        assertEquals("日文", inferredSourceLanguage(record("これは日本語です")))
+        assertEquals("韓文", inferredSourceLanguage(record("안녕하세요 모두")))
+        assertEquals("拉丁字母語言・待確認", inferredSourceLanguage(record("hola buenos dias amigo")))
         assertEquals("自動偵測（辨識中）", liveSourceLanguageLabel(Language.AUTO, null))
         assertEquals("印度英文", liveSourceLanguageLabel(Language.INDIAN_ENGLISH, record("Now this is Taiwan")))
     }

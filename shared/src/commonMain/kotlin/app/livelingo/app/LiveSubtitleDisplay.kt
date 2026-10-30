@@ -21,7 +21,8 @@ internal fun displayCues(record: TranscriptRecord?, channel: TranscriptChannel):
             result += DisplayCue(listOf(fragment.id), fragment.startMs, fragment.endMs, fragment.text, fragment.speakerLabel)
         }
     }
-    return result.filter { it.text.isNotBlank() }.map { it.copy(text = record?.localizedText(it.text, channel) ?: it.text) }
+    val texts = record?.localizedChunks(result.map { it.text }, channel).orEmpty()
+    return result.mapIndexed { index, cue -> cue.copy(text = texts[index]) }.filter { it.text.isNotBlank() }
 }
 
 

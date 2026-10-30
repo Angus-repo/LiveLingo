@@ -11,7 +11,16 @@ data class FoundryDiagnostic(
     val httpStatus: Int? = null,
     val requestId: String? = null,
     val providerCode: String? = null,
+    val webSocketCloseCode: Int? = null,
+    val sessionCloseReason: String? = null,
 )
+
+/** Never include provider close text; it can contain speech, resource names or secrets. */
+internal fun safeSessionCloseReason(raw: String?): String? = raw?.takeIf {
+    it in setOf("close_requested", "expired", "content", "remote_hangup", "connection_lost")
+}
+
+internal fun safeWebSocketCloseCode(raw: Int?): Int? = raw?.takeIf { it in 1000..4999 }
 
 data class ConnectionProbeResult(val message: String, val diagnostic: FoundryDiagnostic)
 

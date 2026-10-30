@@ -37,12 +37,19 @@ object SubtitleExporter {
             appendLine()
         }
         appendLine("【時間戳明細】")
+        val localizedFragments = buildMap {
+            for (channel in TranscriptChannel.entries) {
+                val fragments = record.fragments.filter { it.channel == channel }.sortedBy { it.startMs }
+                val texts = record.localizedChunks(fragments.map { it.text }, channel)
+                fragments.forEachIndexed { index, fragment -> put(fragment.id, texts[index]) }
+            }
+        }
         record.fragments.sortedWith(compareBy<TranscriptFragment> { it.startMs }.thenBy { it.endMs }).forEach { fragment ->
             val channel = if (fragment.channel == TranscriptChannel.INPUT) "原文" else "譯文"
             val speaker = fragment.speakerLabel?.let(::cleanSingleLine)?.takeIf(String::isNotBlank)
             append("[${timestamp(fragment.startMs, '.')} → ${timestamp(fragment.endMs, '.')}] [$channel]")
             speaker?.let { append(" [手動：$it]") }
-            appendLine(" ${record.localizedText(cleanText(fragment.text), fragment.channel)}")
+            appendLine(" ${cleanText(localizedFragments.getValue(fragment.id))}")
         }
     }.trimEnd() + "\n"
 
@@ -71,7 +78,8 @@ object SubtitleExporter {
             }
         }
         // Keep whitespace deltas while grouping, but don't export a cue with no content.
-        return result.filter { cleanText(it.text).isNotBlank() }.map { it.copy(text = record.localizedText(it.text, channel)) }
+        val texts = record.localizedChunks(result.map { it.text }, channel)
+        return result.mapIndexed { index, cue -> cue.copy(text = texts[index]) }.filter { cleanText(it.text).isNotBlank() }
     }
 
     private fun cueText(cue: Cue): String {

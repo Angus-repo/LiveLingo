@@ -32,6 +32,7 @@ data class AppState(
     val paragraphStatus: String? = null,
     val audioInputStatus: AudioInputStatus = AudioInputStatus(),
     val streamNotice: String? = null,
+    val sessionIssue: String? = null,
 ) {
     val active: Boolean get() = phase in setOf(ConnectionPhase.CONNECTING, ConnectionPhase.LISTENING, ConnectionPhase.STOPPING)
     val busy: Boolean get() = active || connectionTesting
@@ -57,11 +58,13 @@ class AppController(
 
     init {
         try {
-            val preferences = repository.preferences()
+            val storedPreferences = repository.preferences()
+            val sourceRemoved = !storedPreferences.audioSource.selectable
+            val preferences = if (sourceRemoved) storedPreferences.copy(audioSource = AudioSource.MICROPHONE) else storedPreferences
             val knowledge = repository.knowledge()
             val history = repository.history()
             val connection = preferences.connection()
-            var setupMessage: String? = null
+            var setupMessage: String? = if (sourceRemoved) "Teams 音源已移除，已改選麥克風。請在開始前確認音源；既有逐字稿會保留。" else null
             apiKey = if (connection.validationError() == null) {
                 try { repository.apiKey(connection.webSocketUrl()) }
                 catch (_: Exception) {
@@ -69,7 +72,10 @@ class AppController(
                     ""
                 }
             } else ""
-            try { repository.migrateLegacyConnection(preferences) }
+            try {
+                if (sourceRemoved) repository.savePreferences(preferences)
+                repository.migrateLegacyConnection(preferences)
+            }
             catch (_: Exception) {
                 if (setupMessage == null) setupMessage = "既有逐字稿與背景知識已保留；舊版連線設定尚未完成清理。請確認儲存空間後重新開啟 App。"
             }
@@ -103,7 +109,7 @@ class AppController(
         changePreferences(mutable.value.preferences.copy(pace = pace, quality = quality))
     }
 
-    fun availableAudioSources(): List<AudioSource> = services.microphone.availableSources()
+    fun availableAudioSources(): List<AudioSource> = services.microphone.availableSources().filter { it.selectable }
     fun reportsAudioLevel(): Boolean = services.microphone.reportsAudioLevel()
     fun audioSourceUnavailableReason(): String? = services.microphone.unavailableReason(mutable.value.preferences.audioSource)
 
@@ -247,13 +253,13 @@ class AppController(
     }
 
     private fun recordDiagnostic(connection: FoundryConnection, secret: String, diagnostic: FoundryDiagnostic,
-                                 message: String, success: Boolean) {
+                                 message: String, success: Boolean, showDialog: Boolean = true) {
         val safeMessage = safeDiagnosticField(message, secret)
         mutable.value = mutable.value.copy(
-            message = safeMessage,
+            message = if (showDialog) safeMessage else null,
             lastConnectionReport = connectionReport(connection, diagnostic, safeMessage, success, services.currentTimeMillis(), secret),
             lastConnectionReportTitle = if (success) "連線測試成功" else "${connection.provider.label} 連線失敗",
-            showReportInMessage = true,
+            showReportInMessage = showDialog,
         )
     }
 
@@ -287,6 +293,7 @@ class AppController(
     fun start() {
         val snapshot = mutable.value
         if (snapshot.busy || sessionJob?.isActive == true || !snapshot.storageAvailable) return
+        if (!snapshot.transcriptSaved) { inform("目前逐字稿尚未完整儲存，請先匯出並確認儲存空間，再重新開啟 App。"); return }
         audioSourceUnavailableReason()?.let { inform(it); return }
         val connection = snapshot.preferences.connection()
         connection.validationError()?.let { inform("請先到「設定」完成 ${connection.provider.label} 連線。$it"); return }
@@ -312,8 +319,9 @@ class AppController(
         mutable.value = snapshot.copy(phase = ConnectionPhase.CONNECTING, current = record, transcriptSaved = true,
             history = listOf(record) + snapshot.history, message = null, lastConnectionReport = null, showReportInMessage = false,
             paragraphStatus = if (paragraphModel.isBlank()) "基本分段；AI 語意分段可至設定指定文字模型。" else "AI 語意分段：等待完整句子",
-            audioInputStatus = AudioInputStatus(), streamNotice = null)
+            audioInputStatus = AudioInputStatus(), streamNotice = null, sessionIssue = null)
         sessionJob = scope.launch {
+            var listeningStarted = false
             try {
                 // Android must create its microphone foreground service while Activity is visible,
                 // not after the potentially slow Foundry handshake.
@@ -349,6 +357,7 @@ class AppController(
                         }
                         ensureActive()
                         mutable.value = mutable.value.copy(phase = ConnectionPhase.LISTENING)
+                        listeningStarted = true
                         if (paragraphModel.isNotBlank()) paragraphJob = scope.launch {
                             while (isActive && mutable.value.current?.id == record.id && mutable.value.active) {
                                 delay(20_000)
@@ -406,7 +415,7 @@ class AppController(
                     else -> "${connection.provider.label} 連線失敗。請檢查端點、模型名稱、API key 與網路狀態；已收到的字幕已保留。"
                 }
                 (failure as? TranslationFailure)?.diagnostic?.let { diagnostic ->
-                    recordDiagnostic(connection, sessionApiKey, diagnostic, sessionFailure.orEmpty(), success = false)
+                    recordDiagnostic(connection, sessionApiKey, diagnostic, sessionFailure.orEmpty(), success = false, showDialog = !listeningStarted)
                 }
             } finally {
                 runCatching { services.microphone.stop() }
@@ -429,7 +438,10 @@ class AppController(
                 }
                 mutable.value = mutable.value.copy(
                     phase = if (sessionFailure != null) ConnectionPhase.ERROR else ConnectionPhase.IDLE,
-                    message = sessionFailure ?: mutable.value.message,
+                    // A stopped session must leave saved captions readable. Diagnostics are opt-in.
+                    message = if (listeningStarted && sessionFailure != null) null else sessionFailure ?: mutable.value.message,
+                    showReportInMessage = if (listeningStarted && sessionFailure != null) false else mutable.value.showReportInMessage,
+                    sessionIssue = sessionFailure,
                     audioInputStatus = AudioInputStatus(),
                 )
                 // Do not dismiss the Android foreground service until the final network
@@ -584,12 +596,16 @@ private fun connectionReport(connection: FoundryConnection, diagnostic: FoundryD
     val originalTime = Instant.fromEpochMilliseconds(timestamp).toString()
     val taiwanTime = Instant.fromEpochMilliseconds(timestamp + 8 * 60 * 60 * 1000).toString().removeSuffix("Z")
     return buildString {
-        appendLine("LiveLingo 0.1.7 · ${connection.provider.label} 連線診斷")
+        appendLine("LiveLingo 0.1.8 · ${connection.provider.label} 連線診斷")
         appendLine("時間：$originalTime（台灣時間：$taiwanTime +08:00）")
         appendLine("結果：${if (warning) "通知（尚未收到工作階段結束事件）" else if (success) "成功" else "失敗"}")
         appendLine("階段：${safeDiagnosticField(diagnostic.stage, secret)}")
         appendLine("分類：${safeDiagnosticField(diagnostic.code, secret)}")
         appendLine("HTTP 狀態：${diagnostic.httpStatus?.toString() ?: if (diagnostic.stage in setOf(FoundryStages.STREAM, FoundryStages.STOP)) "不適用（WebSocket 事件）" else "未取得"}")
+        if (diagnostic.stage in setOf(FoundryStages.START, FoundryStages.STREAM, FoundryStages.STOP)) {
+            appendLine("WebSocket 關閉碼：${safeWebSocketCloseCode(diagnostic.webSocketCloseCode)?.toString() ?: "未取得"}")
+            appendLine("工作階段結束原因：${safeSessionCloseReason(diagnostic.sessionCloseReason) ?: "未收到可辨識的結束原因"}")
+        }
         appendLine("認證方式：${if (connection.provider == ModelProvider.OPENAI) "Authorization: Bearer" else "api-key 標頭"}")
         appendLine("資源：${if (connection.provider == ModelProvider.OPENAI) "wss://api.openai.com/v1/live/sessions" else "wss://$endpointFamily/openai/v1/live/sessions"}")
         appendLine("${if (connection.provider == ModelProvider.OPENAI) "模型" else "部署"}名稱：已遮蔽（${connection.deployment.length} 個字元）")

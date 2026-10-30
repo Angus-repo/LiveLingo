@@ -28,6 +28,29 @@ import kotlin.test.assertTrue
 
 /** Real TLS and OkHttp handshakes catch engine failures that an injected fake socket cannot. */
 class AndroidFoundryHttpClientTest {
+    @Test fun nativeFactoryRetainsPeerCloseCodeWithoutExposingCloseText() = runBlocking {
+        Fixture().use { fixture ->
+            fixture.server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                override fun onMessage(webSocket: WebSocket, text: String) {
+                    webSocket.send("""{"type":"error","error":{"code":"content_filter"}}""")
+                    webSocket.close(1008, "private-test-key PRIVATE_TRANSCRIPT")
+                }
+            }))
+            val factory = KtorFoundrySocketFactory(fixture.client)
+            try {
+                withTimeout(10_000) {
+                    val socket = factory.open(fixture.url, "private-test-key")
+                    try {
+                        socket.send("start")
+                        assertTrue(socket.receive().orEmpty().contains("content_filter"))
+                        assertEquals(null, socket.receive())
+                        assertEquals(1008, socket.peerCloseCode())
+                    } finally { socket.cancel() }
+                }
+            } finally { factory.close() }
+        }
+    }
+
     private class Fixture : Closeable {
         private val certificate = HeldCertificate.Builder().commonName("localhost")
             .addSubjectAlternativeName("localhost").addSubjectAlternativeName("api.openai.com").build()

@@ -26,7 +26,7 @@ internal class AudioSignalMeter(private val source: AudioSource) {
             level = sqrt(windowPeak / 32768f),
             signalPresent = windowPeak > 16,
             warning = if (quietSamples >= 360_000 && source.isPlayback)
-                "已約 15 秒未偵測到可擷取的聲音。請確認正在播放且媒體音量不為零；${if (source == AudioSource.TEAMS) "Teams 會議可能使用 Android 不允許擷取的通話音訊。" else "來源 App 也可能禁止錄製。"}可停止後改用麥克風收取外放聲音。"
+                "已約 15 秒未偵測到可擷取的聲音。請確認正在播放且媒體音量不為零；來源 App 也可能禁止錄製。可停止後改用麥克風收取外放聲音。"
             else null,
         )
         windowSamples = 0

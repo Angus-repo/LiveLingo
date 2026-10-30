@@ -6,6 +6,15 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class LiveSubtitleDisplayTest {
+    @Test fun commasAreFormattedAfterJoiningStreamedFragments() {
+        val record = TranscriptRecord("r", "x", 0, SessionSettings(), listOf(
+            TranscriptFragment("1", TranscriptChannel.OUTPUT, 0, 200, "收入1,"),
+            TranscriptFragment("2", TranscriptChannel.OUTPUT, 200, 400, "234.56美元,"),
+            TranscriptFragment("3", TranscriptChannel.OUTPUT, 400, 600, " 明天继续。"),
+        ))
+        assertEquals("收入1,234.56美元，明天繼續。", liveCaptionText(record, TranscriptChannel.OUTPUT))
+    }
+
     @Test fun liveTextDoesNotBreakAtAudioChunkBoundaries() {
         val record = TranscriptRecord("r", "title", 0L, SessionSettings(), listOf(
             TranscriptFragment("p2", TranscriptChannel.INPUT, 500, 750, " trillion dollars"),

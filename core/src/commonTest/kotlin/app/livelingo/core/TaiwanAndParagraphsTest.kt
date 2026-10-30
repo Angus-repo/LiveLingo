@@ -3,6 +3,40 @@ package app.livelingo.core
 import kotlin.test.*
 
 class TaiwanAndParagraphsTest {
+    @Test fun numericCommasSurviveSeparateSubtitleCuesAndTimestampDetails() {
+        val record = TranscriptRecord("r", "x", 0, SessionSettings(), listOf(
+            TranscriptFragment("a", TranscriptChannel.OUTPUT, 0, 100, "收入1,"),
+            TranscriptFragment("b", TranscriptChannel.OUTPUT, 1000, 2000, "234.56美元,"),
+            TranscriptFragment("c", TranscriptChannel.OUTPUT, 3000, 4000, " 明天繼續。"),
+        ))
+        val srt = SubtitleExporter.srt(record, TranscriptChannel.OUTPUT)
+        assertTrue("收入1,\n" in srt)
+        assertTrue("234.56美元，\n" in srt)
+        val text = SubtitleExporter.text(record)
+        assertTrue("收入1,234.56美元，明天繼續。" in text)
+        assertFalse("收入1，" in text)
+        assertEquals(listOf("1", ",", "234"), record.localizedChunks(listOf("1", ",", "234"), TranscriptChannel.OUTPUT))
+    }
+
+    @Test fun traditionalChineseSentenceCommasAreFullWidthWithoutChangingNumbers() {
+        assertEquals("台灣，今天成長，明天繼續。", TaiwanText.convert("台湾, 今天成长,明天继续。"))
+        assertEquals("1,234.56 美元，1,00,000 盧比，4.95%", TaiwanText.convert("1,234.56 美元, 1,00,000 卢比, 4.95%"))
+        assertEquals("第一句，\n第二句，第三句", TaiwanText.convert("第一句,\n第二句， 第三句"))
+        val record = TranscriptRecord("r", "x", 0, SessionSettings(targetLanguage = Language.ENGLISH))
+        assertEquals("Hello, world", record.localizedText("Hello, world", TranscriptChannel.OUTPUT))
+    }
+
+    @Test fun traditionalCommasAppearInEveryReadableExportButNotRawFragmentsOrSrtTimes() {
+        val raw = "台湾成长, 收入1,234.56美元, 明天继续。"
+        val record = TranscriptRecord("r", "x", 0, SessionSettings(), listOf(TranscriptFragment("f", TranscriptChannel.OUTPUT, 5, 1000, raw)))
+        val expected = "台灣成長，收入1,234.56美元，明天繼續。"
+        assertTrue(expected in SubtitleExporter.text(record))
+        assertTrue(expected in SubtitleExporter.srt(record, TranscriptChannel.OUTPUT))
+        assertTrue(expected in SubtitleExporter.vtt(record, TranscriptChannel.OUTPUT))
+        assertTrue("00:00:00,005 --> 00:00:01,000" in SubtitleExporter.srt(record, TranscriptChannel.OUTPUT))
+        assertEquals(raw, record.fragments.single().text)
+    }
+
     @Test fun screenshotRegressionPreservesNumbersAndConvertsMixedScript() {
         val text = TaiwanText.convert("台湾是4.95兆美元，而印度是4.92兆美元。印度的经济体规模更大，人口几乎是台湾的六十倍。印度有更多工程师、创业公司、消费者，也有更多上市公司。")
         listOf("台灣", "經濟", "規模", "幾乎", "工程師", "消費者", "4.95", "4.92").forEach { assertTrue(it in text, text) }

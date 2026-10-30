@@ -3,8 +3,8 @@ package app.livelingo.app
 import android.Manifest
 import android.app.Activity
 import android.content.Context
-import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.Intent
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioPlaybackCaptureConfiguration
@@ -32,15 +32,10 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlinx.coroutines.*
 
-/** Policy kept separate so Teams can never silently widen to all applications or to the microphone. */
-internal data class PlaybackCapturePlan(val usages: List<Int>, val matchingUid: Int?)
-
-internal fun playbackCapturePlan(source: AudioSource, teamsUid: Int?): PlaybackCapturePlan {
-    require(source.isPlayback)
-    val uid = if (source == AudioSource.TEAMS) {
-        teamsUid?.takeIf { it >= 0 } ?: throw AudioCaptureFailure("找不到同一個使用者設定檔中的 Teams，請確認已安裝並啟用。工作設定檔中的 Teams 不能由個人設定檔擷取。")
-    } else null
-    return PlaybackCapturePlan(listOf(AudioAttributes.USAGE_MEDIA, AudioAttributes.USAGE_GAME, AudioAttributes.USAGE_UNKNOWN), uid)
+/** Android permits playback capture only for these media usages, never voice calls. */
+internal fun playbackCaptureUsages(source: AudioSource): List<Int> {
+    require(source == AudioSource.DEVICE_PLAYBACK) { "此音源不支援播放擷取。" }
+    return listOf(AudioAttributes.USAGE_MEDIA, AudioAttributes.USAGE_GAME, AudioAttributes.USAGE_UNKNOWN)
 }
 
 internal class AndroidMicrophone(private val appContext: Context) : Microphone {
@@ -74,16 +69,11 @@ internal class AndroidMicrophone(private val appContext: Context) : Microphone {
     @Volatile private var generation = 0L
 
     override fun availableSources(): List<AudioSource> =
-        if (Build.VERSION.SDK_INT >= 29) AudioSource.entries else listOf(AudioSource.MICROPHONE)
-
-    @Suppress("DEPRECATION")
-    private fun teamsUid(): Int? = try {
-        appContext.packageManager.getApplicationInfo("com.microsoft.teams", 0).takeIf { it.enabled }?.uid
-    } catch (_: PackageManager.NameNotFoundException) { null }
+        if (Build.VERSION.SDK_INT >= 29) listOf(AudioSource.MICROPHONE, AudioSource.DEVICE_PLAYBACK) else listOf(AudioSource.MICROPHONE)
 
     override fun unavailableReason(source: AudioSource): String? = when {
         source.isPlayback && Build.VERSION.SDK_INT < 29 -> "裝置播放音訊需要 Android 10 以上，請改用麥克風。"
-        source == AudioSource.TEAMS && teamsUid() == null -> "找不到此設定檔中的 Microsoft Teams。請先安裝並啟用；Teams 與 LiveLingo 必須位於同一個個人或工作設定檔。"
+        !source.selectable -> "此音源已移除，請重新選擇麥克風或裝置播放音訊。"
         else -> null
     }
 
@@ -220,10 +210,8 @@ internal class AndroidMicrophone(private val appContext: Context) : Microphone {
         if (source.isPlayback) {
             check(Build.VERSION.SDK_INT >= 29)
             val grant = projection ?: throw AudioCaptureFailure("音訊擷取授權已結束，請重新開始並授權。")
-            val plan = playbackCapturePlan(source, if (source == AudioSource.TEAMS) teamsUid() else null)
             val config = AudioPlaybackCaptureConfiguration.Builder(grant)
-            plan.usages.forEach { config.addMatchingUsage(it) }
-            plan.matchingUid?.let { config.addMatchingUid(it) }
+            playbackCaptureUsages(source).forEach { config.addMatchingUsage(it) }
             builder.setAudioPlaybackCaptureConfig(config.build())
         } else builder.setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
         val audio = builder.build()

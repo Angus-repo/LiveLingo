@@ -30,9 +30,11 @@ enum class TranslationQuality(val label: String) {
 enum class AudioSource(val label: String, val description: String) {
     MICROPHONE("麥克風", "透過目前的麥克風收取現場或喇叭播放的聲音。"),
     DEVICE_PLAYBACK("裝置播放音訊", "擷取此裝置上允許錄製的媒體聲音，不混入麥克風。其他 App 同時播放的聲音也可能被收取。"),
-    TEAMS("Microsoft Teams（嘗試擷取）", "只嘗試擷取此裝置、同一個使用者設定檔中的 Teams 播放音訊，不混入麥克風。Teams 會議若使用通話音訊或禁止錄製，Android 會阻擋擷取。"),
+    // Decode historical 0.1.7 records without rewriting their original source metadata.
+    TEAMS("Microsoft Teams（舊版音源）", "此音源已移除，請重新選擇音源。"),
     ;
     val isPlayback: Boolean get() = this != MICROPHONE
+    val selectable: Boolean get() = this != TEAMS
 }
 
 @Serializable

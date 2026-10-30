@@ -16,6 +16,27 @@ import kotlinx.serialization.encodeToString
 import kotlin.test.*
 
 class AppLogicTest {
+    @Test fun failedTranscriptWriteCannotBeOverwrittenByStartingAnotherSession() = runTest {
+        val services = configuredServices()
+        val transport = FakeTransport()
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
+        controller.start(); runCurrent()
+        val originalId = controller.state.value.current!!.id
+        services.memory.failTranscriptWrite = true
+        transport.streamFailure = assertFailsWith<TranslationFailure> {
+            transport.receiver!!(TranscriptDelta(TranscriptChannel.OUTPUT, "唯一的未儲存字幕", 0, 1000))
+        }
+        services.mic.emit(byteArrayOf(1, 0)); runCurrent()
+        controller.state.first { it.phase == ConnectionPhase.ERROR }
+        assertFalse(controller.state.value.transcriptSaved)
+        controller.start(); runCurrent()
+        assertEquals(1, transport.starts)
+        assertEquals(originalId, controller.state.value.current!!.id)
+        assertEquals("唯一的未儲存字幕", controller.state.value.current!!.fragments.single().text)
+        assertTrue("請先匯出" in controller.state.value.message.orEmpty())
+        controller.dispose()
+    }
+
     @Test fun contentFilterNoticeKeepsCaptureRunningAndMarksSavedTranscriptIncomplete() = runTest {
         val services = configuredServices()
         val transport = FakeTransport()
@@ -43,23 +64,80 @@ class AppLogicTest {
         val services = configuredServices()
         val transport = FakeTransport()
         val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
-        controller.selectAudioSource(AudioSource.TEAMS)
-        assertEquals(AudioSource.TEAMS, AppRepository(services.memory).preferences().audioSource)
-        controller.start(); runCurrent()
-        assertEquals(listOf(AudioSource.TEAMS), services.mic.selectedSources)
-        assertEquals(AudioSource.TEAMS, transport.sessionSettings.single().audioSource)
-        controller.selectAudioSource(AudioSource.MICROPHONE)
-        assertEquals(AudioSource.TEAMS, controller.state.value.preferences.audioSource)
-        assertEquals(AudioSource.TEAMS, AppRepository(services.memory).history().single().settings.audioSource)
-        assertTrue("音源：Microsoft Teams" in SubtitleExporter.text(controller.state.value.current!!))
-        controller.stop(); runCurrent()
         controller.selectAudioSource(AudioSource.DEVICE_PLAYBACK)
+        assertEquals(AudioSource.DEVICE_PLAYBACK, AppRepository(services.memory).preferences().audioSource)
         controller.start(); runCurrent()
-        assertEquals(listOf(AudioSource.TEAMS, AudioSource.DEVICE_PLAYBACK), services.mic.selectedSources)
+        assertEquals(listOf(AudioSource.DEVICE_PLAYBACK), services.mic.selectedSources)
+        assertEquals(AudioSource.DEVICE_PLAYBACK, transport.sessionSettings.single().audioSource)
+        controller.selectAudioSource(AudioSource.MICROPHONE)
+        assertEquals(AudioSource.DEVICE_PLAYBACK, controller.state.value.preferences.audioSource)
+        assertEquals(AudioSource.DEVICE_PLAYBACK, AppRepository(services.memory).history().single().settings.audioSource)
+        assertTrue("音源：裝置播放音訊" in SubtitleExporter.text(controller.state.value.current!!))
+        controller.stop(); runCurrent()
+        controller.selectAudioSource(AudioSource.MICROPHONE)
+        controller.start(); runCurrent()
+        assertEquals(listOf(AudioSource.DEVICE_PLAYBACK, AudioSource.MICROPHONE), services.mic.selectedSources)
         controller.stop(); runCurrent(); controller.dispose()
         val restored = AppController(services, FakeTransport(), StandardTestDispatcher(testScheduler))
-        assertEquals(AudioSource.DEVICE_PLAYBACK, restored.state.value.preferences.audioSource)
+        assertEquals(AudioSource.MICROPHONE, restored.state.value.preferences.audioSource)
         restored.dispose()
+    }
+
+    @Test fun removedTeamsPreferenceMigratesOnceWithoutChangingHistoricalSourceOrStartingAudio() = runTest {
+        val services = configuredServices()
+        val repository = AppRepository(services.memory)
+        repository.savePreferences(repository.preferences().copy(audioSource = AudioSource.TEAMS))
+        repository.saveTranscript(TranscriptRecord("legacy", "Meeting", 0, SessionSettings(audioSource = AudioSource.TEAMS)))
+        val controller = AppController(services, FakeTransport(), StandardTestDispatcher(testScheduler))
+        assertEquals(AudioSource.MICROPHONE, controller.state.value.preferences.audioSource)
+        assertEquals(AudioSource.MICROPHONE, repository.preferences().audioSource)
+        assertTrue(controller.state.value.message.orEmpty().contains("Teams 音源已移除"))
+        assertFalse(AudioSource.TEAMS in controller.availableAudioSources())
+        controller.selectAudioSource(AudioSource.TEAMS)
+        assertEquals(AudioSource.MICROPHONE, controller.state.value.preferences.audioSource)
+        assertEquals(AudioSource.TEAMS, repository.history().single().settings.audioSource)
+        assertEquals(0, services.mic.starts)
+        controller.dispose()
+        val restored = AppController(services, FakeTransport(), StandardTestDispatcher(testScheduler))
+        assertNull(restored.state.value.message)
+        restored.dispose()
+    }
+
+    @Test fun filteredDisconnectLeavesCaptionsReadableAndManualNextSessionDoesNotReplayAudio() = runTest {
+        val services = configuredServices()
+        val transport = FakeTransport()
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
+        controller.start(); runCurrent()
+        transport.receiver!!(TranscriptDelta(TranscriptChannel.OUTPUT, "已收到的字幕", 0, 1000))
+        val oldId = controller.state.value.current!!.id
+        transport.noticeReceiver!!(TranslationNotice("部分內容已篩選", FoundryDiagnostic(FoundryStages.STREAM, "CONTENT_FILTER")))
+        transport.streamFailure = TranslationFailure("篩選通知後斷線，字幕已保留。",
+            FoundryDiagnostic(FoundryStages.STREAM, "DISCONNECTED_AFTER_FILTER", providerCode = "content_filter", webSocketCloseCode = 1008))
+        services.mic.emit(byteArrayOf(7, 0)); runCurrent()
+        controller.state.first { it.phase == ConnectionPhase.ERROR }
+        assertEquals(1, transport.starts)
+        assertFalse(services.mic.recording)
+        assertNull(controller.state.value.message)
+        assertFalse(controller.state.value.showReportInMessage)
+        assertNotNull(controller.state.value.sessionIssue)
+        assertEquals("已收到的字幕", liveCaptionText(controller.state.value.current, TranscriptChannel.OUTPUT))
+        assertTrue(controller.state.value.transcriptSaved)
+        val report = controller.state.value.lastConnectionReport.orEmpty()
+        assertTrue("WebSocket 關閉碼：1008" in report)
+        assertTrue("工作階段結束原因：未收到" in report)
+        controller.showConnectionReport()
+        assertTrue(controller.state.value.showReportInMessage)
+        controller.dismissMessage()
+        transport.streamFailure = null
+        controller.start(); runCurrent()
+        assertEquals(2, transport.starts)
+        assertNull(controller.state.value.sessionIssue)
+        assertTrue(controller.state.value.current!!.fragments.isEmpty())
+        assertTrue(transport.audio.isEmpty())
+        val old = AppRepository(services.memory).history().first { it.id == oldId }
+        assertEquals("已收到的字幕", old.fragments.single().text)
+        assertEquals(1, old.contentFilterCount)
+        controller.stop(); runCurrent(); controller.dispose()
     }
 
     @Test fun legacyPreferencesAndTranscriptsDefaultToMicrophone() {
@@ -71,7 +149,7 @@ class AppLogicTest {
 
     @Test fun unsupportedStoredSourceDoesNotSilentlyFallBackOrConnect() = runTest {
         val services = configuredServices()
-        AppRepository(services.memory).savePreferences(AppRepository(services.memory).preferences().copy(audioSource = AudioSource.TEAMS))
+        AppRepository(services.memory).savePreferences(AppRepository(services.memory).preferences().copy(audioSource = AudioSource.DEVICE_PLAYBACK))
         services.mic.supportedSources = listOf(AudioSource.MICROPHONE)
         val transport = FakeTransport()
         val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
@@ -79,7 +157,7 @@ class AppLogicTest {
         assertEquals(0, transport.starts)
         assertEquals(0, services.mic.prepares)
         assertTrue(controller.state.value.history.isEmpty())
-        assertEquals(AudioSource.TEAMS, controller.state.value.preferences.audioSource)
+        assertEquals(AudioSource.DEVICE_PLAYBACK, controller.state.value.preferences.audioSource)
         controller.selectAudioSource(AudioSource.MICROPHONE)
         controller.start(); runCurrent()
         assertEquals(1, services.mic.starts)
@@ -107,7 +185,7 @@ class AppLogicTest {
         services.mic.prepareGate = consent
         val transport = FakeTransport()
         val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
-        controller.selectAudioSource(AudioSource.TEAMS)
+        controller.selectAudioSource(AudioSource.DEVICE_PLAYBACK)
         controller.start(); runCurrent()
         controller.stop(); runCurrent()
         consent.complete(Unit); runCurrent()
@@ -123,7 +201,7 @@ class AppLogicTest {
         val ready = CompletableDeferred<Unit>()
         val transport = FakeTransport(ready)
         val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
-        controller.selectAudioSource(AudioSource.TEAMS)
+        controller.selectAudioSource(AudioSource.DEVICE_PLAYBACK)
         controller.start(); runCurrent()
         services.mic.interruptionCallback!!("系統已停止播放音訊擷取")
         ready.complete(Unit); runCurrent()
@@ -408,7 +486,8 @@ class AppLogicTest {
         runCurrent()
         assertFalse(services.mic.recording)
         assertEquals(ConnectionPhase.ERROR, controller.state.value.phase)
-        assertEquals("麥克風被其他 App 中斷", controller.state.value.message)
+        assertEquals("麥克風被其他 App 中斷", controller.state.value.sessionIssue)
+        assertNull(controller.state.value.message)
         assertEquals(1, AppRepository(services.memory).history().size)
         controller.dispose()
     }
@@ -682,10 +761,12 @@ private class MemoryStorage : LocalStorage {
     val regular = mutableMapOf<String, String>()
     val secrets = mutableMapOf<String, String>()
     var failPreferencesWrite = false
+    var failTranscriptWrite = false
     var failFoundryKeyRead = false
     override fun read(key: String) = regular[key]
     override fun write(key: String, value: String) {
         if (key == "preferences" && failPreferencesWrite) throw IllegalStateException("simulated disk failure")
+        if (key.startsWith("transcript_") && failTranscriptWrite) throw IllegalStateException("simulated transcript disk failure")
         regular[key] = value
     }
     override fun delete(key: String) { regular.remove(key) }
@@ -739,6 +820,7 @@ private class FakeMic : Microphone {
         recording = false
     }
     fun fail(message: String) { onError?.invoke(message) }
+    fun emit(bytes: ByteArray) { onAudio?.invoke(bytes) }
 }
 
 private class FakeServices : PlatformServices {
@@ -763,6 +845,7 @@ private class FakeTransport(val ready: CompletableDeferred<Unit> = CompletableDe
     val keys = mutableListOf<String>()
     val sessionSettings = mutableListOf<SessionSettings>()
     var runFailure: Exception? = null
+    var streamFailure: Exception? = null
     var probes = 0
     val probeConnections = mutableListOf<FoundryConnection>()
     val probeKeys = mutableListOf<String>()
@@ -781,7 +864,7 @@ private class FakeTransport(val ready: CompletableDeferred<Unit> = CompletableDe
         receiver = onTranscript
         noticeReceiver = onNotice
         onReady()
-        for (chunk in audio) this.audio += chunk
+        for (chunk in audio) { streamFailure?.let { throw it }; this.audio += chunk }
     }
     override suspend fun probe(connection: FoundryConnection, apiKey: String): ConnectionProbeResult {
         probes++

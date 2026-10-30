@@ -6,22 +6,19 @@ import app.livelingo.core.AudioSource
 import kotlin.test.*
 
 class AudioCapturePolicyTest {
-    @Test fun teamsIsAlwaysUidFilteredAndCannotCaptureVoiceCommunication() {
-        val plan = playbackCapturePlan(AudioSource.TEAMS, 10234)
-        assertEquals(10234, plan.matchingUid)
-        assertEquals(setOf(AudioAttributes.USAGE_MEDIA, AudioAttributes.USAGE_GAME, AudioAttributes.USAGE_UNKNOWN), plan.usages.toSet())
-        assertFalse(AudioAttributes.USAGE_VOICE_COMMUNICATION in plan.usages)
-        assertFailsWith<AudioCaptureFailure> { playbackCapturePlan(AudioSource.TEAMS, null) }
-        assertFailsWith<AudioCaptureFailure> { playbackCapturePlan(AudioSource.TEAMS, -1) }
+    @Test fun playbackCapturesPermittedMediaUsagesAndNeverVoiceCalls() {
+        val usages = playbackCaptureUsages(AudioSource.DEVICE_PLAYBACK)
+        assertEquals(setOf(AudioAttributes.USAGE_MEDIA, AudioAttributes.USAGE_GAME, AudioAttributes.USAGE_UNKNOWN), usages.toSet())
+        assertFalse(AudioAttributes.USAGE_VOICE_COMMUNICATION in usages)
     }
 
-    @Test fun devicePlaybackDoesNotAccidentallyUseTeamsUidOrMicrophone() {
-        assertNull(playbackCapturePlan(AudioSource.DEVICE_PLAYBACK, 10234).matchingUid)
-        assertFailsWith<IllegalArgumentException> { playbackCapturePlan(AudioSource.MICROPHONE, null) }
+    @Test fun removedTeamsSourceAndMicrophoneCannotBecomeUnfilteredPlayback() {
+        assertFailsWith<IllegalArgumentException> { playbackCaptureUsages(AudioSource.TEAMS) }
+        assertFailsWith<IllegalArgumentException> { playbackCaptureUsages(AudioSource.MICROPHONE) }
     }
 
     @Test fun foregroundTypeIsSelectedIndividuallyAndRespectsAndroidVersions() {
-        listOf(AudioSource.TEAMS, AudioSource.DEVICE_PLAYBACK).forEach {
+        listOf(AudioSource.DEVICE_PLAYBACK).forEach {
             assertEquals(ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION, audioForegroundServiceType(it, 36))
             assertEquals(ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION, audioForegroundServiceType(it, 29))
             assertFailsWith<IllegalArgumentException> { audioForegroundServiceType(it, 28) }

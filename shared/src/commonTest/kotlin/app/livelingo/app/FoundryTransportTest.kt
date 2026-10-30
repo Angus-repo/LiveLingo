@@ -17,6 +17,8 @@ private class FakeFoundrySocket : FoundrySocket {
     var closed = false
     var cancelled = false
     var sendFailure: Throwable? = null
+    var closeCode: Int? = null
+    override suspend fun peerCloseCode() = closeCode
     override suspend fun send(payload: String) {
         sendFailure?.let { throw it }
         sentTypes += WireJson.parseToJsonElement(payload).jsonObject.getValue("type").jsonPrimitive.content
@@ -94,6 +96,7 @@ class FoundryTransportTest {
             val failure = assertIs<TranslationFailure>(h.result.await().exceptionOrNull())
             assertEquals("CONTENT_FILTER", failure.diagnostic?.code)
             assertEquals("content_filter", failure.diagnostic?.providerCode)
+            assertEquals("content", failure.diagnostic?.sessionCloseReason)
             assertEquals(1, h.notices.size)
             assertEquals("already received", h.transcripts.single().text)
             assertTrue(h.socket.closed && h.socket.cancelled)
@@ -107,13 +110,42 @@ class FoundryTransportTest {
         h.socket.sent.receive()
         h.socket.incoming.send(STARTED); runCurrent()
         h.socket.incoming.send("""{"type":"error","error":{"code":"content_filter"}}""")
+        h.socket.closeCode = 1008
         h.socket.incoming.close(if (nativeError) IllegalStateException("private-test-key in native error") else null)
         val failure = assertIs<TranslationFailure>(h.result.await().exceptionOrNull())
-        assertEquals("CONTENT_FILTER", failure.diagnostic?.code)
-        assertTrue(failure.message.orEmpty().contains("中斷"))
+        assertEquals("DISCONNECTED_AFTER_FILTER", failure.diagnostic?.code)
+        assertEquals(1008, failure.diagnostic?.webSocketCloseCode)
+        assertNull(failure.diagnostic?.sessionCloseReason)
+        assertTrue(failure.message.orEmpty().contains("斷線"))
         assertFalse(failure.message.orEmpty().contains("private"))
         assertTrue(h.socket.cancelled)
       }
+    }
+
+    @Test fun recoveredFilterIsNotMisreportedAsTheCauseOfALaterNetworkClose() = runTest {
+        val h = Harness(this)
+        h.socket.sent.receive()
+        h.socket.incoming.send(STARTED); runCurrent()
+        h.socket.incoming.send("""{"type":"error","error":{"code":"content_filter"}}""")
+        h.socket.incoming.send("""{"type":"session.output_transcript.delta","delta":"已恢復","start_ms":0,"end_ms":500}""")
+        h.socket.closeCode = 1001
+        h.socket.incoming.close()
+        val failure = assertIs<TranslationFailure>(h.result.await().exceptionOrNull())
+        assertEquals("CONNECTION_CLOSED", failure.diagnostic?.code)
+        assertEquals(1001, failure.diagnostic?.webSocketCloseCode)
+        assertNull(failure.diagnostic?.providerCode)
+        assertEquals("已恢復", h.transcripts.single().text)
+    }
+
+    @Test fun arbitrarySessionCloseTextIsNeverIncludedInDiagnostics() = runTest {
+        val h = Harness(this)
+        h.socket.sent.receive()
+        h.socket.incoming.send(STARTED); runCurrent()
+        h.socket.incoming.send("""{"type":"session.closed","reason":"private-test-key SECRET speech"}""")
+        val failure = assertIs<TranslationFailure>(h.result.await().exceptionOrNull())
+        assertNull(failure.diagnostic?.sessionCloseReason)
+        assertFalse("SECRET" in failure.toString())
+        assertFalse("private" in failure.toString())
     }
 
     @Test fun waitsForStartedThenSendsPcmAndDrainsFinalCaptionsAfterClose() = runTest {

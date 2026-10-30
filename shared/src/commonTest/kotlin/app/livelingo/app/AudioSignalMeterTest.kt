@@ -5,11 +5,11 @@ import kotlin.test.*
 
 class AudioSignalMeterTest {
     @Test fun quietPlaybackGetsWarningAfterFifteenSecondsAndRecoversOnSignal() {
-        val meter = AudioSignalMeter(AudioSource.TEAMS)
+        val meter = AudioSignalMeter(AudioSource.DEVICE_PLAYBACK)
         repeat(59) { assertNull(meter.accept(ByteArray(12_000))!!.warning) }
         val silent = meter.accept(ByteArray(12_000))!!
         assertFalse(silent.signalPresent)
-        assertTrue("Teams" in silent.warning.orEmpty())
+        assertTrue("來源 App" in silent.warning.orEmpty())
         val tone = ByteArray(12_000) { if (it % 2 == 0) 0 else 64 }
         val signal = meter.accept(tone)!!
         assertTrue(signal.signalPresent)

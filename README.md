@@ -1,6 +1,6 @@
 # 即時譯 LiveLingo
 
-使用 Kotlin Multiplatform + Compose Multiplatform 的 Android／iOS 即時字幕翻譯 App。**0.1.7 新增 Android 音源選擇，並修正內容安全篩選通知被當成必須斷線的錯誤。可用 Microsoft Foundry 或 OpenAI GPT-Live，由 App 直接連線，不需自架後端。**
+使用 Kotlin Multiplatform + Compose Multiplatform 的 Android／iOS 即時字幕翻譯 App。**0.1.8 精簡翻譯操作流程、加入繁中全型逗號，並改善串流中斷的診斷與下一段操作。可用 Microsoft Foundry 或 OpenAI GPT-Live，由 App 直接連線，不需自架後端。**
 
 API key 由使用者自行輸入，Android 以 Keystore 保護加密金鑰並加密保存，iOS 以 Keychain 保存。原始碼、APK、逐字稿匯出及一般設定均不內建或保存明文 API key。
 
@@ -9,17 +9,17 @@ API key 由使用者自行輸入，Android 以 Keystore 保護加密金鑰並加
 | 功能 | 說明 |
 | --- | --- |
 | 直接連線 | Microsoft Foundry／OpenAI，模型與加密金鑰獨立保存 |
-| 音源選擇 | 麥克風、裝置播放音訊、Microsoft Teams（嘗試擷取）；Android 播放音訊需 Android 10+ 與每次系統授權 |
+| 音源選擇 | 麥克風、裝置播放音訊；Android 播放音訊需 Android 10+ 與每次系統授權 |
 | 收音狀態 | Android 顯示音量訊號；播放音訊持續約 15 秒無聲時提示檢查來源、音量或擷取限制 |
 | 內容篩選處理 | 執行中收到 content_filter 時顯示片段不完整提示，保留仍可用的會話；服務正式結束時才釋放收音與連線 |
-| 連線診斷 | 不開啟麥克風測試連線，顯示錯誤階段與可取得的 HTTP 狀態碼 |
+| 連線診斷 | 不開啟麥克風測試連線，顯示錯誤階段、HTTP 狀態、WebSocket 關閉碼與服務回報的結束原因 |
 | 來源語言 | 自動、英文、印度英文、繁體中文、日文、韓文；自動模式於收到字幕後顯示文字推定語言 |
 | 目標語言 | 英文、印度英文、繁體中文、日文、韓文 |
 | 背景知識 | 管理多組場景與術語，翻譯前選擇一組或不使用 |
-| 即時字幕 | 原文在上、譯文在下；依時間由舊至新排列並自動捲至最新，文字不再按每段音訊換行，畫面不顯示時間戳 |
+| 即時字幕 | 譯文優先顯示，原文在下；依時間由舊至新排列並自動捲至最新，文字不再按每段音訊換行，畫面不顯示時間戳 |
 | 逐字稿 | 自動保存在裝置，保留原文與譯文各自時間戳，支援歷史記錄、重新命名與刪除 |
 | 匯出 | SRT／WebVTT 保留時間戳，TXT 含閱讀段落與時間明細，JSON 保留原始片段及 AI 段落位置 |
-| 繁中校正 | 目標選繁中台灣時，提示詞加本機 OpenCC 字詞資料轉換；保留數字與原始片段 |
+| 繁中校正 | 目標選繁中台灣時，提示詞加本機 OpenCC 字詞轉換與全型句讀逗號；保留數字分隔符、時間戳與原始片段 |
 | AI 語意分段 | 使用所選服務的文字模型判斷原文、譯文的段落位置；未設定時採基本句子分段 |
 | 發言者 | 手動標記接下來收到的原文，或於停止後修正 |
 | Android 背景翻譯 | 前景啟動錄音服務後，可切換 App／鎖定螢幕，從通知停止並儲存；iOS 仍為前景翻譯 |
@@ -48,37 +48,53 @@ API key 由使用者自行輸入，Android 以 Keystore 保護加密金鑰並加
 
 API key 儲存後不會重新顯示。只修改部署名稱時，API key 留空可保留原值；變更資源端點時必須重新輸入對應 key，避免將舊 key 傳給另一個資源。若按「移除 API key」，再次翻譯前須重新輸入。
 
-## 0.1.7 音源選擇
+## 0.1.8 操作與排版
 
-在「即時翻譯 → 準備這一場對話 → 音源」選擇，停止後才能切換。選擇會保存，工作階段及 TXT／JSON 也記錄實際選定音源；舊設定與逐字稿預設為麥克風。
+- 語言與音源先選；「聽到的語言 → 翻譯成」直接呈現方向，較長的語言名稱可換行。
+- 移除大幅首頁橫幅，縮短頂部列。「更多選項」收納背景知識、速度、品質；收音說明可按需展開。
+- 開始／取消／停止按鈕固定在捲動區下方、導覽列上方。未設定連線時直接前往設定，連線中可取消，整理字幕期間避免重複開始。
+- 收音時以字幕為主；結束後保留上一段字幕與「調整設定」、「開始下一段」。中斷不再用彈出視窗遮住字幕，可按「查看診斷」。
+- 下一段是使用者手動開始的新工作階段，前一份逐字稿保留在歷史。沒有自動重連、音訊補送或背景重試。未儲存的字幕存在時禁止新場次覆蓋記憶體中的唯一副本。
+
+### 繁中逗號
+
+繁中台灣字幕中的句讀逗號使用 `，`，移除逗號後的多餘半形空白。數字之間的逗號仍保留，例如 `1,234.56`、`1,00,000`，不推算或改寫數值。非繁中語言不受影響。即時顯示、歷史閱讀、TXT、SRT、WebVTT 採相同規則，跨音訊分片／字幕 cue 的數字逗號也保留；JSON 原始片段不變，SRT 時間戳的半形逗號不變。
+
+### 音源
+
+在「即時翻譯 → 準備翻譯 → 音源」選擇，停止後才能切換。選擇會保存，工作階段及 TXT／JSON 也記錄實際選定音源。
 
 | 音源 | 用法與限制 |
 | --- | --- |
-| 麥克風 | 收取目前麥克風的聲音，包含現場對話或外放音訊；延續原有背景與鎖螢幕收音 |
-| 裝置播放音訊 | 只收取裝置上允許擷取的媒體播放聲音，不混入麥克風；其他 App 同時播放的媒體也可能被收取 |
-| Microsoft Teams（嘗試擷取） | 以 Teams 的 UID 篩選，只接收同一個使用者設定檔中的 Teams 允許擷取的音訊。未安裝／停用時提示且不能開始，不會改抓其他 App 或偷偷開麥克風 |
+| 麥克風 | 收取目前麥克風的聲音，包含現場對話或外放音訊；Android 支援背景與鎖螢幕收音 |
+| 裝置播放音訊 | Android 10+ 收取允許擷取的媒體播放聲音，不混入麥克風；其他 App 同時播放的媒體也可能被收取 |
 
-**Teams 選項不代表一定能錄到 Teams 會議。** Android 公開 AudioPlaybackCapture 只允許 `USAGE_MEDIA`、`USAGE_GAME`、`USAGE_UNKNOWN` 且允許其他 App 擷取的播放器；`USAGE_VOICE_COMMUNICATION` 等通話用途不在允許範圍內。Teams 若使用通話用途或禁止錄製，便無法透過此功能取得會議音訊。此版本未串接 Microsoft Graph、Teams 媒體機器人，也不能擷取另一台電腦上的 Teams。可改以麥克風收取外放聲音；若同機 Teams 占用麥克風，可能需要由另一台裝置外放。
+Teams 選項及套件查詢、UID 擷取程式已移除。若 0.1.7 儲存的是 Teams，升級後提示改選麥克風，需使用者開始才會收音；不會擴大成所有 App 的播放擷取。歷史逐字稿保留舊音源資料。
 
-Android 10+ 的播放擷取需要錄音權限，以及每次開始時的系統螢幕分享／錄製授權。LiveLingo **只建立音訊擷取，不建立虛擬顯示器、不讀取或傳送畫面**。Android 14+ 的流程為先取得同意，再啟動 `mediaProjection` 前景服務，最後使用一次性授權建立擷取。Teams 與 LiveLingo 必須在同一個個人／工作設定檔，不能跨設定檔取得音訊。
+Android 公開 AudioPlaybackCapture 只允許 `USAGE_MEDIA`、`USAGE_GAME`、`USAGE_UNKNOWN` 且來源允許其他 App 擷取。通話用途與禁止錄製的內容可能無聲，App 不能繞過來源的限制。
 
-系統撤回授權、其他 App 開始分享或鎖定螢幕時，播放音訊擷取可能停止；App 會結束收音並保留已收到的字幕。每次開始須重新授權，取消或拒絕授權時不連接模型服務。音量條僅表示有音訊訊號，不能證明 Teams 會議可擷取或有辨識出人聲。持續約 15 秒無聲只顯示提示，不將靜音直接當作被封鎖，也不自動改變音源。
+播放擷取需要錄音權限，以及每次開始的螢幕分享／錄製授權。LiveLingo **只建立音訊擷取，不建立虛擬顯示器、不讀取或傳送畫面**。Android 14+ 先取得同意，再啟動 `mediaProjection` 前景服務，最後使用一次性授權建立擷取。撤回授權或鎖定螢幕時可能停止；取消或拒絕時不連線。音量條只表示音訊訊號；約 15 秒無聲會提示，不自動改變音源。iOS 與 Android 8／9 仍只提供麥克風。
 
-iOS 與 Android 8／9 仍只提供麥克風。版本 `0.1.7`／versionCode `8`；驗證結果見 [BUILD_STATUS.md](BUILD_STATUS.md)。
+實作依據：[Android 音訊播放擷取](https://developer.android.com/media/platform/av-capture)、[前景服務類型與授權順序](https://developer.android.com/develop/background-work/services/fgs/service-types#media-projection)、[MediaProjection 資源回收](https://developer.android.com/media/grow/media-projection#resource-recovery)。
 
-實作依據：[Android 音訊播放擷取](https://developer.android.com/media/platform/av-capture)、[前景服務類型與授權順序](https://developer.android.com/develop/background-work/services/fgs/service-types#media-projection)、[MediaProjection 終止與資源回收](https://developer.android.com/media/grow/media-projection#resource-recovery)。
+### 中斷與內容篩選
 
-### 0.1.7 content_filter 修正
+0.1.7 已修正「僅收到篩選通知便由 App 主動斷線」的錯誤。這次提供的 0.1.7 報告屬於**篩選通知後傳輸連線也已中斷**，沒有足夠資訊確認是服務的內容終止或其他傳輸原因。0.1.8 明確區分：
 
-0.1.6 將每個 `error` 事件都丟出例外，造成原本可能仍可用的 GPT-Live 工作階段被 App 提前關閉，並錯誤提示檢查部署或權限。
+| 觀察到的事件 | 處理 |
+| --- | --- |
+| `content_filter`，連線仍可用 | 提示部分片段不完整，同一連線繼續接收後續字幕 |
+| `session.closed(reason=content)` | 分類 `CONTENT_FILTER`，記錄服務確定回報的 `content` 原因，停止收音 |
+| 篩選通知後斷線，尚未恢復字幕且沒有正式結束原因 | 分類 `DISCONNECTED_AFTER_FILTER`，保留最近的篩選錯誤碼與可取得的 WebSocket 關閉碼；不宣稱篩選是斷線的確定原因 |
+| 篩選後已恢復字幕，稍後另行斷線 | 依本次連線事件分類，舊篩選仍保留在逐字稿的不完整標記 |
 
-- 已啟動的會話收到 `content_filter` 時，顯示非阻擋式通知並繼續讀取原連線的後續事件。後續有字幕時正常呈現，不補造服務阻擋的片段。
-- 收到 `session.closed` 且 `reason=content`、斷線或逾時時停止；尚未收到 `session.started` 的內容篩選錯誤仍阻擋啟動，避免在模型不可用時錄音。
-- 診斷使用 `CONTENT_FILTER`，不再把它當作一般部署或金鑰錯誤；串流事件沒有 HTTP 回應碼時明示不適用。HTTP 啟動失敗仍保留實際 HTTP 狀態。
-- 篩選通知次數與逐字稿一起儲存，歷史、TXT、JSON 顯示部分片段可能不完整；原有字幕及時間戳保留。
-- 不自動重連、重送被阻擋音訊或改變服務端篩選設定。若服務終止一般對話且反覆發生，可將診斷交由 Foundry 資源管理者確認；App 無法判定或消除每個服務端誤判。
+報告只輸出數字關閉碼及已知的工作階段原因，不輸出伺服器關閉文字、音訊、逐字稿、背景知識或金鑰。沒有收到的欄位明示未取得，不使用 App 自己清理時產生的關閉碼冒充服務回報。
+
+真正由服務結束的工作階段無法從 App 保持開啟，已阻擋內容也不能復原。若一般對話反覆中斷，請使用新版診斷由資源管理者核對服務端記錄。本版本不改變服務端篩選設定，也不承諾消除服務端誤判；尚未使用真實憑證重現使用者的案例。
 
 依據：[GPT-Live 內容審核與工作階段生命週期](https://developers.openai.com/api/docs/guides/live-conversations#handle-moderation)、[Microsoft Foundry GPT-Live 錯誤與結束事件](https://learn.microsoft.com/en-us/azure/foundry/openai/gpt-live-reference#error-handling)。
+
+版本 `0.1.8`／versionCode `9`；驗證結果見 [BUILD_STATUS.md](BUILD_STATUS.md)。
 
 ## 0.1.6 繁中、AI 分段與服務切換
 

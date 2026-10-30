@@ -59,6 +59,32 @@ class ProtocolAndInstructionsTest {
     }
 
     @Test
+    fun paceAndQualityModesChangeOnlyInstructionsAndRetainNumericGuardrails() {
+        for (pace in TranslationPace.entries) for (quality in TranslationQuality.entries) {
+            val settings = SessionSettings(pace = pace, quality = quality)
+            val prompt = translationInstructions(settings)
+            assertTrue(prompt.contains("numbers, currencies, units, dates and quantities exactly"))
+            assertTrue(prompt.contains("Never infer a missing number"))
+            assertTrue(prompt.contains("Do not greet"))
+            val payload = WireJson.parseToJsonElement(foundryStartPayload(FoundryConnection("https://example.openai.azure.com"), settings)).jsonObject
+            val session = payload.getValue("session").jsonObject
+            assertEquals(setOf("model", "instructions", "audio", "delegation"), session.keys)
+        }
+        assertTrue(translationInstructions(SessionSettings(pace = TranslationPace.FAST)).contains("Low-latency interpretation"))
+        assertTrue(translationInstructions(SessionSettings(pace = TranslationPace.BALANCED)).contains("Balanced interpretation"))
+        assertTrue(translationInstructions(SessionSettings(quality = TranslationQuality.FAITHFUL)).contains("Strict faithfulness"))
+        assertTrue(translationInstructions(SessionSettings(quality = TranslationQuality.NATURAL)).contains("Natural fluency"))
+    }
+
+    @Test
+    fun legacyTranscriptCanReadNewModesWithDefaults() {
+        val old = """{"sourceLanguage":"AUTO","targetLanguage":"ZH_TW","knowledge":null}"""
+        val settings = WireJson.decodeFromString<SessionSettings>(old)
+        assertEquals(TranslationPace.BALANCED, settings.pace)
+        assertEquals(TranslationQuality.FAITHFUL, settings.quality)
+    }
+
+    @Test
     fun allConcreteTargetsProduceTranslationPolicy() {
         Language.entries.filter { it != Language.AUTO }.forEach { target ->
             assertTrue(translationInstructions(SessionSettings(targetLanguage = target)).contains("simultaneous speech interpreter"))

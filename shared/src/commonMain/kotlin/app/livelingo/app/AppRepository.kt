@@ -12,6 +12,8 @@ data class AppPreferences(
     val source: Language = Language.AUTO,
     val target: Language = Language.ZH_TW,
     val knowledgeId: String? = null,
+    val pace: TranslationPace = TranslationPace.BALANCED,
+    val quality: TranslationQuality = TranslationQuality.FAITHFUL,
 )
 
 @Serializable

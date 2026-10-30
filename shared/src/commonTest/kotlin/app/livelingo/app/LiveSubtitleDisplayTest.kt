@@ -18,7 +18,7 @@ class LiveSubtitleDisplayTest {
     }
 
     @Test fun liveTextNormalizesProviderNewlinesOnlyForDisplay() {
-        val text = "Now this Taiwan\\n\\n  4.95 trillion dollars"
+        val text = "Now this Taiwan\n\n  4.95 trillion dollars"
         val record = TranscriptRecord("r", "title", 0, SessionSettings(), listOf(
             TranscriptFragment("p1", TranscriptChannel.INPUT, 0, 200, text)
         ))

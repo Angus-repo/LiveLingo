@@ -112,7 +112,7 @@ GPT-Live 回傳的是帶時間範圍的串流片段，沒有每個字的精準�
 
 ## 驗證狀態
 
-0.1.3 的 77 項自動化測試通過，其中 9 項使用實際 TLS 與 Android 所用的 OkHttp 引擎，涵蓋正式連線工廠的 api-key 認證、WebSocket 握手、錯誤碼及金鑰遮蔽。本版雙平台 CI 結果見建置紀錄；實機與真實 Foundry 連線尚待驗證。
+0.1.3 的 77 項自動化測試通過，其中 9 項使用實際 TLS 與 Android 所用的 OkHttp 引擎，涵蓋正式連線工廠的 api-key 認證、WebSocket 握手、錯誤碼及金鑰遮蔽。GitHub Actions 的共用測試、Android APK 與 iOS ARM64 模擬器 App 編譯皆通過。實機與真實 Foundry 連線尚待驗證。
 
 實際執行結果見 [BUILD_STATUS.md](BUILD_STATUS.md)，實機驗收步驟見 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)。沒有真實 Foundry 憑證時，離線協定與流程測試不能取代模型連線及翻譯品質驗證。
 

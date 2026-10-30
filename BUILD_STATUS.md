@@ -45,7 +45,15 @@ Android 開發測試 APK：`LiveLingo-0.1.3.apk`，12,637,813 bytes。
 
 ## GitHub Actions
 
-0.1.3 的共用測試、Android 與 iOS 工作待本次提交觸發及確認。此處尚未將前版 iOS 成功結果當成本版驗證。
+[Run 41066607510](https://github.com/Angus-repo/LiveLingo/actions/runs/41066607510) 的三個工作全部成功，驗證程式碼 commit：`a4f41be620160733bc21c27d1b577b1b1a2251f9`。
+
+| 工作 | 結果 |
+| --- | --- |
+| shared-tests | 無 Android SDK 的 headless core 測試通過 |
+| android | Android APK 建置、shared 單元測試及 APK artifact 上傳通過 |
+| ios | Kotlin/Native framework 及未簽章 ARM64 模擬器 App 編譯通過 |
+
+iOS 實際使用 Xcode 16.4（16F6）、iOS Simulator 18.5 SDK，Xcode 日誌回報 `BUILD SUCCEEDED`。
 
 ## 尚待驗證
 
@@ -53,4 +61,4 @@ Android 開發測試 APK：`LiveLingo-0.1.3.apk`，12,637,813 bytes。
 
 尚未做 Android／iOS 實機麥克風、背景切換與長時間會話驗證。iPhone 簽章與實機安裝仍須使用自己的 Apple Developer Team。
 
-iOS 專案宣告最低 16.0；前版 linker 提示 Skiko 內 ICU 資料物件以 iOS Simulator 17.2 編譯。模擬器編譯成功不代表已驗證 iOS 16 的執行相容性，發佈前需完成最低支援版本的實機驗證。
+iOS 專案宣告最低 16.0；此次 linker 提示 Skiko 內 ICU 資料物件以 iOS Simulator 17.2 編譯。模擬器編譯成功不代表已驗證 iOS 16 的執行相容性，發佈前需完成最低支援版本的實機驗證。

@@ -19,6 +19,7 @@ data class AppPreferences(
     val foundryTextModel: String = "",
     val openaiTextModel: String = "gpt-4.1-mini",
     val aiParagraphs: Boolean = true,
+    val audioSource: AudioSource = AudioSource.MICROPHONE,
 )
 
 fun AppPreferences.connection(): FoundryConnection = if (provider == ModelProvider.OPENAI)

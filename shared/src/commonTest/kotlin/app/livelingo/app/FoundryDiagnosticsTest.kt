@@ -14,6 +14,16 @@ private class SocketTimeoutException : Exception("private-key")
 private class ProtocolException(message: String) : Exception(message)
 
 class FoundryDiagnosticsTest {
+    @Test fun httpContentFilterIsNotMisclassifiedAsAuthenticationOrEndpointFailure() {
+        val fields = safeJsonErrorFields("""{"error":{"code":"BadRequest","message":"private transcript","innererror":{"code":"ResponsibleAIPolicyViolation"}}}""")
+        assertEquals("content_filter", fields.providerCode)
+        val failure = httpTranslationFailure(400, FoundryStages.HANDSHAKE, fields.providerCode)
+        assertEquals("CONTENT_FILTER", failure.diagnostic?.code)
+        assertEquals(400, failure.diagnostic?.httpStatus)
+        assertTrue(failure.message.orEmpty().contains("內容安全篩選"))
+        assertFalse(failure.message.orEmpty().contains("private"))
+    }
+
     @Test fun classifiesHttpStatusesWithoutExposingResponseText() {
         for (status in listOf(302, 400, 401, 403, 404, 408, 409, 429, 500, 503, 504)) {
             val failure = classifyFoundryFailure(TestHttpFailure(status, "DeploymentNotFound", "12345678-1234-1234-1234-123456789abc"), FoundryStages.HANDSHAKE)

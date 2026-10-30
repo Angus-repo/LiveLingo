@@ -16,6 +16,148 @@ import kotlinx.serialization.encodeToString
 import kotlin.test.*
 
 class AppLogicTest {
+    @Test fun contentFilterNoticeKeepsCaptureRunningAndMarksSavedTranscriptIncomplete() = runTest {
+        val services = configuredServices()
+        val transport = FakeTransport()
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
+        controller.start(); runCurrent()
+        transport.noticeReceiver!!(TranslationNotice("Foundry 已阻擋部分內容，等待後續事件。", FoundryDiagnostic(FoundryStages.STREAM, "CONTENT_FILTER", providerCode = "content_filter")))
+        assertEquals(ConnectionPhase.LISTENING, controller.state.value.phase)
+        assertTrue(services.mic.recording)
+        assertNull(controller.state.value.message) // The notice does not cover captions with a modal.
+        assertEquals(1, AppRepository(services.memory).history().single().contentFilterCount)
+        assertTrue(controller.state.value.lastConnectionReport.orEmpty().contains("不適用（WebSocket 事件）"))
+        assertTrue(controller.state.value.lastConnectionReport.orEmpty().contains("通知（"))
+        transport.receiver!!(TranscriptDelta(TranscriptChannel.OUTPUT, "後續字幕", 1000, 2000))
+        assertTrue(controller.state.value.streamNotice.orEmpty().contains("後續字幕已繼續"))
+        controller.stop(); controller.state.first { it.phase == ConnectionPhase.IDLE }
+        val record = AppRepository(services.memory).history().single()
+        assertEquals(1, record.contentFilterCount)
+        assertEquals("後續字幕", record.fragments.single().text)
+        assertTrue("部分片段可能不完整" in SubtitleExporter.text(record))
+        assertEquals(1, transport.starts)
+        controller.dispose()
+    }
+
+    @Test fun audioSourcePersistsAndIsPinnedForTheEntireSession() = runTest {
+        val services = configuredServices()
+        val transport = FakeTransport()
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
+        controller.selectAudioSource(AudioSource.TEAMS)
+        assertEquals(AudioSource.TEAMS, AppRepository(services.memory).preferences().audioSource)
+        controller.start(); runCurrent()
+        assertEquals(listOf(AudioSource.TEAMS), services.mic.selectedSources)
+        assertEquals(AudioSource.TEAMS, transport.sessionSettings.single().audioSource)
+        controller.selectAudioSource(AudioSource.MICROPHONE)
+        assertEquals(AudioSource.TEAMS, controller.state.value.preferences.audioSource)
+        assertEquals(AudioSource.TEAMS, AppRepository(services.memory).history().single().settings.audioSource)
+        assertTrue("音源：Microsoft Teams" in SubtitleExporter.text(controller.state.value.current!!))
+        controller.stop(); runCurrent()
+        controller.selectAudioSource(AudioSource.DEVICE_PLAYBACK)
+        controller.start(); runCurrent()
+        assertEquals(listOf(AudioSource.TEAMS, AudioSource.DEVICE_PLAYBACK), services.mic.selectedSources)
+        controller.stop(); runCurrent(); controller.dispose()
+        val restored = AppController(services, FakeTransport(), StandardTestDispatcher(testScheduler))
+        assertEquals(AudioSource.DEVICE_PLAYBACK, restored.state.value.preferences.audioSource)
+        restored.dispose()
+    }
+
+    @Test fun legacyPreferencesAndTranscriptsDefaultToMicrophone() {
+        val old = WireJson.decodeFromString<AppPreferences>("""{"source":"ENGLISH","target":"ZH_TW"}""")
+        assertEquals(AudioSource.MICROPHONE, old.audioSource)
+        val session = WireJson.decodeFromString<SessionSettings>("""{"sourceLanguage":"ENGLISH"}""")
+        assertEquals(AudioSource.MICROPHONE, session.audioSource)
+    }
+
+    @Test fun unsupportedStoredSourceDoesNotSilentlyFallBackOrConnect() = runTest {
+        val services = configuredServices()
+        AppRepository(services.memory).savePreferences(AppRepository(services.memory).preferences().copy(audioSource = AudioSource.TEAMS))
+        services.mic.supportedSources = listOf(AudioSource.MICROPHONE)
+        val transport = FakeTransport()
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
+        controller.start(); runCurrent()
+        assertEquals(0, transport.starts)
+        assertEquals(0, services.mic.prepares)
+        assertTrue(controller.state.value.history.isEmpty())
+        assertEquals(AudioSource.TEAMS, controller.state.value.preferences.audioSource)
+        controller.selectAudioSource(AudioSource.MICROPHONE)
+        controller.start(); runCurrent()
+        assertEquals(1, services.mic.starts)
+        controller.stop(); runCurrent(); controller.dispose()
+    }
+
+    @Test fun deniedPlaybackConsentReportsSafeReasonAndReleasesWithoutNetwork() = runTest {
+        val services = configuredServices()
+        services.mic.prepareFailure = AudioCaptureFailure("未授權音訊擷取，尚未連線或開始收音。")
+        val transport = FakeTransport()
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
+        controller.selectAudioSource(AudioSource.DEVICE_PLAYBACK)
+        controller.start(); runCurrent()
+        assertEquals(ConnectionPhase.ERROR, controller.state.value.phase)
+        assertEquals("未授權音訊擷取，尚未連線或開始收音。", controller.state.value.message)
+        assertEquals(0, transport.starts)
+        assertEquals(0, services.mic.starts)
+        assertEquals(1, services.mic.releases)
+        controller.dispose()
+    }
+
+    @Test fun cancelledConsentCannotStartCaptureAfterLateGrant() = runTest {
+        val services = configuredServices()
+        val consent = CompletableDeferred<Unit>()
+        services.mic.prepareGate = consent
+        val transport = FakeTransport()
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
+        controller.selectAudioSource(AudioSource.TEAMS)
+        controller.start(); runCurrent()
+        controller.stop(); runCurrent()
+        consent.complete(Unit); runCurrent()
+        assertEquals(ConnectionPhase.IDLE, controller.state.value.phase)
+        assertEquals(0, transport.starts)
+        assertEquals(0, services.mic.starts)
+        assertEquals(1, services.mic.releases)
+        controller.dispose()
+    }
+
+    @Test fun projectionRevokedDuringHandshakeStopsBeforeAudioStarts() = runTest {
+        val services = configuredServices()
+        val ready = CompletableDeferred<Unit>()
+        val transport = FakeTransport(ready)
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
+        controller.selectAudioSource(AudioSource.TEAMS)
+        controller.start(); runCurrent()
+        services.mic.interruptionCallback!!("系統已停止播放音訊擷取")
+        ready.complete(Unit); runCurrent()
+        assertEquals(ConnectionPhase.ERROR, controller.state.value.phase)
+        assertEquals(0, services.mic.starts)
+        assertEquals(1, services.mic.releases)
+        assertEquals("系統已停止播放音訊擷取", controller.state.value.message)
+        controller.dispose()
+    }
+
+    @Test fun captureStatusDoesNotOutliveItsSessionAndRevocationSavesTranscript() = runTest {
+        val services = configuredServices()
+        val transport = FakeTransport()
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
+        controller.selectAudioSource(AudioSource.DEVICE_PLAYBACK)
+        controller.start(); runCurrent()
+        val oldStatus = services.mic.statusCallback!!
+        val oldInterruption = services.mic.interruptionCallback!!
+        oldStatus(AudioInputStatus(.5f, true))
+        assertTrue(controller.state.value.audioInputStatus.signalPresent)
+        transport.receiver!!(TranscriptDelta(TranscriptChannel.INPUT, "Meeting audio", 0, 1000))
+        services.mic.interruptionCallback!!("已撤回擷取授權")
+        controller.state.first { it.phase == ConnectionPhase.ERROR }
+        assertEquals("Meeting audio", AppRepository(services.memory).history().single().fragments.single().text)
+        assertFalse(controller.state.value.audioInputStatus.signalPresent)
+        controller.selectAudioSource(AudioSource.MICROPHONE)
+        controller.start(); runCurrent()
+        oldStatus(AudioInputStatus(1f, true, "stale warning"))
+        oldInterruption("stale projection revocation"); runCurrent()
+        assertEquals(AudioInputStatus(), controller.state.value.audioInputStatus)
+        assertEquals(ConnectionPhase.LISTENING, controller.state.value.phase)
+        controller.stop(); runCurrent(); controller.dispose()
+    }
+
     @Test fun providersKeepIndependentKeysModelsAndSurviveRestart() = runTest {
         val services = configuredServices()
         val transport = FakeTransport()
@@ -202,7 +344,7 @@ class AppLogicTest {
         assertEquals(ConnectionPhase.ERROR, controller.state.value.phase)
         assertEquals(0, transport.starts)
         assertEquals(0, services.mic.starts)
-        assertTrue(controller.state.value.message.orEmpty().contains("背景翻譯麥克風"))
+        assertTrue(controller.state.value.message.orEmpty().contains("背景翻譯音源"))
         controller.dispose()
     }
 
@@ -555,6 +697,19 @@ private class MemoryStorage : LocalStorage {
 }
 
 private class FakeMic : Microphone {
+    var supportedSources: List<AudioSource> = AudioSource.entries
+    val selectedSources = mutableListOf<AudioSource>()
+    var statusCallback: ((AudioInputStatus) -> Unit)? = null
+    var interruptionCallback: ((String) -> Unit)? = null
+    var releases = 0
+    override fun availableSources(): List<AudioSource> = supportedSources
+    override suspend fun prepareSource(source: AudioSource, onStatus: (AudioInputStatus) -> Unit, onError: (String) -> Unit) {
+        selectedSources += source
+        statusCallback = onStatus
+        interruptionCallback = onError
+        super.prepareSource(source, onStatus, onError)
+    }
+    override fun releaseSession() { releases++ }
     var recording = false
     var starts = 0
     var prepares = 0
@@ -615,7 +770,8 @@ private class FakeTransport(val ready: CompletableDeferred<Unit> = CompletableDe
     var probeReady = CompletableDeferred(Unit)
     var probeCleanup: CompletableDeferred<Unit>? = null
     var probeInCleanup = false
-    override suspend fun run(connection: FoundryConnection, apiKey: String, settings: SessionSettings, audio: ReceiveChannel<ByteArray>, onReady: suspend () -> Unit, onTranscript: suspend (TranscriptDelta) -> Unit) {
+    var noticeReceiver: (suspend (TranslationNotice) -> Unit)? = null
+    override suspend fun run(connection: FoundryConnection, apiKey: String, settings: SessionSettings, audio: ReceiveChannel<ByteArray>, onReady: suspend () -> Unit, onTranscript: suspend (TranscriptDelta) -> Unit, onNotice: suspend (TranslationNotice) -> Unit) {
         starts++
         connections += connection
         keys += apiKey
@@ -623,6 +779,7 @@ private class FakeTransport(val ready: CompletableDeferred<Unit> = CompletableDe
         runFailure?.let { throw it }
         ready.await()
         receiver = onTranscript
+        noticeReceiver = onNotice
         onReady()
         for (chunk in audio) this.audio += chunk
     }

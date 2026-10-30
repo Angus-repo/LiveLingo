@@ -27,6 +27,15 @@ enum class TranslationQuality(val label: String) {
 }
 
 @Serializable
+enum class AudioSource(val label: String, val description: String) {
+    MICROPHONE("麥克風", "透過目前的麥克風收取現場或喇叭播放的聲音。"),
+    DEVICE_PLAYBACK("裝置播放音訊", "擷取此裝置上允許錄製的媒體聲音，不混入麥克風。其他 App 同時播放的聲音也可能被收取。"),
+    TEAMS("Microsoft Teams（嘗試擷取）", "只嘗試擷取此裝置、同一個使用者設定檔中的 Teams 播放音訊，不混入麥克風。Teams 會議若使用通話音訊或禁止錄製，Android 會阻擋擷取。"),
+    ;
+    val isPlayback: Boolean get() = this != MICROPHONE
+}
+
+@Serializable
 data class SessionSettings(
     val sourceLanguage: Language = Language.AUTO,
     val targetLanguage: Language = Language.ZH_TW,
@@ -34,6 +43,7 @@ data class SessionSettings(
     val pace: TranslationPace = TranslationPace.BALANCED,
     val quality: TranslationQuality = TranslationQuality.FAITHFUL,
     val provider: ModelProvider = ModelProvider.FOUNDRY,
+    val audioSource: AudioSource = AudioSource.MICROPHONE,
 )
 
 /** Shared by the mobile UI and trusted relay; do not rely on UI-only validation. */
@@ -80,6 +90,7 @@ data class TranscriptRecord(
     val settings: SessionSettings,
     val fragments: List<TranscriptFragment> = emptyList(),
     val paragraphLayouts: List<ParagraphLayout> = emptyList(),
+    val contentFilterCount: Int = 0,
 )
 
 /** Breaks are character offsets into an exact source snapshot. No model-rewritten text is stored. */

@@ -35,6 +35,7 @@ private class Harness(scope: CoroutineScope, val socket: FakeFoundrySocket = Fak
     val audio = Channel<ByteArray>(10)
     val result = CompletableDeferred<Result<Unit>>()
     val transcripts = mutableListOf<TranscriptDelta>()
+    val notices = mutableListOf<TranslationNotice>()
     var readyCount = 0
     var url: String? = null
     var apiKey: String? = null
@@ -42,13 +43,79 @@ private class Harness(scope: CoroutineScope, val socket: FakeFoundrySocket = Fak
     val job = scope.launch {
         result.complete(runCatching {
             transport.run(FoundryConnection("https://Sample.openai.azure.com/openai/v1/", "custom-live"), "private-test-key", SessionSettings(), audio,
-                onReady = { readyCount++ }, onTranscript = { transcripts += it })
+                onReady = { readyCount++ }, onTranscript = { transcripts += it }, onNotice = { notices += it })
         })
     }
 }
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class FoundryTransportTest {
+    @Test fun contentFilterDuringStreamingDoesNotDisconnectOrReplayAndLaterCaptionsContinue() = runTest {
+        val h = Harness(this)
+        h.socket.sent.receive()
+        h.socket.incoming.send(STARTED); runCurrent()
+        h.socket.incoming.send("""{"type":"error","error":{"code":"content_filter","message":"private-test-key private transcript"}}""")
+        runCurrent()
+        assertFalse(h.result.isCompleted)
+        assertFalse(h.socket.closed)
+        assertEquals("CONTENT_FILTER", h.notices.single().diagnostic.code)
+        assertFalse(h.notices.single().message.contains("private"))
+        h.audio.send(byteArrayOf(1, 0)); runCurrent()
+        h.socket.incoming.send("""{"type":"session.output_transcript.delta","delta":"下一句正常翻譯","start_ms":2000,"end_ms":2500}""")
+        runCurrent()
+        assertEquals("下一句正常翻譯", h.transcripts.single().text)
+        h.audio.close(); runCurrent()
+        h.socket.incoming.send(CLOSED)
+        assertTrue(h.result.await().isSuccess)
+        assertEquals(listOf("session.start", "session.input_audio.append", "session.close"), h.socket.sentTypes)
+        assertTrue(h.socket.closed && h.socket.cancelled)
+    }
+
+    @Test fun contentFilterBeforeReadyIsFatalAndNeverStartsAudio() = runTest {
+        val h = Harness(this)
+        h.socket.sent.receive()
+        h.socket.incoming.send("""{"type":"error","error":{"code":"content_filter"}}""")
+        val failure = assertIs<TranslationFailure>(h.result.await().exceptionOrNull())
+        assertEquals("CONTENT_FILTER", failure.diagnostic?.code)
+        assertEquals(FoundryStages.START, failure.diagnostic?.stage)
+        assertEquals(0, h.readyCount)
+        assertTrue(h.notices.isEmpty())
+        assertTrue(h.socket.cancelled)
+    }
+
+    @Test fun contentClosureIsFatalWithOrWithoutEarlierWarning() = runTest {
+        for (warningFirst in listOf(true, false)) {
+            val h = Harness(this)
+            h.socket.sent.receive()
+            h.socket.incoming.send(STARTED); runCurrent()
+            h.socket.incoming.send("""{"type":"session.input_transcript.delta","delta":"already received","start_ms":0,"end_ms":500}""")
+            if (warningFirst) h.socket.incoming.send("""{"type":"error","error":{"code":"content_filter"}}""")
+            h.socket.incoming.send("""{"type":"session.closed","reason":"content"}""")
+            val failure = assertIs<TranslationFailure>(h.result.await().exceptionOrNull())
+            assertEquals("CONTENT_FILTER", failure.diagnostic?.code)
+            assertEquals("content_filter", failure.diagnostic?.providerCode)
+            assertEquals(1, h.notices.size)
+            assertEquals("already received", h.transcripts.single().text)
+            assertTrue(h.socket.closed && h.socket.cancelled)
+            assertEquals(1, h.socket.sentTypes.count { it == "session.start" })
+        }
+    }
+
+    @Test fun disconnectImmediatelyAfterFilterRetainsTheRelevantDiagnosis() = runTest {
+      for (nativeError in listOf(false, true)) {
+        val h = Harness(this)
+        h.socket.sent.receive()
+        h.socket.incoming.send(STARTED); runCurrent()
+        h.socket.incoming.send("""{"type":"error","error":{"code":"content_filter"}}""")
+        h.socket.incoming.close(if (nativeError) IllegalStateException("private-test-key in native error") else null)
+        val failure = assertIs<TranslationFailure>(h.result.await().exceptionOrNull())
+        assertEquals("CONTENT_FILTER", failure.diagnostic?.code)
+        assertTrue(failure.message.orEmpty().contains("中斷"))
+        assertFalse(failure.message.orEmpty().contains("private"))
+        assertTrue(h.socket.cancelled)
+      }
+    }
+
     @Test fun waitsForStartedThenSendsPcmAndDrainsFinalCaptionsAfterClose() = runTest {
         val h = Harness(this)
         val start = WireJson.parseToJsonElement(h.socket.sent.receive()).jsonObject

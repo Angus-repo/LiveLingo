@@ -180,6 +180,8 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
     val target = state.preferences.target
     val knowledge = state.knowledge.find { it.id == state.preferences.knowledgeId }
     val sourceLabel = liveSourceLanguageLabel(source, state.current)
+    val audioSource = state.preferences.audioSource
+    val audioUnavailable = controller.audioSourceUnavailableReason()
     val listState = rememberLazyListState()
     LaunchedEffect(state.active) { if (state.active) listState.scrollToItem(0) }
     LazyColumn(state = listState, contentPadding = PaddingValues(start = 18.dp, end = 18.dp, bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -193,6 +195,12 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
             }
         }
         if (!state.active) item { SectionCard("準備這一場對話") {
+            Choice("音源", audioSource.label, controller.availableAudioSources().map { it.name to it.label }, !state.busy) {
+                controller.selectAudioSource(AudioSource.valueOf(it))
+            }
+            Text(audioSource.description, style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971))
+            if (audioSource.isPlayback) Text("開始時須同意 Android 的螢幕分享／錄製授權；LiveLingo 只讀取音訊，不擷取畫面。授權後切到來源 App 播放聲音。鎖定螢幕可能停止擷取，每次重新開始都須再次授權。", style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971))
+            audioUnavailable?.let { Text(it, color = Color(0xFF9A473E), style = MaterialTheme.typography.bodySmall) }
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Box(Modifier.weight(1f)) { Choice("聽到的語言", sourceLabel, Language.entries.map { it.name to it.label }, !state.active) { controller.setLanguages(Language.valueOf(it), target) } }
                 Box(Modifier.weight(1f)) { Choice("翻譯成", target.label, Language.entries.filterNot { it == Language.AUTO }.map { it.name to it.label }, !state.active) { controller.setLanguages(source, Language.valueOf(it)) } }
@@ -220,7 +228,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                 TextButton(onClick = onSettings) { Text("先完成 ${state.preferences.provider.label} 連線 →") }
             }
             Button(onClick = { if (state.active) controller.stop() else controller.start() },
-                enabled = state.phase != ConnectionPhase.STOPPING && state.storageAvailable && !state.connectionTesting,
+                enabled = state.phase != ConnectionPhase.STOPPING && state.storageAvailable && !state.connectionTesting && audioUnavailable == null,
                 modifier = Modifier.fillMaxWidth().height(54.dp), shape = RoundedCornerShape(16.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = if (state.active) Color(0xFF9A473E) else Mint)) {
                 if (state.phase in setOf(ConnectionPhase.CONNECTING, ConnectionPhase.STOPPING)) {
@@ -228,27 +236,39 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                     Spacer(Modifier.width(10.dp))
                 }
                 Text(if (state.connectionTesting) "連線測試進行中…" else when (state.phase) {
-                    ConnectionPhase.CONNECTING -> "取消連線／麥克風授權"
+                    ConnectionPhase.CONNECTING -> "取消連線／音源授權"
                     ConnectionPhase.LISTENING -> "■  停止並儲存"
                     ConnectionPhase.STOPPING -> "接收最後的字幕…"
                     else -> if (state.current == null) "●  開始即時翻譯" else "●  開始新的一段翻譯"
                 }, fontWeight = FontWeight.SemiBold)
             }
-            Text("音訊與所選背景知識會直接傳至 ${state.preferences.provider.label}。Android 翻譯開始後可切換 App 或鎖定螢幕，從常駐通知停止；iOS 目前仍需保持前景。", style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971))
+            Text("音訊與所選背景知識會直接傳至 ${state.preferences.provider.label}。Android 翻譯開始後可切換 App，從常駐通知停止；麥克風模式可在鎖定螢幕時繼續，播放音訊模式則可能被系統停止。iOS 目前仍需保持前景。", style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971))
         } }
         if (state.active) item { SectionCard {
             Text("${sourceLabel} → ${target.label}", fontWeight = FontWeight.Bold)
+            Text("音源：${state.current?.settings?.audioSource?.label ?: audioSource.label}", style = MaterialTheme.typography.bodyMedium, color = Mint)
+            if (state.phase == ConnectionPhase.LISTENING && controller.reportsAudioLevel()) {
+                LinearProgressIndicator(progress = { state.audioInputStatus.level }, modifier = Modifier.fillMaxWidth(), color = Mint)
+                Text(if (state.audioInputStatus.signalPresent) "已偵測到音訊訊號" else "目前未偵測到聲音", style = MaterialTheme.typography.labelSmall, color = Color(0xFF657971))
+                state.audioInputStatus.warning?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = Color(0xFF9A473E)) }
+            }
             Text("背景：${knowledge?.name ?: "無"} · ${state.preferences.pace.label} / ${state.preferences.quality.label}", style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971))
             Button(onClick = controller::stop, enabled = state.phase != ConnectionPhase.STOPPING,
                 modifier = Modifier.fillMaxWidth().height(48.dp), shape = RoundedCornerShape(14.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF9A473E))) {
                 Text(when (state.phase) {
-                    ConnectionPhase.CONNECTING -> "取消連線／麥克風授權"
+                    ConnectionPhase.CONNECTING -> "取消連線／音源授權"
                     ConnectionPhase.STOPPING -> "接收最後的字幕…"
                     else -> "■  停止並儲存"
                 })
             }
         } }
+        if ((state.current?.contentFilterCount ?: 0) > 0) item {
+            SectionCard("部分片段可能不完整") {
+                Text(if (state.active) state.streamNotice ?: "本次有內容安全篩選記錄。" else "本次有內容安全篩選記錄；已收到的字幕仍保留。", style = MaterialTheme.typography.bodySmall, color = Color(0xFF9A473E))
+                if (state.lastConnectionReport != null) TextButton(onClick = controller::showConnectionReport) { Text("查看診斷") }
+            }
+        }
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Text("即時字幕", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
@@ -352,6 +372,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                 SectionCard(item.title) {
                     Text(formatDate(item.createdAtMs), style = MaterialTheme.typography.labelMedium, color = Mint)
                     Text("${item.fragments.size} 個串流片段 · ${formatTime(item.fragments.maxOfOrNull { it.endMs } ?: 0)}", style = MaterialTheme.typography.bodySmall)
+                    if (item.contentFilterCount > 0) Text("有內容篩選記錄，部分片段可能不完整", style = MaterialTheme.typography.bodySmall, color = Color(0xFF9A473E))
                     item.settings.knowledge?.let { Text("背景：${it.name}", style = MaterialTheme.typography.bodySmall) }
                     Text(item.fragments.filter { it.channel == TranscriptChannel.OUTPUT }.take(8).joinToString("") { it.text }.ifBlank { "尚未收到譯文" }, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     Row {
@@ -378,6 +399,10 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
     LazyColumn(contentPadding = PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item { TextButton(onClick = onBack) { Text("← 所有逐字稿") } }
         item { PageIntro(record.title, formatDate(record.createdAtMs)) }
+        item { Text("音源：${record.settings.audioSource.label}", style = MaterialTheme.typography.bodySmall) }
+        if (record.contentFilterCount > 0) item {
+            Text("本次收到 ${record.contentFilterCount} 次內容安全篩選通知，部分片段可能不完整。", style = MaterialTheme.typography.bodySmall, color = Color(0xFF9A473E))
+        }
         item { Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = { exportOpen = true }, shape = RoundedCornerShape(12.dp)) { Text("匯出字幕") }
             OutlinedButton(onClick = { title = record.title; rename = true }, enabled = !active, shape = RoundedCornerShape(12.dp)) { Text("重新命名") }
@@ -508,7 +533,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
             Text("Android 開始翻譯後可切換至背景或鎖定螢幕，系統會顯示麥克風前景服務通知及停止操作。來電、音訊中斷、系統強制停止或網路錯誤仍可能中止；iOS 目前需維持前景。", style = MaterialTheme.typography.bodySmall)
             Text("目前提供手動發言者標記。GPT-Live 不回傳多人身分；原文與譯文字幕也可能有辨識或翻譯誤差。", style = MaterialTheme.typography.bodySmall)
         } }
-        item { Text("LiveLingo 0.1.6 · Kotlin Multiplatform\nAndroid / iOS · Microsoft Foundry / OpenAI", style = MaterialTheme.typography.labelSmall, color = Color(0xFF657971), modifier = Modifier.padding(6.dp)) }
+        item { Text("LiveLingo 0.1.7 · Kotlin Multiplatform\nAndroid / iOS · Microsoft Foundry / OpenAI", style = MaterialTheme.typography.labelSmall, color = Color(0xFF657971), modifier = Modifier.padding(6.dp)) }
     }
     if (clearConfirm) ConfirmDelete("移除 ${provider.label} API key？", "只移除目前所選服務的金鑰。", { clearConfirm = false }) { controller.clearApiKey(); clearConfirm = false }
 }

@@ -13,23 +13,33 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
+import app.livelingo.core.AudioSource
 import kotlinx.coroutines.CompletableDeferred
 
 /**
- * Explicitly user-started microphone foreground service.
+ * Explicitly user-started microphone OR media-projection foreground service.
  *
  * The AppController, websocket, and AudioRecord are process-owned by AndroidSessionRegistry.
  * This service provides Android's required foreground execution contract and a Stop action.
  * Never silently restart recording after a process kill, reboot, or package upgrade.
  */
 class AndroidTranslationForegroundService : Service() {
+    private var runningRequest = -1L
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
+                val request = intent.getLongExtra(EXTRA_REQUEST, -1L)
+                if (request != latestRequest || requestedStop) {
+                    stopSelfResult(startId)
+                    return START_NOT_STICKY
+                }
+                runningRequest = request
                 try {
-                    promote()
+                    val source = AudioSource.entries.find { it.name == intent.getStringExtra(EXTRA_SOURCE) }
+                        ?: throw IllegalArgumentException("Missing audio source")
+                    promote(source)
                     isActive = true
                     pendingStart?.complete(Unit)
                 } catch (failure: Exception) {
@@ -46,11 +56,11 @@ class AndroidTranslationForegroundService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun promote() {
+    private fun promote(source: AudioSource) {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         manager.createNotificationChannel(
             NotificationChannel(CHANNEL_ID, "LiveLingo 即時翻譯", NotificationManager.IMPORTANCE_LOW).apply {
-                description = "背景翻譯時顯示麥克風使用狀態與停止按鈕"
+                description = "背景翻譯時顯示目前音源與停止按鈕"
                 setShowBadge(false)
             }
         )
@@ -68,7 +78,7 @@ class AndroidTranslationForegroundService : Service() {
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentTitle("LiveLingo 正在進行即時翻譯")
-            .setContentText("持續使用麥克風；可切換 App 或鎖定螢幕")
+            .setContentText(if (source.isPlayback) "音源：${source.label}；鎖定螢幕可能停止擷取" else "音源：麥克風；可切換 App 或鎖定螢幕")
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
@@ -77,11 +87,16 @@ class AndroidTranslationForegroundService : Service() {
             .build()
         ServiceCompat.startForeground(
             this, NOTIFICATION_ID, notification,
-            if (Build.VERSION.SDK_INT >= 29) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0
+            audioForegroundServiceType(source, Build.VERSION.SDK_INT)
         )
     }
 
     override fun onDestroy() {
+        // An old stop/start command must not cancel a newer recording request.
+        if (runningRequest != latestRequest && !requestedStop) {
+            super.onDestroy()
+            return
+        }
         val voluntary = requestedStop
         isActive = false
         pendingStart?.let {
@@ -98,6 +113,9 @@ class AndroidTranslationForegroundService : Service() {
         const val ACTION_STOP = "app.livelingo.action.STOP_BACKGROUND_TRANSLATION"
         private const val CHANNEL_ID = "livelingo_background_translation"
         private const val NOTIFICATION_ID = 9014
+        private const val EXTRA_SOURCE = "audio_source"
+        private const val EXTRA_REQUEST = "start_request"
+        @Volatile private var latestRequest = 0L
 
         @Volatile var isActive: Boolean = false
             private set
@@ -105,14 +123,17 @@ class AndroidTranslationForegroundService : Service() {
         @Volatile private var pendingStart: CompletableDeferred<Unit>? = null
 
         /** Must be called while the Activity is visible (Android 14+ microphone permission). */
-        fun requestStart(context: Context): CompletableDeferred<Unit> {
+        fun requestStart(context: Context, source: AudioSource): CompletableDeferred<Unit> {
             val waiter = CompletableDeferred<Unit>()
+            val request = ++latestRequest
+            isActive = false
             pendingStart = waiter
             requestedStop = false
             try {
                 ContextCompat.startForegroundService(
                     context,
                     Intent(context, AndroidTranslationForegroundService::class.java).setAction(ACTION_START)
+                        .putExtra(EXTRA_SOURCE, source.name).putExtra(EXTRA_REQUEST, request)
                 )
             } catch (failure: Exception) {
                 waiter.completeExceptionally(failure)
@@ -121,6 +142,8 @@ class AndroidTranslationForegroundService : Service() {
         }
 
         fun requestStop(context: Context) {
+            ++latestRequest // Invalidate even a start intent that has not reached onStartCommand yet.
+            isActive = false
             requestedStop = true
             pendingStart?.let {
                 if (!it.isCompleted) it.completeExceptionally(IllegalStateException("翻譯已停止。"))
@@ -128,4 +151,13 @@ class AndroidTranslationForegroundService : Service() {
             context.stopService(Intent(context, AndroidTranslationForegroundService::class.java))
         }
     }
+}
+
+internal fun audioForegroundServiceType(source: AudioSource, sdk: Int): Int = when {
+    source.isPlayback -> {
+        require(sdk >= 29) { "Playback capture requires Android 10" }
+        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+    }
+    sdk >= 30 -> ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+    else -> 0 // microphone type was introduced in Android 11.
 }

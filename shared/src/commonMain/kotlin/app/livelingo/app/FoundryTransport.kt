@@ -13,6 +13,7 @@ import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.channels.Channel
 
 class TranslationFailure(message: String, val diagnostic: FoundryDiagnostic? = null) : Exception(message)
+data class TranslationNotice(val message: String, val diagnostic: FoundryDiagnostic, val sessionEnded: Boolean = false)
 
 interface TranslationTransport {
     suspend fun run(
@@ -22,13 +23,16 @@ interface TranslationTransport {
         audio: ReceiveChannel<ByteArray>,
         onReady: suspend () -> Unit,
         onTranscript: suspend (TranscriptDelta) -> Unit,
+        onNotice: suspend (TranslationNotice) -> Unit = {},
     )
     /** Validates the real model lifecycle without using a microphone, knowledge profile, or transcript storage. */
     suspend fun probe(connection: FoundryConnection, apiKey: String): ConnectionProbeResult {
         val emptyAudio = Channel<ByteArray>(0)
         emptyAudio.close()
         try {
-            run(connection, apiKey, SessionSettings(), emptyAudio, {}, {})
+            var notice: TranslationNotice? = null
+            run(connection, apiKey, SessionSettings(), emptyAudio, {}, {}, onNotice = { notice = it })
+            notice?.let { throw TranslationFailure(it.message, it.diagnostic) }
             return ConnectionProbeResult("${connection.provider.label} 連線測試成功，GPT-Live 已啟動並正常結束。", FoundryDiagnostic(FoundryStages.COMPLETE, "OK", 101))
         } finally { emptyAudio.cancel() }
     }
@@ -111,6 +115,7 @@ class KtorFoundryTransport internal constructor(
         audio: ReceiveChannel<ByteArray>,
         onReady: suspend () -> Unit,
         onTranscript: suspend (TranscriptDelta) -> Unit,
+        onNotice: suspend (TranslationNotice) -> Unit,
     ) {
         connection.validationError()?.let { throw TranslationFailure(it) }
         settings.validationError()?.let { throw TranslationFailure(it) }
@@ -121,6 +126,7 @@ class KtorFoundryTransport internal constructor(
         var sender: Job? = null
         var drainDeadline: Job? = null
         var stage = FoundryStages.HANDSHAKE
+        var pendingFilter: FoundryDiagnostic? = null
         fun providerMessage(value: String): String =
             if (connection.provider == ModelProvider.OPENAI) value.replace("Foundry", "OpenAI").replace("部署", "模型") else value
         fun redacted(failure: TranslationFailure): TranslationFailure {
@@ -146,6 +152,8 @@ class KtorFoundryTransport internal constructor(
                     val event = decode(active.receive() ?: throw TranslationFailure("Foundry 在準備完成前已中斷連線。", FoundryDiagnostic(stage, "CONNECTION_CLOSED")))
                     when (event) {
                         is FoundryEvent.Ready -> break
+                        FoundryEvent.ContentFiltered -> throw TranslationFailure(foundryProviderError("content_filter") + "工作階段尚未啟動，未開始收音。",
+                            FoundryDiagnostic(stage, "CONTENT_FILTER", providerCode = "content_filter"))
                         FoundryEvent.Ignored -> Unit
                         else -> throw TranslationFailure("Foundry 啟動順序不正確，尚未開始收音。")
                     }
@@ -169,10 +177,26 @@ class KtorFoundryTransport internal constructor(
                 // Usage/audio events count as activity; GPT-Live has no relay Ping/Pong event.
                 val payload = try { withTimeout(inactivityTimeoutMillis) { active.receive() } }
                 catch (_: TimeoutCancellationException) { throw TranslationFailure("Foundry 超過 90 秒沒有回應，已停止收音並保留收到的字幕。", FoundryDiagnostic(stage, "TIMEOUT")) }
-                    ?: throw TranslationFailure("Foundry 連線已中斷；已收到的字幕已保留，最後一句可能不完整。", FoundryDiagnostic(stage, "CONNECTION_CLOSED"))
+                    ?: throw if (pendingFilter != null) TranslationFailure("Foundry 在內容安全篩選通知後中斷連線。已收到的字幕會保留，最後片段可能不完整；無法確認中斷的進一步原因。", pendingFilter)
+                    else TranslationFailure("Foundry 連線已中斷；已收到的字幕已保留，最後一句可能不完整。", FoundryDiagnostic(stage, "CONNECTION_CLOSED"))
                 when (val event = decode(payload)) {
-                    is FoundryEvent.Transcript -> onTranscript(event.delta)
+                    is FoundryEvent.Transcript -> {
+                        pendingFilter = null
+                        onTranscript(event.delta)
+                    }
+                    FoundryEvent.ContentFiltered -> {
+                        val fields = safeJsonErrorFields(payload, key)
+                        val diagnostic = FoundryDiagnostic(stage, "CONTENT_FILTER", requestId = fields.requestId, providerCode = "content_filter")
+                        pendingFilter = diagnostic
+                        // Keep this same session. Do not replay blocked audio, reconnect, or change filters.
+                        onNotice(TranslationNotice(providerMessage("Foundry 已阻擋部分內容，該片段可能不完整。正在接收後續服務事件；工作階段若仍可用，字幕會繼續更新。"), diagnostic))
+                    }
                     is FoundryEvent.Closed -> {
+                        if (event.reason == "content") {
+                            val diagnostic = pendingFilter?.copy(stage = stage) ?: FoundryDiagnostic(stage, "CONTENT_FILTER", providerCode = "content_filter")
+                            if (pendingFilter == null) onNotice(TranslationNotice(providerMessage(foundryCloseError(event.reason, stopRequested.isCompleted)!!), diagnostic, sessionEnded = true))
+                            throw TranslationFailure(foundryCloseError(event.reason, stopRequested.isCompleted)!!, diagnostic)
+                        }
                         foundryCloseError(event.reason, stopRequested.isCompleted)?.let { throw TranslationFailure(it, FoundryDiagnostic(stage, if (event.reason == "expired") "SESSION_EXPIRED" else "SESSION_CLOSED")) }
                         break
                     }
@@ -192,7 +216,9 @@ class KtorFoundryTransport internal constructor(
         } catch (failure: TranslationFailure) {
             throw redacted(if (failure.diagnostic != null) failure else TranslationFailure(failure.message ?: "Foundry 工作階段失敗。", FoundryDiagnostic(stage, "SESSION_FAILURE")))
         } catch (failure: Exception) {
-            throw redacted(classifyFoundryFailure(failure, stage))
+            throw redacted(if (pendingFilter != null)
+                TranslationFailure("Foundry 在內容安全篩選通知後發生傳輸中斷。已收到的字幕會保留；無法確認中斷的進一步原因。", pendingFilter)
+            else classifyFoundryFailure(failure, stage))
         } finally {
             sender?.cancel()
             drainDeadline?.cancel()

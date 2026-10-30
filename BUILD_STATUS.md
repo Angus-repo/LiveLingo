@@ -1,42 +1,55 @@
-# LiveLingo 0.1.6 驗證狀態
+# LiveLingo 0.1.7 驗證狀態
 
 2026-10-31（台灣時間），以 JDK 17、Gradle 8.14.3、Android SDK 36 建置及測試。
 
 ```sh
-./gradlew :core:jvmTest :shared:testDebugUnitTest :androidApp:assembleDebug
+JAVA_HOME=/tmp/livelingo-tools/jdk17 ANDROID_HOME=/tmp/livelingo-sdk /tmp/livelingo-tools/gradle-8.14.3/bin/gradle :core:jvmTest :shared:testDebugUnitTest :androidApp:assembleDebug --offline --console=plain
 ```
 
-**BUILD SUCCESSFUL；106 項測試，0 失敗、0 錯誤、0 略過。**
+**BUILD SUCCESSFUL；127 項測試，0 失敗、0 錯誤、0 略過。** 本機使用已下載的 Gradle，避免 wrapper 重複下載。CI 可使用 `./gradlew` 執行相同工作。
 
-| 範圍 | 數量 | 重點 |
-| --- | ---: | --- |
-| Core | 36 | 繁中台灣字詞、畫面回報案例、數值保留、端點限制、GPT-Live 協定、字幕匯出 |
-| Controller | 31 | 舊設定載入、兩家服務金鑰隔離、重開還原、執行中不可切換、停止後 AI 分段保存、分段失敗保留字幕 |
-| Live display | 6 | 片段正序、單字接合、保留換行、語言推定 |
-| Paragraphs | 4 | AI 僅回傳編號、拒絕無效位置與改寫、限長、保留早期段落 |
-| Transport | 13 | 啟動、PCM 傳遞、停止排空、斷線、逾時 |
-| Diagnostics | 5 | 安全錯誤欄位、金鑰遮蔽 |
-| Native TLS WebSocket | 10 | 正式 OkHttp 工廠、Foundry api-key 與 OpenAI Bearer、禁止重新導向 |
-| Native TLS paragraph HTTP | 1 | 在同一測試逐一驗證兩家 API 的網址、認證、JSON 請求／回應、禁止轉址及拒絕無效 AI 編號 |
+| 測試類別 | 數量 |
+| --- | ---: |
+| FoundryProtocolTest | 10 |
+| ProtocolAndInstructionsTest | 8 |
+| SubtitleExporterTest | 12 |
+| TaiwanAndParagraphsTest | 7 |
+| AndroidFoundryHttpClientTest | 10 |
+| AppLogicTest | 39 |
+| AudioCapturePolicyTest | 3 |
+| AudioSignalMeterTest | 4 |
+| FoundryDiagnosticsTest | 6 |
+| FoundryTransportTest | 17 |
+| LiveSubtitleDisplayTest | 6 |
+| ParagraphFormatterTest | 4 |
+| ParagraphHttpTest | 1 |
+
+## 本次驗證範圍
+
+- 音源選擇保存與工作階段快照；舊設定、舊逐字稿預設麥克風；不支援音源時阻擋，不暗中切換。
+- 拒絕／取消授權、遲到回覆、連線中撤回擷取、停止後重開與舊場次回呼隔離；已有字幕保存。
+- Teams UID 篩選必要性、僅允許 Android 公開 API 支援的媒體用途，麥克風與 mediaProjection 前景服務類型分開。
+- PCM16 音量、完整負值樣本、部分 buffer、約 15 秒無聲通知與訊號恢復。
+- `content_filter` 於會話開始後出現時保留原連線、顯示通知、繼續後續字幕；啟動前篩選、內容終止、篩選後斷線及原生傳輸例外仍安全釋放。
+- 內容篩選分類、內層 ResponsibleAIPolicyViolation、HTTP 狀態、診斷遮蔽、不完整標記持久化與 TXT／JSON；沒有自動重連或重送阻擋音訊。
+- 原有兩家服務的本機 TLS WebSocket／HTTP、金鑰隔離、繁中、數值保留及 AI 段落驗證持續通過。
 
 ## 交付 APK
 
-- 檔名：`LiveLingo-0.1.6-original-key.apk`
+- 檔名：`LiveLingo-0.1.7-original-key.apk`
 - Application ID：`app.livelingo.android`
-- Version name／code：`0.1.6`／`7`
+- Version name／code：`0.1.7`／`8`
 - Minimum／target SDK：`26`／`36`
-- 大小：13,226,851 bytes
-- APK SHA-256：`7dc72ed3bb91997acbecc0ce9d24035370f07f445cb0b822390b402a17181b04`
+- 大小：13,262,630 bytes
+- APK SHA-256：`4ddf55af363dbe489df6e10784069bfe33b722f0f12eb7adae6c838ced991188`
 - 簽章憑證 SHA-256：`cf232e1f105c3ac5a93ce2449b41678027b4b1ef9a54c3765c85b65a045d4bfb`
-- `apksigner verify` 與 `zipalign -c -P 16 4` 通過，與原始 0.1.x 簽章一致，可覆蓋安裝。
-- APK 內含 OpenCC 資料授權。
+- `apksigner verify`、`aapt dump badging` 與 `zipalign -c -P 16 4` 驗證；沿用原始 0.1.x 簽章，可覆蓋安裝並保留 App 資料。
 
-## 使用條件與驗證界線
+## 未完成的驗證與限制
 
-AI 語意分段需設定可用的文字模型：Foundry 在同一資源另外部署文字模型並填入部署名稱；OpenAI 預設 `gpt-4.1-mini`。未設定或 API 失敗時，畫面顯示基本分段狀態。基本分段不是 AI 語意判斷。
+- 本機 `:androidApp:lintDebug --offline` 因未快取 `com.android.tools.lint:lint-gradle:31.11.1` 而無法執行，不能宣稱 Lint 通過。
+- 未連接 Android 實機或模擬器，未實測 MediaProjection 系統授權 UI、長時間背景擷取及 Teams 會議。Android 僅允許適當媒體用途且來源允許擷取；Teams 通話用途、禁止擷取或跨工作設定檔可能無聲。
+- 未使用真實 Foundry／OpenAI 憑證重現內容篩選。本次修正 App 把所有內容篩選事件立即斷線的處理；不能移除服務端篩選或復原已阻擋內容，仍以後續事件／正式終止為準。
+- 本機未執行 iOS 編譯。iOS 只提供麥克風，版號與共用介面同步；需由 macOS CI 與實機驗收。
 
-繁中轉換在裝置端完成，原始 provider fragments 不改寫，JSON 保留原始片段與 AI 分段位置；SRT／VTT／TXT 依目標語言呈現繁中，時間戳保留。
-
-沒有使用真實 Foundry／OpenAI API key 進行雲端測試。上述 TLS 測試使用本機伺服器，驗證正式網路元件與協定，不代表已驗證帳號權限、實際模型翻譯品質或分段品質。
-
-本次未執行 Android 實機／模擬器的 UI、長時間背景收音測試，亦未在本機執行 iOS 編譯。共用程式與 iOS 版號已同步；iOS 仍須以 macOS CI 與實機驗收。原有 Android 前景服務、通知停止及無時間戳即時字幕流程保留。
+實機驗收項目見 `docs/ACCEPTANCE.md`。Android 音訊及 GPT-Live 生命週期官方依據見 `README.md`。

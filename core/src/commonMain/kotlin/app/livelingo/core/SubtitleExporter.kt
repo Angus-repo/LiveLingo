@@ -25,6 +25,8 @@ object SubtitleExporter {
     fun text(record: TranscriptRecord): String = buildString {
         appendLine(cleanSingleLine(record.title))
         appendLine("來源：${record.settings.sourceLanguage.label}　譯文：${record.settings.targetLanguage.label}")
+        appendLine("音源：${record.settings.audioSource.label}")
+        if (record.contentFilterCount > 0) appendLine("注意：本次收到 ${record.contentFilterCount} 次內容安全篩選通知，部分片段可能不完整。")
         record.settings.knowledge?.let { appendLine("背景知識：${cleanSingleLine(it.name)}") }
         appendLine("原文與譯文使用各自的音訊時間；發言者標記由使用者手動指定。")
         appendLine()

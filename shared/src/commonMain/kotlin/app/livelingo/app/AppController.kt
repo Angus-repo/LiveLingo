@@ -30,6 +30,8 @@ data class AppState(
     val lastConnectionReportTitle: String = "Foundry 連線診斷",
     val showReportInMessage: Boolean = false,
     val paragraphStatus: String? = null,
+    val audioInputStatus: AudioInputStatus = AudioInputStatus(),
+    val streamNotice: String? = null,
 ) {
     val active: Boolean get() = phase in setOf(ConnectionPhase.CONNECTING, ConnectionPhase.LISTENING, ConnectionPhase.STOPPING)
     val busy: Boolean get() = active || connectionTesting
@@ -99,6 +101,16 @@ class AppController(
     fun setTranslationOptions(pace: TranslationPace, quality: TranslationQuality) {
         if (mutable.value.busy || !mutable.value.storageAvailable) return
         changePreferences(mutable.value.preferences.copy(pace = pace, quality = quality))
+    }
+
+    fun availableAudioSources(): List<AudioSource> = services.microphone.availableSources()
+    fun reportsAudioLevel(): Boolean = services.microphone.reportsAudioLevel()
+    fun audioSourceUnavailableReason(): String? = services.microphone.unavailableReason(mutable.value.preferences.audioSource)
+
+    fun selectAudioSource(source: AudioSource) {
+        if (mutable.value.busy || !mutable.value.storageAvailable) return
+        if (source !in availableAudioSources()) { inform("此平台不支援這個音源。"); return }
+        changePreferences(mutable.value.preferences.copy(audioSource = source))
     }
 
     fun selectProvider(provider: ModelProvider) {
@@ -275,6 +287,7 @@ class AppController(
     fun start() {
         val snapshot = mutable.value
         if (snapshot.busy || sessionJob?.isActive == true || !snapshot.storageAvailable) return
+        audioSourceUnavailableReason()?.let { inform(it); return }
         val connection = snapshot.preferences.connection()
         connection.validationError()?.let { inform("請先到「設定」完成 ${connection.provider.label} 連線。$it"); return }
         if (apiKey.isBlank()) { inform("請先到「設定」儲存 ${connection.provider.label} API key。"); return }
@@ -284,6 +297,7 @@ class AppController(
             snapshot.knowledge.find { it.id == snapshot.preferences.knowledgeId },
             snapshot.preferences.pace, snapshot.preferences.quality,
             snapshot.preferences.provider,
+            snapshot.preferences.audioSource,
         )
         settings.validationError()?.let { inform(it); return }
         val now = services.currentTimeMillis()
@@ -297,18 +311,22 @@ class AppController(
         val paragraphModel = snapshot.preferences.paragraphModel().takeIf { snapshot.preferences.aiParagraphs }.orEmpty()
         mutable.value = snapshot.copy(phase = ConnectionPhase.CONNECTING, current = record, transcriptSaved = true,
             history = listOf(record) + snapshot.history, message = null, lastConnectionReport = null, showReportInMessage = false,
-            paragraphStatus = if (paragraphModel.isBlank()) "基本分段；AI 語意分段可至設定指定文字模型。" else "AI 語意分段：等待完整句子")
+            paragraphStatus = if (paragraphModel.isBlank()) "基本分段；AI 語意分段可至設定指定文字模型。" else "AI 語意分段：等待完整句子",
+            audioInputStatus = AudioInputStatus(), streamNotice = null)
         sessionJob = scope.launch {
             try {
                 // Android must create its microphone foreground service while Activity is visible,
                 // not after the potentially slow Foundry handshake.
                 try {
-                    services.microphone.prepare()
+                    services.microphone.prepareSource(settings.audioSource, onStatus = { status ->
+                        if (mutable.value.current?.id == record.id && mutable.value.phase == ConnectionPhase.LISTENING)
+                            mutable.value = mutable.value.copy(audioInputStatus = status)
+                    }, onError = { microphoneFailed(it, record.id) })
                     ensureActive()
                 } catch (cancelled: CancellationException) {
                     throw cancelled
-                } catch (_: Exception) {
-                    throw TranslationFailure("無法準備背景翻譯麥克風。請在 App 前景開始，並允許麥克風權限。")
+                } catch (failure: Exception) {
+                    throw TranslationFailure((failure as? AudioCaptureFailure)?.message ?: "無法準備背景翻譯音源。請在 App 前景開始，並允許所需的錄音或音訊擷取授權。")
                 }
                 transport.run(connection, sessionApiKey, settings, queue,
                     onReady = {
@@ -319,13 +337,15 @@ class AppController(
                                 val currentState = mutable.value
                                 if (currentState.current?.id == record.id && currentState.active) {
                                     val result = queue.trySend(bytes.copyOf())
-                                    if (result.isFailure && !result.isClosed) microphoneFailed("網路傳送速度不足，已停止收音以避免遺失音訊。已收到的字幕已保留。")
+                                    if (result.isFailure && !result.isClosed) microphoneFailed("網路傳送速度不足，已停止收音以避免遺失音訊。已收到的字幕已保留。", record.id)
                                 }
                             },
-                            onError = ::microphoneFailed,
+                            onError = { microphoneFailed(it, record.id) },
                         ) } catch (cancelled: CancellationException) { throw cancelled }
-                        catch (_: Exception) {
-                            throw TranslationFailure("無法啟用麥克風。請允許麥克風權限，並確認沒有其他 App 或通話占用麥克風，再重新開始。")
+                        catch (failure: Exception) {
+                            throw TranslationFailure((failure as? AudioCaptureFailure)?.message ?: if (settings.audioSource == AudioSource.MICROPHONE)
+                                "無法啟用麥克風。請允許麥克風權限，並確認沒有其他 App 或通話占用麥克風，再重新開始。"
+                            else "無法啟用所選播放音源。請確認音訊擷取授權與裝置音訊狀態，再重新開始。")
                         }
                         ensureActive()
                         mutable.value = mutable.value.copy(phase = ConnectionPhase.LISTENING)
@@ -347,6 +367,8 @@ class AppController(
                             val next = current.copy(fragments = current.fragments + fragment)
                             // Commit each received fragment, preserving a partial transcript on any network failure.
                             replaceRecord(next)
+                            if (next.contentFilterCount > 0) mutable.value = mutable.value.copy(
+                                streamNotice = "後續字幕已繼續更新。本次收到 ${next.contentFilterCount} 次內容安全篩選通知，被阻擋的片段可能不完整。")
                             mutable.value = mutable.value.copy(transcriptSaved = false)
                             try {
                                 persistCurrentTranscript(record.id)
@@ -355,6 +377,23 @@ class AppController(
                             }
                             catch (cancelled: CancellationException) { throw cancelled }
                             catch (_: Exception) { throw TranslationFailure("逐字稿無法寫入裝置，已停止收音。請先匯出目前逐字稿，再確認儲存空間。") }
+                        }
+                    },
+                    onNotice = { notice ->
+                        val current = mutable.value.current?.takeIf { it.id == record.id }
+                        if (current != null && notice.diagnostic.code == "CONTENT_FILTER") {
+                            val count = current.contentFilterCount.coerceAtMost(Int.MAX_VALUE - 1) + 1
+                            replaceRecord(current.copy(contentFilterCount = count))
+                            val safeMessage = safeDiagnosticField(notice.message, sessionApiKey)
+                            mutable.value = mutable.value.copy(streamNotice = safeMessage, transcriptSaved = false,
+                                lastConnectionReport = connectionReport(connection, notice.diagnostic, safeMessage,
+                                    false, services.currentTimeMillis(), sessionApiKey, warning = !notice.sessionEnded),
+                                lastConnectionReportTitle = "${connection.provider.label} 內容篩選通知")
+                            try {
+                                persistCurrentTranscript(record.id)
+                                mutable.value = mutable.value.copy(transcriptSaved = true)
+                            } catch (cancelled: CancellationException) { throw cancelled }
+                            catch (_: Exception) { throw TranslationFailure("內容篩選記錄無法寫入裝置，已停止收音；請先匯出目前逐字稿。") }
                         }
                     })
             } catch (_: TimeoutCancellationException) {
@@ -391,6 +430,7 @@ class AppController(
                 mutable.value = mutable.value.copy(
                     phase = if (sessionFailure != null) ConnectionPhase.ERROR else ConnectionPhase.IDLE,
                     message = sessionFailure ?: mutable.value.message,
+                    audioInputStatus = AudioInputStatus(),
                 )
                 // Do not dismiss the Android foreground service until the final network
                 // frames and transcript writes have completed.
@@ -433,9 +473,9 @@ class AppController(
         }
     }
 
-    private fun microphoneFailed(message: String) {
+    private fun microphoneFailed(message: String, recordId: String?) {
         scope.launch {
-            if (!mutable.value.active) return@launch
+            if (!mutable.value.active || mutable.value.current?.id != recordId) return@launch
             sessionFailure = message
             services.microphone.stop()
             sessionJob?.cancel()
@@ -534,7 +574,7 @@ private fun safeDiagnosticField(value: String, secret: String): String {
 
 @OptIn(ExperimentalTime::class)
 private fun connectionReport(connection: FoundryConnection, diagnostic: FoundryDiagnostic, message: String,
-                             success: Boolean, timestamp: Long, secret: String): String {
+                             success: Boolean, timestamp: Long, secret: String, warning: Boolean = false): String {
     val endpointFamily = when {
         connection.endpoint.lowercase().contains(".openai.azure.com") -> "<resource>.openai.azure.com"
         connection.endpoint.lowercase().contains(".services.ai.azure.com") -> "<resource>.services.ai.azure.com"
@@ -544,12 +584,12 @@ private fun connectionReport(connection: FoundryConnection, diagnostic: FoundryD
     val originalTime = Instant.fromEpochMilliseconds(timestamp).toString()
     val taiwanTime = Instant.fromEpochMilliseconds(timestamp + 8 * 60 * 60 * 1000).toString().removeSuffix("Z")
     return buildString {
-        appendLine("LiveLingo 0.1.6 · ${connection.provider.label} 連線診斷")
+        appendLine("LiveLingo 0.1.7 · ${connection.provider.label} 連線診斷")
         appendLine("時間：$originalTime（台灣時間：$taiwanTime +08:00）")
-        appendLine("結果：${if (success) "成功" else "失敗"}")
+        appendLine("結果：${if (warning) "通知（尚未收到工作階段結束事件）" else if (success) "成功" else "失敗"}")
         appendLine("階段：${safeDiagnosticField(diagnostic.stage, secret)}")
         appendLine("分類：${safeDiagnosticField(diagnostic.code, secret)}")
-        appendLine("HTTP 狀態：${diagnostic.httpStatus?.toString() ?: "未取得"}")
+        appendLine("HTTP 狀態：${diagnostic.httpStatus?.toString() ?: if (diagnostic.stage in setOf(FoundryStages.STREAM, FoundryStages.STOP)) "不適用（WebSocket 事件）" else "未取得"}")
         appendLine("認證方式：${if (connection.provider == ModelProvider.OPENAI) "Authorization: Bearer" else "api-key 標頭"}")
         appendLine("資源：${if (connection.provider == ModelProvider.OPENAI) "wss://api.openai.com/v1/live/sessions" else "wss://$endpointFamily/openai/v1/live/sessions"}")
         appendLine("${if (connection.provider == ModelProvider.OPENAI) "模型" else "部署"}名稱：已遮蔽（${connection.deployment.length} 個字元）")

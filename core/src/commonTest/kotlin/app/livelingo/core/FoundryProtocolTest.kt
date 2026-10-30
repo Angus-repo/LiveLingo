@@ -4,6 +4,17 @@ import kotlinx.serialization.json.*
 import kotlin.test.*
 
 class FoundryProtocolTest {
+    @Test fun contentModerationIsASeparateEventWithSafeMessages() {
+        for (code in listOf("content_filter", "CONTENT_FILTER", "ResponsibleAIPolicyViolation")) {
+            assertEquals(FoundryEvent.ContentFiltered, parseFoundryEvent("""{"type":"error","error":{"code":"$code","message":"private transcript"}}"""))
+            assertTrue(foundryProviderError(code).contains("內容安全篩選"))
+        }
+        assertEquals(FoundryEvent.ContentFiltered, parseFoundryEvent("""{"type":"error","error":{"code":"BadRequest","innererror":{"code":"ResponsibleAIPolicyViolation"}}}"""))
+        assertEquals(FoundryEvent.Closed("content"), parseFoundryEvent("""{"type":"session.closed","reason":"content"}"""))
+        assertNotNull(foundryCloseError("content", requestedByClient = true))
+        assertFalse(foundryProviderError("content_filter").contains("請檢查部署"))
+    }
+
     private val connection = FoundryConnection("https://sample.openai.azure.com")
 
     @Test fun normalizesKnownEndpointPathsExactlyOnce() {

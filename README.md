@@ -1,6 +1,6 @@
 # 即時譯 LiveLingo
 
-使用 Kotlin Multiplatform + Compose Multiplatform 的 Android／iOS 即時字幕翻譯 App。**0.1.6 可選 Microsoft Foundry 或 OpenAI GPT-Live，由 App 直接連線，不需自架後端。**
+使用 Kotlin Multiplatform + Compose Multiplatform 的 Android／iOS 即時字幕翻譯 App。**0.1.7 新增 Android 音源選擇，並修正內容安全篩選通知被當成必須斷線的錯誤。可用 Microsoft Foundry 或 OpenAI GPT-Live，由 App 直接連線，不需自架後端。**
 
 API key 由使用者自行輸入，Android 以 Keystore 保護加密金鑰並加密保存，iOS 以 Keychain 保存。原始碼、APK、逐字稿匯出及一般設定均不內建或保存明文 API key。
 
@@ -9,6 +9,9 @@ API key 由使用者自行輸入，Android 以 Keystore 保護加密金鑰並加
 | 功能 | 說明 |
 | --- | --- |
 | 直接連線 | Microsoft Foundry／OpenAI，模型與加密金鑰獨立保存 |
+| 音源選擇 | 麥克風、裝置播放音訊、Microsoft Teams（嘗試擷取）；Android 播放音訊需 Android 10+ 與每次系統授權 |
+| 收音狀態 | Android 顯示音量訊號；播放音訊持續約 15 秒無聲時提示檢查來源、音量或擷取限制 |
+| 內容篩選處理 | 執行中收到 content_filter 時顯示片段不完整提示，保留仍可用的會話；服務正式結束時才釋放收音與連線 |
 | 連線診斷 | 不開啟麥克風測試連線，顯示錯誤階段與可取得的 HTTP 狀態碼 |
 | 來源語言 | 自動、英文、印度英文、繁體中文、日文、韓文；自動模式於收到字幕後顯示文字推定語言 |
 | 目標語言 | 英文、印度英文、繁體中文、日文、韓文 |
@@ -38,12 +41,44 @@ API key 由使用者自行輸入，Android 以 Keystore 保護加密金鑰並加
 | API key | 該 Foundry 資源的 API key |
 
 3. 按「測試連線」檢查目前欄位。測試成功後按「儲存連線設定」，再返回「即時翻譯」。測試本身不會儲存欄位。
-4. 選擇來源、目標語言與本次背景知識，開始翻譯並允許麥克風。
+4. 選擇音源、來源／目標語言與本次背景知識。開始翻譯後依系統提示授權；播放音訊模式須再同意音訊擷取，然後切換到來源 App 播放。
 5. 停止後可到「逐字稿」檢視、修正發言者與匯出字幕。
 
 不需要服務網址、relay token、Docker、Java 後端或另外申請伺服器。App 會將 HTTPS 資源端點轉成對應的 WSS GPT-Live 工作階段路徑。不要填入 Foundry Portal 網頁、專案管理網址或舊版 `/realtime` API。
 
 API key 儲存後不會重新顯示。只修改部署名稱時，API key 留空可保留原值；變更資源端點時必須重新輸入對應 key，避免將舊 key 傳給另一個資源。若按「移除 API key」，再次翻譯前須重新輸入。
+
+## 0.1.7 音源選擇
+
+在「即時翻譯 → 準備這一場對話 → 音源」選擇，停止後才能切換。選擇會保存，工作階段及 TXT／JSON 也記錄實際選定音源；舊設定與逐字稿預設為麥克風。
+
+| 音源 | 用法與限制 |
+| --- | --- |
+| 麥克風 | 收取目前麥克風的聲音，包含現場對話或外放音訊；延續原有背景與鎖螢幕收音 |
+| 裝置播放音訊 | 只收取裝置上允許擷取的媒體播放聲音，不混入麥克風；其他 App 同時播放的媒體也可能被收取 |
+| Microsoft Teams（嘗試擷取） | 以 Teams 的 UID 篩選，只接收同一個使用者設定檔中的 Teams 允許擷取的音訊。未安裝／停用時提示且不能開始，不會改抓其他 App 或偷偷開麥克風 |
+
+**Teams 選項不代表一定能錄到 Teams 會議。** Android 公開 AudioPlaybackCapture 只允許 `USAGE_MEDIA`、`USAGE_GAME`、`USAGE_UNKNOWN` 且允許其他 App 擷取的播放器；`USAGE_VOICE_COMMUNICATION` 等通話用途不在允許範圍內。Teams 若使用通話用途或禁止錄製，便無法透過此功能取得會議音訊。此版本未串接 Microsoft Graph、Teams 媒體機器人，也不能擷取另一台電腦上的 Teams。可改以麥克風收取外放聲音；若同機 Teams 占用麥克風，可能需要由另一台裝置外放。
+
+Android 10+ 的播放擷取需要錄音權限，以及每次開始時的系統螢幕分享／錄製授權。LiveLingo **只建立音訊擷取，不建立虛擬顯示器、不讀取或傳送畫面**。Android 14+ 的流程為先取得同意，再啟動 `mediaProjection` 前景服務，最後使用一次性授權建立擷取。Teams 與 LiveLingo 必須在同一個個人／工作設定檔，不能跨設定檔取得音訊。
+
+系統撤回授權、其他 App 開始分享或鎖定螢幕時，播放音訊擷取可能停止；App 會結束收音並保留已收到的字幕。每次開始須重新授權，取消或拒絕授權時不連接模型服務。音量條僅表示有音訊訊號，不能證明 Teams 會議可擷取或有辨識出人聲。持續約 15 秒無聲只顯示提示，不將靜音直接當作被封鎖，也不自動改變音源。
+
+iOS 與 Android 8／9 仍只提供麥克風。版本 `0.1.7`／versionCode `8`；驗證結果見 [BUILD_STATUS.md](BUILD_STATUS.md)。
+
+實作依據：[Android 音訊播放擷取](https://developer.android.com/media/platform/av-capture)、[前景服務類型與授權順序](https://developer.android.com/develop/background-work/services/fgs/service-types#media-projection)、[MediaProjection 終止與資源回收](https://developer.android.com/media/grow/media-projection#resource-recovery)。
+
+### 0.1.7 content_filter 修正
+
+0.1.6 將每個 `error` 事件都丟出例外，造成原本可能仍可用的 GPT-Live 工作階段被 App 提前關閉，並錯誤提示檢查部署或權限。
+
+- 已啟動的會話收到 `content_filter` 時，顯示非阻擋式通知並繼續讀取原連線的後續事件。後續有字幕時正常呈現，不補造服務阻擋的片段。
+- 收到 `session.closed` 且 `reason=content`、斷線或逾時時停止；尚未收到 `session.started` 的內容篩選錯誤仍阻擋啟動，避免在模型不可用時錄音。
+- 診斷使用 `CONTENT_FILTER`，不再把它當作一般部署或金鑰錯誤；串流事件沒有 HTTP 回應碼時明示不適用。HTTP 啟動失敗仍保留實際 HTTP 狀態。
+- 篩選通知次數與逐字稿一起儲存，歷史、TXT、JSON 顯示部分片段可能不完整；原有字幕及時間戳保留。
+- 不自動重連、重送被阻擋音訊或改變服務端篩選設定。若服務終止一般對話且反覆發生，可將診斷交由 Foundry 資源管理者確認；App 無法判定或消除每個服務端誤判。
+
+依據：[GPT-Live 內容審核與工作階段生命週期](https://developers.openai.com/api/docs/guides/live-conversations#handle-moderation)、[Microsoft Foundry GPT-Live 錯誤與結束事件](https://learn.microsoft.com/en-us/azure/foundry/openai/gpt-live-reference#error-handling)。
 
 ## 0.1.6 繁中、AI 分段與服務切換
 
@@ -163,7 +198,7 @@ GPT-Live 回傳的是帶時間範圍的串流片段，沒有每個字的精準�
 
 ## 驗證狀態
 
-0.1.6 的 106 項測試及 Android APK 建置通過，已驗證原始簽章、版本與 APK 對齊。測試涵蓋兩家服務的本機 TLS 連線、繁中與數值保留、AI 段落位置及金鑰隔離。尚未使用真實雲端憑證驗證翻譯／分段品質，也尚未驗證本版 iOS 編譯與實機。詳見 [BUILD_STATUS.md](BUILD_STATUS.md)。
+本版測試及建置結果見 [BUILD_STATUS.md](BUILD_STATUS.md)。測試涵蓋兩家服務的本機 TLS 連線、繁中與數值保留、AI 段落位置、金鑰隔離、音源選擇，以及內容篩選事件後繼續／結束的不同生命週期。單元測試不代表已驗證 Teams 實機擷取或服務端誤判是否消失。
 
 ## 官方介面參考
 

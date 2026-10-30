@@ -337,6 +337,9 @@ class AppController(
                     phase = if (sessionFailure != null) ConnectionPhase.ERROR else ConnectionPhase.IDLE,
                     message = sessionFailure ?: mutable.value.message,
                 )
+                // Do not dismiss the Android foreground service until the final network
+                // frames and transcript writes have completed.
+                services.microphone.releaseSession()
             }
         }
     }
@@ -425,6 +428,7 @@ class AppController(
 
     fun dispose() {
         runCatching { services.microphone.stop() }
+        runCatching { services.microphone.releaseSession() }
         audio?.cancel()
         scope.cancel()
         transport.close()

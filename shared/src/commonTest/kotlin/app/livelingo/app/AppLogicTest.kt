@@ -45,6 +45,35 @@ class AppLogicTest {
         assertTrue(repository.history().isEmpty())
     }
 
+    @Test fun translationModesPersistAndAreSnapshotForEachSession() = runTest {
+        val services = configuredServices()
+        val transport = FakeTransport()
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
+        controller.setTranslationOptions(TranslationPace.FAST, TranslationQuality.NATURAL)
+        assertEquals(TranslationPace.FAST, AppRepository(services.memory).preferences().pace)
+        assertEquals(TranslationQuality.NATURAL, AppRepository(services.memory).preferences().quality)
+        controller.start()
+        runCurrent()
+        assertEquals(TranslationPace.FAST, transport.sessionSettings.single().pace)
+        assertEquals(TranslationQuality.NATURAL, transport.sessionSettings.single().quality)
+        controller.setTranslationOptions(TranslationPace.BALANCED, TranslationQuality.FAITHFUL)
+        assertEquals(TranslationPace.FAST, AppRepository(services.memory).preferences().pace)
+        controller.stop()
+        runCurrent()
+        controller.dispose()
+    }
+
+    @Test fun olderPreferencesLoadDefaultModesWithoutResettingExistingSettings() {
+        val services = FakeServices()
+        services.memory.regular["preferences"] =
+            """{"foundryEndpoint":"https://example.openai.azure.com","deployment":"gpt-live-1","source":"ENGLISH","target":"ZH_TW","knowledgeId":"banking"}"""
+        val preferences = AppRepository(services.memory).preferences()
+        assertEquals(Language.ENGLISH, preferences.source)
+        assertEquals("banking", preferences.knowledgeId)
+        assertEquals(TranslationPace.BALANCED, preferences.pace)
+        assertEquals(TranslationQuality.FAITHFUL, preferences.quality)
+    }
+
     @Test fun corruptStorageDoesNotGetSilentlyOverwritten() = runTest {
         val services = FakeServices()
         services.memory.regular["preferences"] = "broken JSON"
@@ -489,6 +518,7 @@ private class FakeTransport(val ready: CompletableDeferred<Unit> = CompletableDe
     val audio = mutableListOf<ByteArray>()
     val connections = mutableListOf<FoundryConnection>()
     val keys = mutableListOf<String>()
+    val sessionSettings = mutableListOf<SessionSettings>()
     var runFailure: Exception? = null
     var probes = 0
     val probeConnections = mutableListOf<FoundryConnection>()
@@ -501,6 +531,7 @@ private class FakeTransport(val ready: CompletableDeferred<Unit> = CompletableDe
         starts++
         connections += connection
         keys += apiKey
+        sessionSettings += settings
         runFailure?.let { throw it }
         ready.await()
         onReady()

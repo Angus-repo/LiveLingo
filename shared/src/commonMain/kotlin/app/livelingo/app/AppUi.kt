@@ -179,6 +179,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
     val source = state.preferences.source
     val target = state.preferences.target
     val knowledge = state.knowledge.find { it.id == state.preferences.knowledgeId }
+    val sourceLabel = liveSourceLanguageLabel(source, state.current)
     val listState = rememberLazyListState()
     LaunchedEffect(state.active) { if (state.active) listState.scrollToItem(0) }
     LazyColumn(state = listState, contentPadding = PaddingValues(start = 18.dp, end = 18.dp, bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -193,10 +194,26 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
         }
         if (!state.active) item { SectionCard("準備這一場對話") {
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Box(Modifier.weight(1f)) { Choice("聽到的語言", source.label, Language.entries.map { it.name to it.label }, !state.active) { controller.setLanguages(Language.valueOf(it), target) } }
+                Box(Modifier.weight(1f)) { Choice("聽到的語言", sourceLabel, Language.entries.map { it.name to it.label }, !state.active) { controller.setLanguages(Language.valueOf(it), target) } }
                 Box(Modifier.weight(1f)) { Choice("翻譯成", target.label, Language.entries.filterNot { it == Language.AUTO }.map { it.name to it.label }, !state.active) { controller.setLanguages(source, Language.valueOf(it)) } }
             }
             Choice("背景知識", knowledge?.name ?: "不使用背景知識", listOf("" to "不使用背景知識") + state.knowledge.map { it.id to it.name }, !state.active) { controller.selectKnowledge(it.ifBlank { null }) }
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Box(Modifier.weight(1f)) {
+                    Choice("翻譯速度", state.preferences.pace.label,
+                        TranslationPace.entries.map { it.name to it.label }, !state.busy) {
+                        controller.setTranslationOptions(TranslationPace.valueOf(it), state.preferences.quality)
+                    }
+                }
+                Box(Modifier.weight(1f)) {
+                    Choice("翻譯品質", state.preferences.quality.label,
+                        TranslationQuality.entries.map { it.name to it.label }, !state.busy) {
+                        controller.setTranslationOptions(state.preferences.pace, TranslationQuality.valueOf(it))
+                    }
+                }
+            }
+            Text("速度與品質是 GPT-Live 翻譯指令策略，不是模型的延遲或準確率保證；優先即時可能犧牲部分上下文。", style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971))
+            if (source == Language.AUTO) Text("自動偵測的語言名稱依原文字幕推測，非 Foundry 回傳的音訊語言標籤；無法藉文字辨別印度英文口音。", style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971))
             if (source == Language.INDIAN_ENGLISH) Text("印度英文使用口音與用語提示；實際辨識效果仍受收音品質影響。", style = MaterialTheme.typography.bodySmall)
             if (!state.hasApiKey || state.preferences.foundryEndpoint.isBlank()) {
                 TextButton(onClick = onSettings) { Text("先完成 Foundry 連線 →") }
@@ -219,8 +236,8 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
             Text("音訊與所選背景知識會直接傳至 Microsoft Foundry。Android 翻譯開始後可切換 App 或鎖定螢幕，從常駐通知停止；iOS 目前仍需保持前景。", style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971))
         } }
         if (state.active) item { SectionCard {
-            Text("${source.label} → ${target.label}", fontWeight = FontWeight.Bold)
-            Text("背景：${knowledge?.name ?: "無"}", style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971))
+            Text("${sourceLabel} → ${target.label}", fontWeight = FontWeight.Bold)
+            Text("背景：${knowledge?.name ?: "無"} · ${state.preferences.pace.label} / ${state.preferences.quality.label}", style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971))
             Button(onClick = controller::stop, enabled = state.phase != ConnectionPhase.STOPPING,
                 modifier = Modifier.fillMaxWidth().height(48.dp), shape = RoundedCornerShape(14.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF9A473E))) {
@@ -237,7 +254,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                 Text(when { state.current?.fragments?.isNotEmpty() != true -> "等待對話"; state.transcriptSaved -> "已自動儲存"; state.phase == ConnectionPhase.ERROR -> "請先匯出"; else -> "儲存中" }, style = MaterialTheme.typography.labelMedium, color = Mint)
             }
         }
-        item { TranscriptPanel("原文", source.label, state.current, TranscriptChannel.INPUT, Mint) }
+        item { TranscriptPanel("原文", sourceLabel, state.current, TranscriptChannel.INPUT, Mint) }
         item { TranscriptPanel("譯文", target.label, state.current, TranscriptChannel.OUTPUT, Purple) }
         item { SectionCard("發言者標記", "手動標記接下來收到的原文；不是自動聲紋辨識。字幕可能延遲抵達，結束後可在逐字稿修正。") {
             Choice("接下來收到的原文", state.speaker,
@@ -256,37 +273,27 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
 }
 
 @Composable private fun TranscriptPanel(title: String, language: String, record: TranscriptRecord?, channel: TranscriptChannel, color: Color) {
-    // All subtitles remain available, chronological. Each track follows its newest line.
-    val cues = displayCues(record, channel)
-    val scroll = rememberLazyListState()
-    LaunchedEffect(record?.id, cues.size, cues.lastOrNull()?.text) {
-        // The trailing item makes the bottom of even a long last cue visible.
-        scroll.scrollToItem(cues.size)
+    // Provider deltas are arbitrary audio chunks, not sentences: render as one continuous text flow.
+    // Only the container width determines wrapping, not GPT-Live fragment boundaries.
+    val text = liveCaptionText(record, channel)
+    val scroll = rememberScrollState()
+    LaunchedEffect(record?.id, text, scroll.maxValue) {
+        // maxValue updates after text layout; following it keeps the newest character visible.
+        scroll.scrollTo(scroll.maxValue)
     }
     SectionCard {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text(title, color = color, fontWeight = FontWeight.Bold)
             Text(language, color = Color(0xFF657971), style = MaterialTheme.typography.labelMedium)
         }
-        if (cues.isEmpty()) {
+        if (text.isEmpty()) {
             Text(if (channel == TranscriptChannel.OUTPUT) "開始說話後，翻譯會出現在這裡。" else "原始語音的辨識文字會保留在這裡。",
                 color = Color(0xFF8C9A92), modifier = Modifier.padding(vertical = 18.dp))
         } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxWidth().height(230.dp),
-                state = scroll,
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                items(cues, key = { it.ids.first() }) { cue ->
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        // Timestamp is export/history metadata, never part of live subtitles.
-                        cue.speaker?.let {
-                            Text("手動：$it", style = MaterialTheme.typography.labelSmall, color = Color(0xFF657971))
-                        }
-                        SelectionContainer { Text(cue.text.trim(), fontSize = 18.sp, lineHeight = 28.sp) }
-                    }
+            Box(Modifier.fillMaxWidth().height(230.dp).verticalScroll(scroll)) {
+                SelectionContainer {
+                    Text(text, fontSize = 18.sp, lineHeight = 29.sp, softWrap = true)
                 }
-                item(key = "live-scroll-end") { Spacer(Modifier.height(1.dp)) }
             }
         }
     }
@@ -464,13 +471,17 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
         item { SectionCard("開始使用") {
             Text("1  在 Microsoft Foundry 部署 GPT-Live 模型。\n\n2  填入資源端點、部署名稱與該資源的 API key。\n\n3  回到即時翻譯，選語言與背景知識，允許麥克風後即可開始。", style = MaterialTheme.typography.bodyMedium)
         } }
+        item { SectionCard("翻譯策略說明") {
+            Text("開始翻譯前，可在「即時翻譯」選擇速度與品質。優先即時偏向短語盡早輸出；平衡保留較多上下文。忠實原文偏重數字、語義與完整性；自然流暢偏重譯句自然。所有策略均禁止增添未說出的事實。", style = MaterialTheme.typography.bodyMedium)
+            Text("GPT-Live 的 session.start 不支援直接指定 temperature、推理強度或 Realtime VAD 靜音閾值；因此上述控制採用提示指令，不能保證固定延遲。", style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971))
+        } }
         item { SectionCard("資料與收音") {
             Text("逐字稿與背景知識儲存在這台裝置；App 不保存原始錄音。錄音期間音訊會透過加密連線直接送至 Microsoft Foundry。", style = MaterialTheme.typography.bodyMedium)
             Text("API key 僅用於所設定的 Foundry 資源，不會包含在逐字稿或匯出內容中。", style = MaterialTheme.typography.bodySmall)
             Text("Android 開始翻譯後可切換至背景或鎖定螢幕，系統會顯示麥克風前景服務通知及停止操作。來電、音訊中斷、系統強制停止或網路錯誤仍可能中止；iOS 目前需維持前景。", style = MaterialTheme.typography.bodySmall)
             Text("目前提供手動發言者標記。GPT-Live 不回傳多人身分；原文與譯文字幕也可能有辨識或翻譯誤差。", style = MaterialTheme.typography.bodySmall)
         } }
-        item { Text("LiveLingo 0.1.4 · Kotlin Multiplatform\nAndroid / iOS · Microsoft Foundry GPT-Live", style = MaterialTheme.typography.labelSmall, color = Color(0xFF657971), modifier = Modifier.padding(6.dp)) }
+        item { Text("LiveLingo 0.1.5 · Kotlin Multiplatform\nAndroid / iOS · Microsoft Foundry GPT-Live", style = MaterialTheme.typography.labelSmall, color = Color(0xFF657971), modifier = Modifier.padding(6.dp)) }
     }
     if (clearConfirm) ConfirmDelete("移除 Foundry API key？", "之後開始翻譯前，需要重新輸入 API key。", { clearConfirm = false }) { controller.clearApiKey(); clearConfirm = false }
 }

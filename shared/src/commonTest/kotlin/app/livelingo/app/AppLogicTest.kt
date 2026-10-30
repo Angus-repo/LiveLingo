@@ -5,6 +5,8 @@ package app.livelingo.app
 import app.livelingo.core.*
 import io.ktor.client.HttpClient
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runCurrent
@@ -253,6 +255,130 @@ class AppLogicTest {
         controller.dispose()
     }
 
+    @Test fun connectionProbeUsesFormWithoutRecordingKnowledgeOrSavingSettings() = runTest {
+        val services = configuredServices()
+        val repository = AppRepository(services.memory)
+        val originalPreferences = repository.preferences().copy(knowledgeId = "banking")
+        repository.savePreferences(originalPreferences)
+        val transport = FakeTransport()
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
+        controller.testConnection("https://other.openai.azure.com", "trial-deployment", "trial-key")
+        runCurrent()
+        assertEquals(1, transport.probes)
+        assertEquals("https://other.openai.azure.com", transport.probeConnections.single().endpoint)
+        assertEquals("trial-deployment", transport.probeConnections.single().deployment)
+        assertEquals("trial-key", transport.probeKeys.single())
+        assertEquals(0, transport.starts)
+        assertEquals(0, services.mic.starts)
+        assertTrue(repository.history().isEmpty())
+        assertEquals(originalPreferences, repository.preferences())
+        assertEquals("short-key", repository.apiKey(FoundryConnection(originalPreferences.foundryEndpoint).webSocketUrl()))
+        assertFalse(controller.state.value.connectionTesting)
+        assertTrue(controller.state.value.lastConnectionReport.orEmpty().contains("結果：成功"))
+        assertFalse(controller.state.value.lastConnectionReport.orEmpty().contains("trial-key"))
+        controller.dispose()
+    }
+
+    @Test fun probeReusesStoredKeyOnlyForSameCanonicalResource() = runTest {
+        val services = configuredServices()
+        val transport = FakeTransport()
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
+        controller.testConnection("https://other.openai.azure.com", "gpt-live-1", "")
+        runCurrent()
+        assertEquals(0, transport.probes)
+        controller.testConnection("https://EXAMPLE.openai.azure.com/openai/v1/", "gpt-live-1", "")
+        runCurrent()
+        assertEquals(1, transport.probes)
+        assertEquals("short-key", transport.probeKeys.single())
+        controller.dispose()
+    }
+
+    @Test fun structuredProbeFailureProducesShareableRedactedDiagnostics() = runTest {
+        val services = configuredServices()
+        val transport = FakeTransport().apply {
+            probeFailure = TranslationFailure("認證失敗 short-key", FoundryDiagnostic("WebSocket 握手", "HTTP_401", 401,
+                requestId = "request-short-key", providerCode = "invalid_api_key"))
+        }
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
+        controller.testConnection("https://example.openai.azure.com", "gpt-live-1", "")
+        runCurrent()
+        val report = assertNotNull(controller.state.value.lastConnectionReport)
+        assertTrue(report.contains("HTTP 狀態：401"))
+        assertTrue(report.contains("WebSocket 握手"))
+        assertTrue(report.contains("invalid_api_key"))
+        assertTrue(report.contains("Request ID：request-[已遮蔽]"))
+        assertFalse(report.contains("short-key"))
+        assertFalse(report.contains("example.openai.azure.com"))
+        assertFalse(report.contains("gpt-live-1"))
+        assertFalse(controller.state.value.message.orEmpty().contains("short-key"))
+        assertTrue(controller.state.value.showReportInMessage)
+        controller.exportConnectionReport()
+        assertEquals(report, services.exports.single())
+        assertEquals(0, services.mic.starts)
+        controller.dispose()
+    }
+
+    @Test fun unexpectedProbeExceptionNeverAppearsInDiagnosticReport() = runTest {
+        val services = configuredServices()
+        val transport = FakeTransport().apply { probeFailure = IllegalStateException("Authorization Bearer short-key RAW_EXCEPTION") }
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
+        controller.testConnection("https://example.openai.azure.com", "gpt-live-1", "")
+        runCurrent()
+        val report = assertNotNull(controller.state.value.lastConnectionReport)
+        assertTrue(report.contains("UNKNOWN"))
+        assertFalse(report.contains("short-key"))
+        assertFalse(report.contains("RAW_EXCEPTION"))
+        controller.dispose()
+    }
+
+    @Test fun cancelledProbeRemainsBusyUntilSocketCleanupAndCannotOverlapRecording() = runTest {
+        val services = configuredServices()
+        val cleanup = CompletableDeferred<Unit>()
+        val transport = FakeTransport().apply {
+            probeReady = CompletableDeferred()
+            probeCleanup = cleanup
+        }
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
+        controller.testConnection("https://example.openai.azure.com", "gpt-live-1", "")
+        runCurrent()
+        controller.cancelConnectionTest()
+        runCurrent()
+        assertTrue(transport.probeInCleanup)
+        assertTrue(controller.state.value.connectionTesting)
+        controller.start()
+        controller.testConnection("https://example.openai.azure.com", "gpt-live-1", "")
+        runCurrent()
+        assertEquals(0, transport.starts)
+        assertEquals(1, transport.probes)
+        assertEquals(0, services.mic.starts)
+        cleanup.complete(Unit)
+        runCurrent()
+        assertFalse(controller.state.value.connectionTesting)
+        controller.start()
+        runCurrent()
+        assertEquals(1, transport.starts)
+        controller.stop()
+        runCurrent()
+        controller.dispose()
+    }
+
+    @Test fun recordingConnectionFailureAlsoShowsStructuredDiagnostics() = runTest {
+        val services = configuredServices()
+        val transport = FakeTransport().apply {
+            runFailure = TranslationFailure("找不到此路徑。", FoundryDiagnostic("WebSocket 握手", "HTTP_404", 404))
+        }
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
+        controller.start()
+        runCurrent()
+        assertEquals(ConnectionPhase.ERROR, controller.state.value.phase)
+        assertTrue(controller.state.value.lastConnectionReport.orEmpty().contains("HTTP 狀態：404"))
+        assertTrue(controller.state.value.showReportInMessage)
+        assertEquals(0, services.mic.starts)
+        controller.clearApiKey()
+        assertFalse(controller.state.value.showReportInMessage)
+        controller.dispose()
+    }
+
     private fun configuredServices() = FakeServices().also {
         val repository = AppRepository(it.memory)
         repository.savePreferences(AppPreferences(foundryEndpoint = "https://example.openai.azure.com"))
@@ -306,10 +432,11 @@ private class FakeMic : Microphone {
 private class FakeServices : PlatformServices {
     val memory = MemoryStorage()
     val mic = FakeMic()
+    val exports = mutableListOf<String>()
     private var sequence = 0
     override val storage: LocalStorage = memory
     override val microphone: Microphone = mic
-    override val exporter = object : TextExporter { override fun export(fileName: String, mimeType: String, text: String) = Unit }
+    override val exporter = object : TextExporter { override fun export(fileName: String, mimeType: String, text: String) { exports += text } }
     override fun currentTimeMillis() = 123456L
     override fun uniqueId() = "test-${++sequence}"
     override fun createHttpClient(): HttpClient = error("Fake transport must be supplied")
@@ -321,13 +448,34 @@ private class FakeTransport(val ready: CompletableDeferred<Unit> = CompletableDe
     val audio = mutableListOf<ByteArray>()
     val connections = mutableListOf<FoundryConnection>()
     val keys = mutableListOf<String>()
+    var runFailure: Exception? = null
+    var probes = 0
+    val probeConnections = mutableListOf<FoundryConnection>()
+    val probeKeys = mutableListOf<String>()
+    var probeFailure: Exception? = null
+    var probeReady = CompletableDeferred(Unit)
+    var probeCleanup: CompletableDeferred<Unit>? = null
+    var probeInCleanup = false
     override suspend fun run(connection: FoundryConnection, apiKey: String, settings: SessionSettings, audio: ReceiveChannel<ByteArray>, onReady: suspend () -> Unit, onTranscript: suspend (TranscriptDelta) -> Unit) {
         starts++
         connections += connection
         keys += apiKey
+        runFailure?.let { throw it }
         ready.await()
         onReady()
         for (chunk in audio) this.audio += chunk
+    }
+    override suspend fun probe(connection: FoundryConnection, apiKey: String): ConnectionProbeResult {
+        probes++
+        probeConnections += connection
+        probeKeys += apiKey
+        try {
+            probeReady.await()
+            probeFailure?.let { throw it }
+            return ConnectionProbeResult("Foundry 連線與部署測試成功。", FoundryDiagnostic("完成", "OK", 101))
+        } finally {
+            probeCleanup?.let { gate -> withContext(NonCancellable) { probeInCleanup = true; gate.await(); probeInCleanup = false } }
+        }
     }
     override fun close() { closed = true }
 }

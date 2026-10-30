@@ -34,6 +34,10 @@ kotlin {
             implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.1")
             implementation("io.ktor:ktor-client-okhttp:3.3.1")
         }
+        androidUnitTest.dependencies {
+            implementation("com.squareup.okhttp3:mockwebserver:5.1.0")
+            implementation("com.squareup.okhttp3:okhttp-tls:5.1.0")
+        }
         iosMain.dependencies { implementation("io.ktor:ktor-client-darwin:3.3.1") }
     }
 }

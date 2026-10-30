@@ -20,8 +20,6 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.lifecycleScope
 import io.ktor.client.HttpClient
-import io.ktor.client.engine.okhttp.OkHttp
-import io.ktor.client.plugins.websocket.WebSockets
 import java.io.File
 import java.security.KeyStore
 import java.util.UUID
@@ -49,19 +47,7 @@ fun createAndroidServices(activity: ComponentActivity): PlatformServices {
         override val exporter: TextExporter = AndroidTextExporter(activity)
         override fun currentTimeMillis(): Long = System.currentTimeMillis()
         override fun uniqueId(): String = UUID.randomUUID().toString()
-        override fun createHttpClient(): HttpClient = HttpClient(OkHttp) {
-            // Never forward the device-held Foundry credential to a redirect destination.
-            followRedirects = false
-            install(WebSockets) { maxFrameSize = 1_048_576 }
-            engine {
-                config {
-                    followRedirects(false)
-                    followSslRedirects(false)
-                    pingInterval(20, TimeUnit.SECONDS)
-                    connectTimeout(15, TimeUnit.SECONDS)
-                }
-            }
-        }
+        override fun createHttpClient(): HttpClient = createAndroidFoundryHttpClient()
     }
 }
 
@@ -107,7 +93,7 @@ private class AndroidMicrophone(private val activity: ComponentActivity) : Micro
         check(activity.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) { "請回到 App 後再啟動翻譯。" }
         val minBuffer = AudioRecord.getMinBufferSize(24_000, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
         check(minBuffer > 0) { "此裝置無法以 24 kHz 單聲道錄音。" }
-        // 24,000 samples/sec × 2 bytes × 100ms. Only raw PCM reaches the server.
+        // 24,000 samples/sec × 2 bytes × 100ms. Only raw PCM reaches Foundry.
         val chunkBytes = 4_800
         val audio = AudioRecord.Builder()
             .setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
@@ -201,7 +187,7 @@ private class AndroidMicrophone(private val activity: ComponentActivity) : Micro
 
 private class AndroidStorage(activity: ComponentActivity) : LocalStorage {
     private val folder = File(activity.filesDir, "livelingo").apply { mkdirs() }
-    // Stable alias intentionally retained across 0.1.0 → 0.1.1 updates.
+    // Stable alias intentionally retained across app updates.
     private val alias = "livelingo.access-token.v1"
 
     private fun file(key: String): File {

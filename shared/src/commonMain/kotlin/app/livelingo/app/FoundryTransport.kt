@@ -2,14 +2,16 @@ package app.livelingo.app
 
 import app.livelingo.core.*
 import io.ktor.client.HttpClient
+import io.ktor.client.plugins.HttpResponseValidator
 import io.ktor.client.plugins.websocket.webSocketSession
 import io.ktor.client.request.header
 import io.ktor.client.request.url
 import io.ktor.websocket.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.ReceiveChannel
+import kotlinx.coroutines.channels.Channel
 
-class TranslationFailure(message: String) : Exception(message)
+class TranslationFailure(message: String, val diagnostic: FoundryDiagnostic? = null) : Exception(message)
 
 interface TranslationTransport {
     suspend fun run(
@@ -20,6 +22,15 @@ interface TranslationTransport {
         onReady: suspend () -> Unit,
         onTranscript: suspend (TranscriptDelta) -> Unit,
     )
+    /** Validates the real model lifecycle without using a microphone, knowledge profile, or transcript storage. */
+    suspend fun probe(connection: FoundryConnection, apiKey: String): ConnectionProbeResult {
+        val emptyAudio = Channel<ByteArray>(0)
+        emptyAudio.close()
+        try {
+            run(connection, apiKey, SessionSettings(), emptyAudio, {}, {})
+            return ConnectionProbeResult("Foundry 連線測試成功，GPT-Live 已啟動並正常結束。", FoundryDiagnostic(FoundryStages.COMPLETE, "OK", 101))
+        } finally { emptyAudio.cancel() }
+    }
     fun close()
 }
 
@@ -38,7 +49,22 @@ internal fun interface FoundrySocketFactory {
 
 private class KtorFoundrySocketFactory(private val originalClient: HttpClient) : FoundrySocketFactory {
     // Native platform engines also disable redirects.
-    private val client = originalClient.config { followRedirects = false }
+    private val client = originalClient.config {
+        followRedirects = false
+        expectSuccess = false
+        HttpResponseValidator {
+            validateResponse { response ->
+                val request = response.call.request
+                if (request.url.protocol.name in setOf("ws", "wss") && response.status.value != 101) {
+                    val secret = request.headers["Authorization"]?.removePrefix("Bearer ")
+                    val requestId = safeRequestId(response.headers["apim-request-id"] ?: response.headers["x-request-id"] ?: response.headers["request-id"], secret)
+                    // Failed WebSocket bodies are engine-specific and may not be readable channels.
+                    // Native Android interception captures safe bounded JSON fields before this layer.
+                    throw httpTranslationFailure(response.status.value, FoundryStages.HANDSHAKE, requestId = requestId)
+                }
+            }
+        }
+    }
     override suspend fun open(url: String, authorization: String): FoundrySocket {
         val session = client.webSocketSession {
             url(url)
@@ -48,7 +74,9 @@ private class KtorFoundrySocketFactory(private val originalClient: HttpClient) :
             override suspend fun send(payload: String) { session.send(Frame.Text(payload)) }
             override suspend fun receive(): String? {
                 while (true) {
-                    val frame = session.incoming.receiveCatching().getOrNull() ?: return null
+                    val received = session.incoming.receiveCatching()
+                    received.exceptionOrNull()?.let { throw it }
+                    val frame = received.getOrNull() ?: return null
                     if (frame.data.size > MAX_FOUNDRY_FRAME_BYTES) throw TranslationFailure("Foundry 回傳的事件超過大小限制。")
                     when (frame) {
                         is Frame.Text -> return frame.readText()
@@ -89,14 +117,28 @@ class KtorFoundryTransport internal constructor(
         var socket: FoundrySocket? = null
         var sender: Job? = null
         var drainDeadline: Job? = null
+        var stage = FoundryStages.HANDSHAKE
+        fun redacted(failure: TranslationFailure): TranslationFailure {
+            val diagnostic = failure.diagnostic ?: return failure
+            return TranslationFailure(failure.message ?: "Foundry 工作階段失敗。", diagnostic.copy(requestId = safeRequestId(diagnostic.requestId, key)))
+        }
+        fun decode(payload: String): FoundryEvent = try { parseFoundryEvent(payload) }
+        catch (failure: FoundryProtocolException) {
+            val fields = safeJsonErrorFields(payload, key)
+            throw TranslationFailure(failure.message ?: "Foundry 回應格式不正確。", FoundryDiagnostic(
+                stage, if (fields.providerCode != null) "PROVIDER_ERROR" else "PROTOCOL", requestId = fields.requestId, providerCode = fields.providerCode,
+            ))
+        }
         try {
           coroutineScope {
-            val active = withTimeout(startupTimeoutMillis) { sockets.open(connection.webSocketUrl(), "Bearer $key") }
-            socket = active
-            active.send(foundryStartPayload(connection, settings))
+            val active = withTimeout(startupTimeoutMillis) {
+                sockets.open(connection.webSocketUrl(), "Bearer $key").also { socket = it }
+            }
+            stage = FoundryStages.START
             withTimeout(startupTimeoutMillis) {
+                active.send(foundryStartPayload(connection, settings))
                 while (true) {
-                    val event = parseFoundryEvent(active.receive() ?: throw TranslationFailure("Foundry 在準備完成前已中斷連線。"))
+                    val event = decode(active.receive() ?: throw TranslationFailure("Foundry 在準備完成前已中斷連線。", FoundryDiagnostic(stage, "CONNECTION_CLOSED")))
                     when (event) {
                         is FoundryEvent.Ready -> break
                         FoundryEvent.Ignored -> Unit
@@ -104,27 +146,29 @@ class KtorFoundryTransport internal constructor(
                     }
                 }
             }
+            stage = FoundryStages.STREAM
             onReady()
             val stopRequested = CompletableDeferred<Unit>()
             sender = launch {
                 for (bytes in audio) active.send(foundryAudioPayload(bytes))
+                stage = FoundryStages.STOP
                 stopRequested.complete(Unit)
                 active.send(FOUNDRY_CLOSE_PAYLOAD)
             }
             drainDeadline = launch {
                 stopRequested.await()
                 delay(drainTimeoutMillis)
-                throw TranslationFailure("結束等待逾時；已收到的字幕已保留，最後一句可能不完整。")
+                throw TranslationFailure("結束等待逾時；已收到的字幕已保留，最後一句可能不完整。", FoundryDiagnostic(FoundryStages.STOP, "TIMEOUT"))
             }
             while (true) {
                 // Usage/audio events count as activity; GPT-Live has no relay Ping/Pong event.
                 val payload = try { withTimeout(inactivityTimeoutMillis) { active.receive() } }
-                catch (_: TimeoutCancellationException) { throw TranslationFailure("Foundry 超過 90 秒沒有回應，已停止收音並保留收到的字幕。") }
-                    ?: throw TranslationFailure("Foundry 連線已中斷；已收到的字幕已保留，最後一句可能不完整。")
-                when (val event = parseFoundryEvent(payload)) {
+                catch (_: TimeoutCancellationException) { throw TranslationFailure("Foundry 超過 90 秒沒有回應，已停止收音並保留收到的字幕。", FoundryDiagnostic(stage, "TIMEOUT")) }
+                    ?: throw TranslationFailure("Foundry 連線已中斷；已收到的字幕已保留，最後一句可能不完整。", FoundryDiagnostic(stage, "CONNECTION_CLOSED"))
+                when (val event = decode(payload)) {
                     is FoundryEvent.Transcript -> onTranscript(event.delta)
                     is FoundryEvent.Closed -> {
-                        foundryCloseError(event.reason, stopRequested.isCompleted)?.let { throw TranslationFailure(it) }
+                        foundryCloseError(event.reason, stopRequested.isCompleted)?.let { throw TranslationFailure(it, FoundryDiagnostic(stage, if (event.reason == "expired") "SESSION_EXPIRED" else "SESSION_CLOSED")) }
                         break
                     }
                     is FoundryEvent.Ready -> throw TranslationFailure("Foundry 重複啟動工作階段，已停止收音。")
@@ -135,15 +179,15 @@ class KtorFoundryTransport internal constructor(
             drainDeadline?.cancelAndJoin()
           }
         } catch (failure: FoundryProtocolException) {
-            throw TranslationFailure(failure.message ?: "Foundry 回應格式不正確。")
+            throw TranslationFailure(failure.message ?: "Foundry 回應格式不正確。", FoundryDiagnostic(stage, "PROTOCOL"))
         } catch (_: TimeoutCancellationException) {
-            throw TranslationFailure("Foundry 連線或啟動逾時，請檢查網路、資源端點與部署。")
+            throw TranslationFailure("Foundry 連線或啟動逾時，請檢查網路、資源端點與部署。", FoundryDiagnostic(stage, "TIMEOUT"))
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: TranslationFailure) {
-            throw failure
-        } catch (_: Exception) {
-            throw TranslationFailure("無法連接 Foundry，請檢查網路、API key、資源端點與 GPT-Live 部署權限。")
+            throw redacted(if (failure.diagnostic != null) failure else TranslationFailure(failure.message ?: "Foundry 工作階段失敗。", FoundryDiagnostic(stage, "SESSION_FAILURE")))
+        } catch (failure: Exception) {
+            throw redacted(classifyFoundryFailure(failure, stage))
         } finally {
             sender?.cancel()
             drainDeadline?.cancel()

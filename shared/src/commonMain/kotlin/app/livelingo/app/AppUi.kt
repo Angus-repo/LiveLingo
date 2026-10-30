@@ -10,6 +10,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -21,6 +22,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
@@ -49,6 +52,8 @@ fun LiveLingoApp(services: PlatformServices) {
     DisposableEffect(controller) { onDispose { controller.dispose() } }
     val state by controller.state.collectAsState()
     var page by remember { mutableStateOf(Page.LIVE) }
+    val clipboard = LocalClipboardManager.current
+    var copiedReport by remember(state.lastConnectionReport) { mutableStateOf(false) }
     MaterialTheme(colorScheme = Palette) {
         BoxWithConstraints(Modifier.fillMaxSize().background(Canvas).safeDrawingPadding()) {
             val wide = maxWidth >= 760.dp
@@ -72,7 +77,7 @@ fun LiveLingoApp(services: PlatformServices) {
                                 Text("即時譯 · 讓對話跨越語言", style = MaterialTheme.typography.labelMedium, color = Mint)
                             }
                         }
-                        StatusPill(state.phase)
+                        StatusPill(state.phase, state.connectionTesting)
                     }
                     Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
                         Box(Modifier.widthIn(max = 980.dp).fillMaxSize()) {
@@ -94,9 +99,25 @@ fun LiveLingoApp(services: PlatformServices) {
             }
         }
         state.message?.let { message ->
-            AlertDialog(onDismissRequest = controller::dismissMessage, title = { Text("提示") },
-                text = { SelectionContainer { Text(message) } },
-                confirmButton = { TextButton(onClick = controller::dismissMessage) { Text("知道了") } })
+            AlertDialog(onDismissRequest = controller::dismissMessage,
+                title = { Text(if (state.showReportInMessage) state.lastConnectionReportTitle else "提示") },
+                text = { SelectionContainer {
+                    Column(Modifier.heightIn(max = 440.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                        Text(message)
+                        if (state.showReportInMessage) state.lastConnectionReport?.let {
+                            HorizontalDivider()
+                            Text(it, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                } },
+                confirmButton = { TextButton(onClick = controller::dismissMessage) { Text("知道了") } },
+                dismissButton = {
+                    if (state.showReportInMessage && state.lastConnectionReport != null) {
+                        TextButton(onClick = { clipboard.setText(AnnotatedString(state.lastConnectionReport!!)); copiedReport = true }) {
+                            Text(if (copiedReport) "已複製" else "複製診斷")
+                        }
+                    }
+                })
         }
     }
 }
@@ -107,8 +128,8 @@ fun LiveLingoApp(services: PlatformServices) {
     }
 }
 
-@Composable private fun StatusPill(phase: ConnectionPhase) {
-    val text = when (phase) {
+@Composable private fun StatusPill(phase: ConnectionPhase, testing: Boolean = false) {
+    val text = if (testing) "測試連線" else when (phase) {
         ConnectionPhase.IDLE -> "待命"
         ConnectionPhase.CONNECTING -> "準備中"
         ConnectionPhase.LISTENING -> "收音中"
@@ -177,14 +198,14 @@ fun LiveLingoApp(services: PlatformServices) {
                 TextButton(onClick = onSettings) { Text("先完成 Foundry 連線 →") }
             }
             Button(onClick = { if (state.active) controller.stop() else controller.start() },
-                enabled = state.phase != ConnectionPhase.STOPPING && state.storageAvailable,
+                enabled = state.phase != ConnectionPhase.STOPPING && state.storageAvailable && !state.connectionTesting,
                 modifier = Modifier.fillMaxWidth().height(54.dp), shape = RoundedCornerShape(16.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = if (state.active) Color(0xFF9A473E) else Mint)) {
                 if (state.phase in setOf(ConnectionPhase.CONNECTING, ConnectionPhase.STOPPING)) {
                     CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = Color.White)
                     Spacer(Modifier.width(10.dp))
                 }
-                Text(when (state.phase) {
+                Text(if (state.connectionTesting) "連線測試進行中…" else when (state.phase) {
                     ConnectionPhase.CONNECTING -> "取消連線／麥克風授權"
                     ConnectionPhase.LISTENING -> "■  停止並儲存"
                     ConnectionPhase.STOPPING -> "接收最後的字幕…"
@@ -385,21 +406,50 @@ private fun displayCues(record: TranscriptRecord?, channel: TranscriptChannel): 
     var deployment by remember(state.preferences.deployment) { mutableStateOf(state.preferences.deployment) }
     var apiKey by remember { mutableStateOf("") }
     var clearConfirm by remember { mutableStateOf(false) }
+    val clipboard = LocalClipboardManager.current
+    var copiedReport by remember(state.lastConnectionReport) { mutableStateOf(false) }
+    val previewConnection = FoundryConnection(endpoint.trim(), deployment.trim())
+    val webSocketPreview = if (previewConnection.validationError() == null) previewConnection.webSocketUrl() else null
     LazyColumn(contentPadding = PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         item { PageIntro("Microsoft Foundry", "App 直接連接你的 Foundry 資源，使用 GPT-Live 進行即時翻譯。") }
         item { SectionCard("連線設定", "API key 使用裝置的安全儲存機制加密保存。") {
-            OutlinedTextField(endpoint, { endpoint = it }, label = { Text("Foundry 資源端點") }, placeholder = { Text("https://your-resource.openai.azure.com") }, singleLine = true, enabled = !state.active, modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(deployment, { deployment = it }, label = { Text("GPT-Live 部署名稱") }, placeholder = { Text("gpt-live-1") }, singleLine = true, enabled = !state.active, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(endpoint, { endpoint = it }, label = { Text("Azure OpenAI／Foundry 資源端點") }, placeholder = { Text("https://your-resource.openai.azure.com") }, singleLine = true, enabled = !state.busy, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(deployment, { deployment = it }, label = { Text("GPT-Live 部署名稱") }, placeholder = { Text("gpt-live-1") }, singleLine = true, enabled = !state.busy, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(apiKey, { apiKey = it }, label = { Text(if (state.hasApiKey) "新 API key（端點相同時可留空）" else "Foundry API key") }, singleLine = true, visualTransformation = PasswordVisualTransformation(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false),
-                enabled = !state.active, modifier = Modifier.fillMaxWidth())
+                enabled = !state.busy, modifier = Modifier.fillMaxWidth())
             if (state.hasApiKey) Text("✓ API key 已加密儲存在這台裝置", style = MaterialTheme.typography.bodySmall, color = Mint)
             Text("變更資源端點時，請重新輸入對應的 API key。部署名稱請填入 Foundry 中實際設定的名稱。", style = MaterialTheme.typography.bodySmall)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = { if (controller.saveConnection(endpoint, deployment, apiKey)) apiKey = "" }, enabled = !state.active && state.storageAvailable, shape = RoundedCornerShape(12.dp)) { Text("儲存連線設定") }
-                TextButton(onClick = { clearConfirm = true }, enabled = !state.active && state.storageAvailable) { Text("移除 API key") }
+            Text("請填入 Azure 資源的 HTTPS 根網址，例如 your-resource.openai.azure.com；不要填專案頁面、管理入口網址或其他模型的 API 路徑。", style = MaterialTheme.typography.bodySmall)
+            webSocketPreview?.let { preview ->
+                SelectionContainer { Text("實際連線網址：\n$preview", style = MaterialTheme.typography.labelSmall, color = Mint) }
             }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = { if (controller.saveConnection(endpoint, deployment, apiKey)) apiKey = "" }, enabled = !state.busy && state.storageAvailable, shape = RoundedCornerShape(12.dp)) { Text("儲存連線設定") }
+                TextButton(onClick = { clearConfirm = true }, enabled = !state.busy && state.storageAvailable) { Text("移除 API key") }
+            }
+            OutlinedButton(
+                onClick = { if (state.connectionTesting) controller.cancelConnectionTest() else controller.testConnection(endpoint, deployment, apiKey) },
+                enabled = !state.active && state.storageAvailable,
+                modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp),
+            ) {
+                if (state.connectionTesting) {
+                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(10.dp))
+                }
+                Text(if (state.connectionTesting) "取消連線測試" else "測試連線")
+            }
+            Text("測試目前欄位中的端點、金鑰與部署，不啟用麥克風、不傳送背景知識，也不修改已儲存的設定。", style = MaterialTheme.typography.bodySmall)
+            Text("測試會建立並關閉短暫的 GPT-Live 工作階段，可能產生服務用量。", style = MaterialTheme.typography.bodySmall)
         } }
+        state.lastConnectionReport?.let { report -> item { SectionCard("最近一次連線診斷", "資源名稱、部署名稱與金鑰已遮蔽，可將報告提供給維護人員。") {
+            Text(report, style = MaterialTheme.typography.bodySmall, maxLines = 7, overflow = TextOverflow.Ellipsis)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = controller::showConnectionReport) { Text("查看完整診斷") }
+                TextButton(onClick = { clipboard.setText(AnnotatedString(report)); copiedReport = true }) { Text(if (copiedReport) "已複製" else "複製") }
+                TextButton(onClick = controller::exportConnectionReport) { Text("分享") }
+            }
+        } } }
         item { SectionCard("開始使用") {
             Text("1  在 Microsoft Foundry 部署 GPT-Live 模型。\n\n2  填入資源端點、部署名稱與該資源的 API key。\n\n3  回到即時翻譯，選語言與背景知識，允許麥克風後即可開始。", style = MaterialTheme.typography.bodyMedium)
         } }
@@ -409,7 +459,7 @@ private fun displayCues(record: TranscriptRecord?, channel: TranscriptChannel): 
             Text("切換到背景、來電或音訊中斷時會停止收音。恢復後請手動開始新的一段。", style = MaterialTheme.typography.bodySmall)
             Text("目前提供手動發言者標記。GPT-Live 不回傳多人身分；原文與譯文字幕也可能有辨識或翻譯誤差。", style = MaterialTheme.typography.bodySmall)
         } }
-        item { Text("LiveLingo 0.1.1 · Kotlin Multiplatform\nAndroid / iOS · Microsoft Foundry GPT-Live", style = MaterialTheme.typography.labelSmall, color = Color(0xFF657971), modifier = Modifier.padding(6.dp)) }
+        item { Text("LiveLingo 0.1.2 · Kotlin Multiplatform\nAndroid / iOS · Microsoft Foundry GPT-Live", style = MaterialTheme.typography.labelSmall, color = Color(0xFF657971), modifier = Modifier.padding(6.dp)) }
     }
     if (clearConfirm) ConfirmDelete("移除 Foundry API key？", "之後開始翻譯前，需要重新輸入 API key。", { clearConfirm = false }) { controller.clearApiKey(); clearConfirm = false }
 }

@@ -9,4 +9,4 @@ plugins {
     id("com.android.application") apply false
     id("com.android.library") apply false
 }
-allprojects { group = "app.livelingo"; version = "0.1.1" }
+allprojects { group = "app.livelingo"; version = "0.1.2" }

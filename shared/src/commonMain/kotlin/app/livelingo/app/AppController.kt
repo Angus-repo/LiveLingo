@@ -7,6 +7,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.encodeToString
+import kotlin.time.ExperimentalTime
+import kotlin.time.Instant
 
 enum class ConnectionPhase { IDLE, CONNECTING, LISTENING, STOPPING, ERROR }
 
@@ -21,8 +23,13 @@ data class AppState(
     val message: String? = null,
     val storageAvailable: Boolean = true,
     val transcriptSaved: Boolean = true,
+    val connectionTesting: Boolean = false,
+    val lastConnectionReport: String? = null,
+    val lastConnectionReportTitle: String = "Foundry 連線診斷",
+    val showReportInMessage: Boolean = false,
 ) {
     val active: Boolean get() = phase in setOf(ConnectionPhase.CONNECTING, ConnectionPhase.LISTENING, ConnectionPhase.STOPPING)
+    val busy: Boolean get() = active || connectionTesting
 }
 
 class AppController(
@@ -37,6 +44,7 @@ class AppController(
     private var apiKey = ""
     private var audio: Channel<ByteArray>? = null
     private var sessionJob: Job? = null
+    private var probeJob: Job? = null
     private var sessionFailure: String? = null
 
     init {
@@ -70,8 +78,8 @@ class AppController(
         }
     }
 
-    fun dismissMessage() { mutable.value = mutable.value.copy(message = null) }
-    private fun inform(message: String) { mutable.value = mutable.value.copy(message = message) }
+    fun dismissMessage() { mutable.value = mutable.value.copy(message = null, showReportInMessage = false) }
+    private fun inform(message: String) { mutable.value = mutable.value.copy(message = message, showReportInMessage = false) }
 
     fun setLanguages(source: Language, target: Language) {
         if (mutable.value.active || target == Language.AUTO) return
@@ -89,31 +97,18 @@ class AppController(
     }
 
     fun saveConnection(endpoint: String, deployment: String, replacementApiKey: String): Boolean {
-        if (mutable.value.active || !mutable.value.storageAvailable) return false
-        val connection = FoundryConnection(endpoint.trim(), deployment.trim())
-        connection.validationError()?.let { inform(it); return false }
+        if (mutable.value.busy || !mutable.value.storageAvailable) return false
+        val resolved = resolveConnection(endpoint, deployment, replacementApiKey) ?: return false
+        val connection = resolved.connection
         val canonicalEndpoint = connection.webSocketUrl()
         val previous = FoundryConnection(mutable.value.preferences.foundryEndpoint, mutable.value.preferences.deployment)
         val previousEndpoint = if (previous.validationError() == null) previous.webSocketUrl() else null
-        if (canonicalEndpoint != previousEndpoint && replacementApiKey.isEmpty()) {
-            inform("新增或變更 Foundry 端點時，請重新輸入這個資源的 API key。")
-            return false
-        }
-        if (replacementApiKey.any { it.code < 0x20 || it.code == 0x7f }) {
-            inform("API key 不能包含換行或控制字元。")
-            return false
-        }
-        val nextKey = if (replacementApiKey.isEmpty()) apiKey else replacementApiKey.trim()
-        if (nextKey.isBlank() || nextKey.any { it.isWhitespace() }) {
-            inform("請輸入有效的 Foundry API key，且不要包含空白。")
-            return false
-        }
         val preferences = mutable.value.preferences.copy(foundryEndpoint = connection.endpoint, deployment = connection.deployment)
         return try {
-            repository.saveApiKey(canonicalEndpoint, nextKey)
+            repository.saveApiKey(canonicalEndpoint, resolved.apiKey)
             repository.savePreferences(preferences)
-            apiKey = nextKey
-            mutable.value = mutable.value.copy(preferences = preferences, hasApiKey = true, message = "Foundry 連線設定已儲存。")
+            apiKey = resolved.apiKey
+            mutable.value = mutable.value.copy(preferences = preferences, hasApiKey = true, message = "Foundry 連線設定已儲存。", showReportInMessage = false)
             true
         } catch (_: Exception) {
             // Reconcile with the encrypted destination binding; never send a newly stored key to an old endpoint.
@@ -124,12 +119,93 @@ class AppController(
         }
     }
 
+    private data class ResolvedConnection(val connection: FoundryConnection, val apiKey: String)
+
+    private fun resolveConnection(endpoint: String, deployment: String, replacementApiKey: String): ResolvedConnection? {
+        val connection = FoundryConnection(endpoint.trim(), deployment.trim())
+        connection.validationError()?.let { inform(it); return null }
+        val canonicalEndpoint = connection.webSocketUrl()
+        val previous = FoundryConnection(mutable.value.preferences.foundryEndpoint, mutable.value.preferences.deployment)
+        val previousEndpoint = if (previous.validationError() == null) previous.webSocketUrl() else null
+        if (canonicalEndpoint != previousEndpoint && replacementApiKey.isEmpty()) {
+            inform("新增或變更 Foundry 端點時，請重新輸入這個資源的 API key。")
+            return null
+        }
+        if (replacementApiKey.any { it.code < 0x20 || it.code == 0x7f }) {
+            inform("API key 不能包含換行或控制字元。")
+            return null
+        }
+        val nextKey = if (replacementApiKey.isEmpty()) apiKey else replacementApiKey.trim()
+        if (nextKey.isBlank() || nextKey.any { it.isWhitespace() }) {
+            inform("請輸入有效的 Foundry API key，且不要包含空白。")
+            return null
+        }
+        return ResolvedConnection(connection, nextKey)
+    }
+
     fun clearApiKey() {
-        if (mutable.value.active || !mutable.value.storageAvailable) return
+        if (mutable.value.busy || !mutable.value.storageAvailable) return
         try {
             repository.clearApiKey(); apiKey = ""
-            mutable.value = mutable.value.copy(hasApiKey = false, message = "已移除 Foundry API key。")
+            mutable.value = mutable.value.copy(hasApiKey = false, message = "已移除 Foundry API key。", showReportInMessage = false)
         } catch (_: Exception) { inform("無法移除 API key，請重試。") }
+    }
+
+    /** Tests the displayed form without saving it, recording audio, or selecting any background knowledge. */
+    fun testConnection(endpoint: String, deployment: String, replacementApiKey: String) {
+        if (mutable.value.busy || !mutable.value.storageAvailable) return
+        val resolved = resolveConnection(endpoint, deployment, replacementApiKey) ?: return
+        mutable.value = mutable.value.copy(connectionTesting = true, message = null,
+            lastConnectionReport = null, showReportInMessage = false)
+        val job = scope.launch(start = CoroutineStart.LAZY) {
+            try {
+                val result = withTimeout(75_000) { transport.probe(resolved.connection, resolved.apiKey) }
+                recordDiagnostic(resolved.connection, resolved.apiKey, result.diagnostic, result.message, success = true)
+            } catch (_: TimeoutCancellationException) {
+                recordDiagnostic(resolved.connection, resolved.apiKey,
+                    FoundryDiagnostic("連線測試", "PROBE_TIMEOUT"), "連線測試逾時，請檢查網路與資源端點後重試。", success = false)
+            } catch (_: CancellationException) {
+                // User cancellation and disposal must never turn on the microphone or create a transcript.
+            } catch (failure: Exception) {
+                val safe = failure as? TranslationFailure
+                recordDiagnostic(resolved.connection, resolved.apiKey,
+                    safe?.diagnostic ?: FoundryDiagnostic("連線測試", "UNKNOWN"),
+                    safe?.message ?: "連線測試失敗，請檢查網路或稍後重試。", success = false)
+            } finally {
+                mutable.value = mutable.value.copy(connectionTesting = false)
+                probeJob = null
+            }
+        }
+        probeJob = job
+        job.start()
+    }
+
+    fun cancelConnectionTest() {
+        if (!mutable.value.connectionTesting) return
+        inform("已取消連線測試，沒有啟用麥克風。")
+        probeJob?.cancel()
+    }
+
+    fun showConnectionReport() {
+        if (mutable.value.lastConnectionReport == null) return
+        mutable.value = mutable.value.copy(message = "可複製或分享以下診斷資訊。", showReportInMessage = true)
+    }
+
+    fun exportConnectionReport() {
+        val report = mutable.value.lastConnectionReport ?: return
+        try { services.exporter.export("LiveLingo_connection_diagnostic_${services.currentTimeMillis()}.txt", "text/plain", report) }
+        catch (_: Exception) { inform("無法分享診斷資訊，請使用複製功能。") }
+    }
+
+    private fun recordDiagnostic(connection: FoundryConnection, secret: String, diagnostic: FoundryDiagnostic,
+                                 message: String, success: Boolean) {
+        val safeMessage = safeDiagnosticField(message, secret)
+        mutable.value = mutable.value.copy(
+            message = safeMessage,
+            lastConnectionReport = connectionReport(connection, diagnostic, safeMessage, success, services.currentTimeMillis(), secret),
+            lastConnectionReportTitle = if (success) "連線測試成功" else "Foundry 連線失敗",
+            showReportInMessage = true,
+        )
     }
 
     fun saveKnowledge(id: String?, name: String, content: String): Boolean {
@@ -161,10 +237,11 @@ class AppController(
 
     fun start() {
         val snapshot = mutable.value
-        if (snapshot.active || sessionJob?.isActive == true || !snapshot.storageAvailable) return
+        if (snapshot.busy || sessionJob?.isActive == true || !snapshot.storageAvailable) return
         val connection = FoundryConnection(snapshot.preferences.foundryEndpoint, snapshot.preferences.deployment)
         connection.validationError()?.let { inform("請先到「設定」完成 Foundry 連線。$it"); return }
         if (apiKey.isBlank()) { inform("請先到「設定」儲存 Foundry API key。"); return }
+        val sessionApiKey = apiKey
         val settings = SessionSettings(snapshot.preferences.source, snapshot.preferences.target,
             snapshot.knowledge.find { it.id == snapshot.preferences.knowledgeId })
         settings.validationError()?.let { inform(it); return }
@@ -177,10 +254,10 @@ class AppController(
         sessionFailure = null
         var savedFragmentCount = 0
         mutable.value = snapshot.copy(phase = ConnectionPhase.CONNECTING, current = record, transcriptSaved = true,
-            history = listOf(record) + snapshot.history, message = null)
+            history = listOf(record) + snapshot.history, message = null, lastConnectionReport = null, showReportInMessage = false)
         sessionJob = scope.launch {
             try {
-                transport.run(connection, apiKey, settings, queue,
+                transport.run(connection, sessionApiKey, settings, queue,
                     onReady = {
                         ensureActive()
                         if (mutable.value.phase != ConnectionPhase.CONNECTING) throw CancellationException()
@@ -227,8 +304,11 @@ class AppController(
                 // User stop during connection and disposal intentionally cancel; microphone errors supply their own message.
             } catch (failure: Exception) {
                 sessionFailure = when (failure) {
-                    is TranslationFailure -> failure.message
+                    is TranslationFailure -> safeDiagnosticField(failure.message.orEmpty(), sessionApiKey)
                     else -> "Foundry 連線失敗。請檢查端點、部署名稱、API key 與網路狀態；已收到的字幕已保留。"
+                }
+                (failure as? TranslationFailure)?.diagnostic?.let { diagnostic ->
+                    recordDiagnostic(connection, sessionApiKey, diagnostic, sessionFailure.orEmpty(), success = false)
                 }
             } finally {
                 runCatching { services.microphone.stop() }
@@ -339,5 +419,38 @@ class AppController(
         scope.cancel()
         transport.close()
         apiKey = ""
+    }
+}
+
+/** Only curated error fields enter this report; headers, provider bodies and exception text are excluded. */
+private fun safeDiagnosticField(value: String, secret: String): String {
+    val masked = if (secret.isEmpty()) value else value.replace(secret, "[已遮蔽]")
+    return masked.map { if (it.code < 0x20 || it.code == 0x7f) ' ' else it }.joinToString("").take(400)
+}
+
+@OptIn(ExperimentalTime::class)
+private fun connectionReport(connection: FoundryConnection, diagnostic: FoundryDiagnostic, message: String,
+                             success: Boolean, timestamp: Long, secret: String): String {
+    val endpointFamily = when {
+        connection.endpoint.lowercase().contains(".openai.azure.com") -> "<resource>.openai.azure.com"
+        connection.endpoint.lowercase().contains(".services.ai.azure.com") -> "<resource>.services.ai.azure.com"
+        connection.endpoint.lowercase().contains(".cognitiveservices.azure.com") -> "<resource>.cognitiveservices.azure.com"
+        else -> "<已遮蔽資源主機>"
+    }
+    val originalTime = Instant.fromEpochMilliseconds(timestamp).toString()
+    val taiwanTime = Instant.fromEpochMilliseconds(timestamp + 8 * 60 * 60 * 1000).toString().removeSuffix("Z")
+    return buildString {
+        appendLine("LiveLingo 0.1.2 · Foundry 連線診斷")
+        appendLine("時間：$originalTime（台灣時間：$taiwanTime +08:00）")
+        appendLine("結果：${if (success) "成功" else "失敗"}")
+        appendLine("階段：${safeDiagnosticField(diagnostic.stage, secret)}")
+        appendLine("分類：${safeDiagnosticField(diagnostic.code, secret)}")
+        appendLine("HTTP 狀態：${diagnostic.httpStatus?.toString() ?: "未取得"}")
+        appendLine("資源：wss://$endpointFamily/openai/v1/live/sessions")
+        appendLine("部署名稱：已遮蔽（${connection.deployment.length} 個字元）")
+        diagnostic.providerCode?.let { appendLine("服務錯誤碼：${safeDiagnosticField(it, secret)}") }
+        diagnostic.requestId?.let { appendLine("Request ID：${safeDiagnosticField(it, secret)}") }
+        appendLine("說明：${safeDiagnosticField(message, secret)}")
+        appendLine("此報告不含 API key、授權標頭、背景知識、音訊或逐字稿。")
     }
 }

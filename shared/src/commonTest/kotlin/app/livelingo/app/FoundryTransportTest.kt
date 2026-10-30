@@ -22,7 +22,11 @@ private class FakeFoundrySocket : FoundrySocket {
         sentTypes += WireJson.parseToJsonElement(payload).jsonObject.getValue("type").jsonPrimitive.content
         sent.send(payload)
     }
-    override suspend fun receive(): String? = incoming.receiveCatching().getOrNull()
+    override suspend fun receive(): String? {
+        val result = incoming.receiveCatching()
+        result.exceptionOrNull()?.let { throw it }
+        return result.getOrNull()
+    }
     override suspend fun close() { closed = true }
     override fun cancel() { cancelled = true }
 }
@@ -170,5 +174,75 @@ class FoundryTransportTest {
             assertIs<TranslationFailure>(result.exceptionOrNull())
         }
         assertFalse(opened)
+    }
+
+    @Test fun probeStartsAndClosesTheActualModelWithoutSendingAudio() = runTest {
+        val socket = FakeFoundrySocket()
+        val transport = KtorFoundryTransport(FoundrySocketFactory { _, _ -> socket })
+        val result = CompletableDeferred<Result<ConnectionProbeResult>>()
+        launch { result.complete(runCatching { transport.probe(FoundryConnection("https://sample.openai.azure.com", "live-test"), "private-key") }) }
+        val start = WireJson.parseToJsonElement(socket.sent.receive()).jsonObject
+        assertEquals("live-test", start.getValue("session").jsonObject.getValue("model").jsonPrimitive.content)
+        socket.incoming.send(STARTED)
+        assertEquals(FOUNDRY_CLOSE_PAYLOAD, socket.sent.receive())
+        socket.incoming.send(CLOSED)
+        val success = result.await().getOrThrow()
+        assertEquals("OK", success.diagnostic.code)
+        assertEquals(101, success.diagnostic.httpStatus)
+        assertEquals(listOf("session.start", "session.close"), socket.sentTypes)
+        assertTrue(socket.closed && socket.cancelled)
+    }
+
+    @Test fun failedProbeHasStartupStageAndSafeProviderCode() = runTest {
+        val socket = FakeFoundrySocket()
+        val transport = KtorFoundryTransport(FoundrySocketFactory { _, _ -> socket })
+        val result = CompletableDeferred<Result<ConnectionProbeResult>>()
+        launch { result.complete(runCatching { transport.probe(FoundryConnection("https://sample.openai.azure.com"), "private-key") }) }
+        socket.sent.receive()
+        socket.incoming.send("""{"type":"error","error":{"code":"DeploymentNotFound","message":"private-key"}}""")
+        val failure = assertIs<TranslationFailure>(result.await().exceptionOrNull())
+        assertEquals(FoundryStages.START, failure.diagnostic?.stage)
+        assertEquals("DeploymentNotFound", failure.diagnostic?.providerCode)
+        assertFalse(failure.message.orEmpty().contains("private-key"))
+        assertTrue(socket.cancelled)
+    }
+
+    @Test fun handshakeFailureDoesNotLeakIntoLaterDiagnostic() = runTest {
+        val echoedKey = "abcdef0123456789abcdef0123456789"
+        var attempt = 0
+        val transport = KtorFoundryTransport(FoundrySocketFactory { _, _ ->
+            if (++attempt == 1) throw object : Exception("secret"), FoundryHttpFailure {
+                override val statusCode = 401
+                override val providerCode = "Unauthorized"
+                override val requestId = echoedKey
+            }
+            throw IllegalStateException("private-key cannot connect")
+        })
+        val first = assertIs<TranslationFailure>(runCatching { transport.probe(FoundryConnection("https://sample.openai.azure.com"), echoedKey) }.exceptionOrNull())
+        assertEquals(401, first.diagnostic?.httpStatus)
+        assertNull(first.diagnostic?.requestId) // Even a syntactically valid ID must not reveal the active key.
+        val second = assertIs<TranslationFailure>(runCatching { transport.probe(FoundryConnection("https://sample.openai.azure.com"), "private-key") }.exceptionOrNull())
+        assertEquals("NETWORK_UNKNOWN", second.diagnostic?.code)
+        assertNull(second.diagnostic?.httpStatus)
+        assertNull(second.diagnostic?.requestId)
+    }
+
+    @Test fun stalledSessionStartSendIsBoundedAndReleased() = runTest {
+        var cancelled = false
+        val socket = object : FoundrySocket {
+            override suspend fun send(payload: String) { awaitCancellation() }
+            override suspend fun receive(): String? = awaitCancellation()
+            override suspend fun close() {}
+            override fun cancel() { cancelled = true }
+        }
+        val transport = KtorFoundryTransport(FoundrySocketFactory { _, _ -> socket }, startupTimeoutMillis = 1_000)
+        val result = CompletableDeferred<Result<ConnectionProbeResult>>()
+        launch { result.complete(runCatching { transport.probe(FoundryConnection("https://sample.openai.azure.com"), "private-key") }) }
+        advanceTimeBy(1_001)
+        runCurrent()
+        val failure = assertIs<TranslationFailure>(result.await().exceptionOrNull())
+        assertEquals("TIMEOUT", failure.diagnostic?.code)
+        assertEquals(FoundryStages.START, failure.diagnostic?.stage)
+        assertTrue(cancelled)
     }
 }

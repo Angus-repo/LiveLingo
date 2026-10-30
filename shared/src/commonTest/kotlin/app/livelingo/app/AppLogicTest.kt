@@ -57,6 +57,39 @@ class AppLogicTest {
         controller.dispose()
     }
 
+    @Test fun foregroundMicrophonePreparationCompletesBeforeFoundryHandshake() = runTest {
+        val services = configuredServices()
+        val gate = CompletableDeferred<Unit>()
+        services.mic.prepareGate = gate
+        val transport = FakeTransport()
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
+        controller.start()
+        runCurrent()
+        assertEquals(1, services.mic.prepares)
+        assertEquals(0, transport.starts) // Android foreground service must be prepared first.
+        gate.complete(Unit)
+        runCurrent()
+        assertEquals(1, transport.starts)
+        assertEquals(1, services.mic.starts)
+        controller.stop()
+        runCurrent()
+        controller.dispose()
+    }
+
+    @Test fun microphonePreparationFailureNeverConnectsToFoundry() = runTest {
+        val services = configuredServices()
+        services.mic.prepareFailure = IllegalStateException("foreground service unavailable")
+        val transport = FakeTransport()
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
+        controller.start()
+        runCurrent()
+        assertEquals(ConnectionPhase.ERROR, controller.state.value.phase)
+        assertEquals(0, transport.starts)
+        assertEquals(0, services.mic.starts)
+        assertTrue(controller.state.value.message.orEmpty().contains("背景翻譯麥克風"))
+        controller.dispose()
+    }
+
     @Test fun microphoneWaitsForReadyAndDuplicateStartDoesNotCreateTwoSessions() = runTest {
         val services = configuredServices()
         val transport = FakeTransport(ready = CompletableDeferred())
@@ -408,11 +441,19 @@ private class MemoryStorage : LocalStorage {
 private class FakeMic : Microphone {
     var recording = false
     var starts = 0
+    var prepares = 0
+    var prepareGate: CompletableDeferred<Unit>? = null
+    var prepareFailure: Exception? = null
     var firstChunk: ByteArray? = null
     var finalChunk: ByteArray? = null
     var startFailure: Exception? = null
     private var onAudio: ((ByteArray) -> Unit)? = null
     private var onError: ((String) -> Unit)? = null
+    override suspend fun prepare() {
+        prepares++
+        prepareFailure?.let { throw it }
+        prepareGate?.await()
+    }
     override suspend fun start(onAudio: (ByteArray) -> Unit, onError: (String) -> Unit) {
         starts++
         startFailure?.let { throw it }

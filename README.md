@@ -41,7 +41,15 @@ API key 由使用者自行輸入，Android 以 Keystore 保護加密金鑰並加
 
 API key 儲存後不會重新顯示。只修改部署名稱時，API key 留空可保留原值；變更資源端點時必須重新輸入對應 key，避免將舊 key 傳給另一個資源。若按「移除 API key」，再次翻譯前須重新輸入。
 
-## 0.1.2 連線修正
+## 0.1.3 認證修正
+
+修正 Azure GPT-Live WebSocket 的 API key 認證：現在以 `api-key` 標頭傳送資源金鑰。0.1.1／0.1.2 將資源 key 放在 `Authorization: Bearer`；LiveKit 的 Azure GPT-Live 實作記錄此用法會引發帶 `?api-key=` 的 HTTP 302 轉址。`Bearer` 用於 Entra 存取權杖，不能直接將其他 HTTP API 的認證範例套用在此流程。
+
+修正套用於 Android 與 iOS。端點、部署名稱及已加密儲存的 key 可繼續使用；App 仍不跟隨轉址，也不把 key 放進 URL。診斷報告會顯示「認證方式：api-key 標頭」，不包含金鑰值。
+
+實作依據：[LiveKit Azure GPT-Live 認證程式碼](https://github.com/livekit/agents/blob/78c154d6edfff305b755ede26f42f11cf280bf4e/livekit-agents/livekit/agents/llm/_realtime/gpt_live.py#L580)。此修正針對已收到的 302 握手診斷；實際資源的連線結果仍需在裝置上驗證。
+
+## 0.1.2 連線與診斷功能
 
 修正 Android 的 WebSocket 設定：Ktor 3.3.1 的 OkHttp 引擎不支援變更 `maxFrameSize`，舊版會在握手成功後拋出例外。Android 現在保留引擎預設值，仍由共用接收程式檢查 1 MiB 訊息上限。iOS 的 Darwin 引擎支援此設定，因此保留原有限制。
 
@@ -85,7 +93,7 @@ Android 正式簽章與 GitHub Actions 開發簽章設定見 [Android 說明](an
 
 ## 連線、錄音與資料處理
 
-- App 以 WSS 直接連接 Microsoft Foundry，沒有中繼後端。使用 `Authorization: Bearer` 傳送使用者的資源 API key，不把 key 放在 URL。
+- App 以 WSS 直接連接 Microsoft Foundry，沒有中繼後端。使用 `api-key` 標頭傳送使用者的資源 API key，不把 key 放在 URL，也不額外傳送 `Authorization` 標頭。
 - 錄音為 24 kHz、單聲道、PCM16 little-endian。iOS 會從裝置實際取樣率轉換。
 - 收到 `session.started` 後才開始收音；停止時送出最後已擷取的音訊與 `session.close`，等候最後字幕及 `session.closed`。
 - 只在前景收音。來電、離開 App、斷線或錯誤會停止；不會自動恢復錄音或重播先前音訊。
@@ -104,7 +112,7 @@ GPT-Live 回傳的是帶時間範圍的串流片段，沒有每個字的精準�
 
 ## 驗證狀態
 
-0.1.2 的 76 項自動化測試通過，其中 8 項使用實際 TLS 與 Android 所用的 OkHttp 引擎，驗證 WebSocket 握手、錯誤碼及金鑰遮蔽。GitHub Actions 的共用測試、Android APK 與 iOS ARM64 模擬器 App 編譯皆通過。實機與真實 Foundry 連線尚待驗證。
+0.1.3 的 77 項自動化測試通過，其中 9 項使用實際 TLS 與 Android 所用的 OkHttp 引擎，涵蓋正式連線工廠的 api-key 認證、WebSocket 握手、錯誤碼及金鑰遮蔽。本版雙平台 CI 結果見建置紀錄；實機與真實 Foundry 連線尚待驗證。
 
 實際執行結果見 [BUILD_STATUS.md](BUILD_STATUS.md)，實機驗收步驟見 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)。沒有真實 Foundry 憑證時，離線協定與流程測試不能取代模型連線及翻譯品質驗證。
 

@@ -43,11 +43,11 @@ internal interface FoundrySocket {
 }
 
 internal fun interface FoundrySocketFactory {
-    suspend fun open(url: String, authorization: String): FoundrySocket
+    suspend fun open(url: String, apiKey: String): FoundrySocket
     fun close() {}
 }
 
-private class KtorFoundrySocketFactory(private val originalClient: HttpClient) : FoundrySocketFactory {
+internal class KtorFoundrySocketFactory(private val originalClient: HttpClient) : FoundrySocketFactory {
     // Native platform engines also disable redirects.
     private val client = originalClient.config {
         followRedirects = false
@@ -56,7 +56,7 @@ private class KtorFoundrySocketFactory(private val originalClient: HttpClient) :
             validateResponse { response ->
                 val request = response.call.request
                 if (request.url.protocol.name in setOf("ws", "wss") && response.status.value != 101) {
-                    val secret = request.headers["Authorization"]?.removePrefix("Bearer ")
+                    val secret = request.headers["api-key"]
                     val requestId = safeRequestId(response.headers["apim-request-id"] ?: response.headers["x-request-id"] ?: response.headers["request-id"], secret)
                     // Failed WebSocket bodies are engine-specific and may not be readable channels.
                     // Native Android interception captures safe bounded JSON fields before this layer.
@@ -65,10 +65,11 @@ private class KtorFoundrySocketFactory(private val originalClient: HttpClient) :
             }
         }
     }
-    override suspend fun open(url: String, authorization: String): FoundrySocket {
+    override suspend fun open(url: String, apiKey: String): FoundrySocket {
         val session = client.webSocketSession {
             url(url)
-            header("Authorization", authorization)
+            // GPT-Live uses Azure resource-key authentication. Bearer is reserved for Entra tokens.
+            header("api-key", apiKey)
         }
         return object : FoundrySocket {
             override suspend fun send(payload: String) { session.send(Frame.Text(payload)) }
@@ -132,7 +133,7 @@ class KtorFoundryTransport internal constructor(
         try {
           coroutineScope {
             val active = withTimeout(startupTimeoutMillis) {
-                sockets.open(connection.webSocketUrl(), "Bearer $key").also { socket = it }
+                sockets.open(connection.webSocketUrl(), key).also { socket = it }
             }
             stage = FoundryStages.START
             withTimeout(startupTimeoutMillis) {

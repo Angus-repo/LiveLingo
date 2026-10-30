@@ -37,8 +37,8 @@ private class Harness(scope: CoroutineScope, val socket: FakeFoundrySocket = Fak
     val transcripts = mutableListOf<TranscriptDelta>()
     var readyCount = 0
     var url: String? = null
-    var authorization: String? = null
-    val transport = KtorFoundryTransport(FoundrySocketFactory { target, auth -> url = target; authorization = auth; socket })
+    var apiKey: String? = null
+    val transport = KtorFoundryTransport(FoundrySocketFactory { target, key -> url = target; apiKey = key; socket })
     val job = scope.launch {
         result.complete(runCatching {
             transport.run(FoundryConnection("https://Sample.openai.azure.com/openai/v1/", "custom-live"), "private-test-key", SessionSettings(), audio,
@@ -55,7 +55,9 @@ class FoundryTransportTest {
         assertEquals("session.start", start.getValue("type").jsonPrimitive.content)
         assertEquals("custom-live", start.getValue("session").jsonObject.getValue("model").jsonPrimitive.content)
         assertEquals("wss://sample.openai.azure.com/openai/v1/live/sessions", h.url)
-        assertEquals("Bearer private-test-key", h.authorization)
+        assertEquals("private-test-key", h.apiKey)
+        assertFalse(h.url.orEmpty().contains('?'))
+        assertFalse(start.toString().contains("private-test-key"))
         h.audio.send(byteArrayOf(0, 0, 1, 0))
         runCurrent()
         assertEquals(0, h.readyCount)

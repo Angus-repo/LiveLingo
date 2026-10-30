@@ -1,6 +1,14 @@
-# LiveLingo 0.1.2 驗證狀態
+# LiveLingo 0.1.3 驗證狀態
 
-本版修正 Android WebSocket 握手後失敗，新增不收音的連線測試及安全診斷；維持 App 直接連接 Foundry。
+本版修正 Azure GPT-Live WebSocket 的 API key 認證，以 `api-key` 標頭取代先前的 Bearer 用法。維持 App 直接連接 Foundry、裝置安全儲存金鑰與禁止重新導向。
+
+## 問題與修正依據
+
+使用者在 0.1.2 回報 WebSocket 握手 HTTP 302。LiveKit 的 [Azure GPT-Live 實作](https://github.com/livekit/agents/blob/78c154d6edfff305b755ede26f42f11cf280bf4e/livekit-agents/livekit/agents/llm/_realtime/gpt_live.py#L580) 明確區分資源 API key（`api-key`）與 Entra token（`Authorization: Bearer`），並記錄 Bearer API key 會觸發帶 `?api-key=` 的轉址。
+
+共用連線工廠現在只送出 `api-key`；Android 與共用 HTTP 診斷也從此標頭取得金鑰遮蔽依據。金鑰不放進 URL，不自動跟隨 302，不改變已儲存的端點、部署或金鑰。
+
+此修正與使用者的 302 現象吻合；尚未使用其真實憑證驗證服務回應。
 
 ## 已執行：2026-10-30
 
@@ -10,41 +18,34 @@
 ./gradlew :core:jvmTest :shared:testDebugUnitTest :androidApp:assembleDebug
 ```
 
-結果：**BUILD SUCCESSFUL，76 項測試全部通過，0 失敗、0 錯誤、0 略過。**
+結果：**BUILD SUCCESSFUL，77 項測試全部通過，0 失敗、0 錯誤、0 略過。**
 
 | 範圍 | 測試數 | 覆蓋內容 |
 | --- | ---: | --- |
 | Core | 27 | 端點、事件、PCM、語言、背景指示及字幕匯出 |
 | App controller | 23 | 設定與資料保存、遷移、金鑰綁定、連線測試與取消、診斷遮蔽 |
-| Shared transport | 13 | 啟動、傳送、停止排空、逾時、模型測試及錯誤隔離 |
+| Shared transport | 13 | 原始 API key 傳遞、無 URL／JSON 金鑰、啟停、排空與逾時 |
 | Diagnostics | 5 | HTTP／DNS／TLS 分類、安全代碼與識別碼、回應夾帶金鑰時的遮蔽 |
-| Android native TLS | 8 | 真正 TLS＋OkHttp 的 101 握手及訊息交換；401／403／404／429／500、禁止轉址、過大或含金鑰的錯誤回應 |
+| Android native TLS | 9 | 正式連線工廠的 api-key 認證；101 握手、401／403／404／429／500、禁止轉址及錯誤回應遮蔽 |
 
-原生握手測試使用 App 相同的 Android HTTP client 工廠及 Ktor 3.3.1／OkHttp 引擎，對本機測試伺服器建立 TLS WebSocket。這能檢查舊版不相容的 `maxFrameSize` 設定；並非真實 Foundry 憑證測試。
+新增原生測試直接呼叫 App 正式使用的 `KtorFoundrySocketFactory`。本機 TLS 伺服器模擬 Bearer 認證回傳 302、api-key 認證接受 WebSocket；驗證沒有 `Authorization`、沒有 URL query、只有一次 HTTP 請求且可交換訊息。它不是使用者 Azure 資源的連線測試。
 
-Android 開發測試 APK：`LiveLingo-0.1.2.apk`，12,429,791 bytes。
+Android 開發測試 APK：`LiveLingo-0.1.3.apk`，12,637,813 bytes。
 
 - Application ID：`app.livelingo.android`。
-- Version name／code：`0.1.2`／`3`。
+- Version name／code：`0.1.3`／`4`。
 - Minimum／target SDK：`26`／`36`。
 - `apksigner verify` 與 `zipalign` 檢查通過。
-- 簽章憑證與 0.1.0／0.1.1 相同，可覆蓋安裝保留資料。
+- 簽章憑證與 0.1.0／0.1.1／0.1.2 相同，可覆蓋安裝保留資料。
 - 憑證 SHA-256：`cf232e1f105c3ac5a93ce2449b41678027b4b1ef9a54c3765c85b65a045d4bfb`。
-- APK SHA-256：`f2932588d7b6934690658356ced52ff21f79f1ae9245410d5b55a810349d778f`。
+- APK SHA-256：`5b603f880dc14561fc81ec13ad4fa4340cd64f42a824f44957fdb529c664cebf`。
+- 已直接檢查打包 DEX，確認包含 0.1.3 版本文字及「認證方式：api-key 標頭」。
 
 上述 APK 是本次交付檔案；其他環境重新建置的雜湊可能不同。CI 若未設定 Android 說明所列的簽章 secret，runner 會使用另一把開發簽章。
 
 ## GitHub Actions
 
-[Run 41064011698](https://github.com/Angus-repo/LiveLingo/actions/runs/41064011698) 的三個工作全部成功，驗證程式碼 commit：`191e78d7d72cb9bdabf620d613c42b0e116588f1`。
-
-| 工作 | 結果 |
-| --- | --- |
-| shared-tests | 無 Android SDK 的 headless core 測試通過 |
-| android | Android APK 建置、shared 單元測試及 APK artifact 上傳通過 |
-| ios | Kotlin/Native framework 及未簽章 ARM64 模擬器 App 編譯通過 |
-
-iOS 實際使用 Xcode 16.4（16F6）、iOS Simulator 18.5 SDK，Xcode 日誌回報 `BUILD SUCCEEDED`。
+0.1.3 的共用測試、Android 與 iOS 工作待本次提交觸發及確認。此處尚未將前版 iOS 成功結果當成本版驗證。
 
 ## 尚待驗證
 
@@ -52,4 +53,4 @@ iOS 實際使用 Xcode 16.4（16F6）、iOS Simulator 18.5 SDK，Xcode 日誌回
 
 尚未做 Android／iOS 實機麥克風、背景切換與長時間會話驗證。iPhone 簽章與實機安裝仍須使用自己的 Apple Developer Team。
 
-iOS 專案宣告最低 16.0；此次 linker 提示 Skiko 內 ICU 資料物件以 iOS Simulator 17.2 編譯。模擬器編譯成功不代表已驗證 iOS 16 的執行相容性，發佈前需完成最低支援版本的實機驗證。
+iOS 專案宣告最低 16.0；前版 linker 提示 Skiko 內 ICU 資料物件以 iOS Simulator 17.2 編譯。模擬器編譯成功不代表已驗證 iOS 16 的執行相容性，發佈前需完成最低支援版本的實機驗證。

@@ -11,6 +11,8 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import okhttp3.mockwebserver.Dispatcher
+import okhttp3.mockwebserver.RecordedRequest
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.tls.HandshakeCertificates
@@ -38,7 +40,7 @@ class AndroidFoundryHttpClientTest {
         override fun close() { client.close(); server.shutdown() }
     }
 
-    @Test fun successfulTlsUpgradeExchangesFramesAndPreservesBearerHeader() = runBlocking {
+    @Test fun successfulTlsUpgradeExchangesFramesAndPreservesApiKeyHeader() = runBlocking {
         Fixture().use { fixture ->
             fixture.server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
                 override fun onMessage(webSocket: WebSocket, text: String) { webSocket.send("ack:$text") }
@@ -47,17 +49,53 @@ class AndroidFoundryHttpClientTest {
             withTimeout(10_000) {
                 val session = fixture.client.webSocketSession {
                     url(fixture.url)
-                    header("Authorization", "Bearer test-device-secret")
+                    header("api-key", "test-device-secret")
                 }
                 try {
                     session.send(Frame.Text("session.start"))
                     assertEquals("ack:session.start", (session.incoming.receive() as Frame.Text).readText())
                     val request = assertNotNull(fixture.server.takeRequest(2, TimeUnit.SECONDS))
-                    assertEquals("Bearer test-device-secret", request.getHeader("Authorization"))
+                    assertEquals("test-device-secret", request.getHeader("api-key"))
+                    assertEquals(null, request.getHeader("Authorization"))
                     assertEquals("/openai/v1/live/sessions", request.path)
                     session.close()
                 } finally { session.cancel() }
             }
+        }
+    }
+
+    @Test fun productionFactoryUsesAzureApiKeyHeaderWithoutBearerOrQuery() = runBlocking {
+        Fixture().use { fixture ->
+            val key = "test-device-secret"
+            fixture.server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse = when {
+                    request.getHeader("Authorization") != null -> MockResponse().setResponseCode(302)
+                        .setHeader("Location", fixture.server.url("/openai/v1/live/sessions?api-key=$key"))
+                    request.getHeader("api-key") != key -> MockResponse().setResponseCode(401)
+                    request.path != "/openai/v1/live/sessions" -> MockResponse().setResponseCode(400)
+                    else -> MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                        override fun onMessage(webSocket: WebSocket, text: String) { webSocket.send("ack:$text") }
+                        override fun onClosing(webSocket: WebSocket, code: Int, reason: String) { webSocket.close(code, reason) }
+                    })
+                }
+            }
+            val factory = KtorFoundrySocketFactory(fixture.client)
+            try {
+                withTimeout(10_000) {
+                    val socket = factory.open(fixture.url, key)
+                    try {
+                        socket.send("session.start")
+                        assertEquals("ack:session.start", socket.receive())
+                        val request = assertNotNull(fixture.server.takeRequest(2, TimeUnit.SECONDS))
+                        assertEquals(key, request.getHeader("api-key"))
+                        assertEquals(null, request.getHeader("Authorization"))
+                        assertEquals("/openai/v1/live/sessions", request.path)
+                        assertEquals(null, request.requestUrl?.query)
+                        assertEquals(1, fixture.server.requestCount)
+                        socket.close()
+                    } finally { socket.cancel() }
+                }
+            } finally { factory.close() }
         }
     }
 
@@ -68,7 +106,7 @@ class AndroidFoundryHttpClientTest {
                 .setHeader("apim-request-id", "c07246be-7636-4d57-a836-75a74f18d836")
                 .setBody("""{"error":{"code":"DeploymentNotFound","message":"secret=$secret"}}"""))
             val failure = try {
-                withTimeout(10_000) { fixture.client.webSocketSession { url(fixture.url); header("Authorization", "Bearer $secret") } }
+                withTimeout(10_000) { fixture.client.webSocketSession { url(fixture.url); header("api-key", secret) } }
                 error("The failed HTTP upgrade was accepted")
             } catch (failure: Throwable) { failure }
             val translated = classifyFoundryFailure(failure, FoundryStages.HANDSHAKE)
@@ -93,7 +131,7 @@ class AndroidFoundryHttpClientTest {
                 fixture.server.enqueue(MockResponse().setResponseCode(302).setHeader("Location", destination.url("/capture")))
                 val failure = try {
                     withTimeout(10_000) {
-                        fixture.client.webSocketSession { url(fixture.url); header("Authorization", "Bearer private-key") }
+                        fixture.client.webSocketSession { url(fixture.url); header("api-key", "private-key") }
                     }
                     error("Redirect should fail")
                 } catch (failure: Throwable) { failure }
@@ -110,7 +148,7 @@ class AndroidFoundryHttpClientTest {
                 .setHeader("request-id", secret)
                 .setBody("""{"error":{"code":"$secret","message":"${"x".repeat(20_000)}"},"request_id":"$secret"}"""))
             val failure = try {
-                withTimeout(10_000) { fixture.client.webSocketSession { url(fixture.url); header("Authorization", "Bearer $secret") } }
+                withTimeout(10_000) { fixture.client.webSocketSession { url(fixture.url); header("api-key", secret) } }
                 error("Bad HTTP upgrade should fail")
             } catch (failure: Throwable) { failure }
             val result = classifyFoundryFailure(failure, FoundryStages.HANDSHAKE)

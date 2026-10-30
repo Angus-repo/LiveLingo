@@ -440,12 +440,13 @@ private fun connectionReport(connection: FoundryConnection, diagnostic: FoundryD
     val originalTime = Instant.fromEpochMilliseconds(timestamp).toString()
     val taiwanTime = Instant.fromEpochMilliseconds(timestamp + 8 * 60 * 60 * 1000).toString().removeSuffix("Z")
     return buildString {
-        appendLine("LiveLingo 0.1.2 · Foundry 連線診斷")
+        appendLine("LiveLingo 0.1.3 · Foundry 連線診斷")
         appendLine("時間：$originalTime（台灣時間：$taiwanTime +08:00）")
         appendLine("結果：${if (success) "成功" else "失敗"}")
         appendLine("階段：${safeDiagnosticField(diagnostic.stage, secret)}")
         appendLine("分類：${safeDiagnosticField(diagnostic.code, secret)}")
         appendLine("HTTP 狀態：${diagnostic.httpStatus?.toString() ?: "未取得"}")
+        appendLine("認證方式：api-key 標頭")
         appendLine("資源：wss://$endpointFamily/openai/v1/live/sessions")
         appendLine("部署名稱：已遮蔽（${connection.deployment.length} 個字元）")
         diagnostic.providerCode?.let { appendLine("服務錯誤碼：${safeDiagnosticField(it, secret)}") }

@@ -43,7 +43,7 @@ private class FoundryHandshakeInterceptor : Interceptor {
         if (!request.header("Upgrade").equals("websocket", ignoreCase = true) || response.code == 101) {
             return response
         }
-        val key = request.header("Authorization")?.removePrefix("Bearer ")
+        val key = request.header("api-key")
         // Never retain response bodies, raw headers, request URLs or credentials in exceptions.
         val fields = runCatching { safeJsonErrorFields(response.peekBody(16_384).string(), key) }
             .getOrDefault(SafeFoundryErrorFields())

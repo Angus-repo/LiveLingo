@@ -257,6 +257,16 @@ class AppController(
             history = listOf(record) + snapshot.history, message = null, lastConnectionReport = null, showReportInMessage = false)
         sessionJob = scope.launch {
             try {
+                // Android must create its microphone foreground service while Activity is visible,
+                // not after the potentially slow Foundry handshake.
+                try {
+                    services.microphone.prepare()
+                    ensureActive()
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    throw TranslationFailure("無法準備背景翻譯麥克風。請在 App 前景開始，並允許麥克風權限。")
+                }
                 transport.run(connection, sessionApiKey, settings, queue,
                     onReady = {
                         ensureActive()
@@ -440,7 +450,7 @@ private fun connectionReport(connection: FoundryConnection, diagnostic: FoundryD
     val originalTime = Instant.fromEpochMilliseconds(timestamp).toString()
     val taiwanTime = Instant.fromEpochMilliseconds(timestamp + 8 * 60 * 60 * 1000).toString().removeSuffix("Z")
     return buildString {
-        appendLine("LiveLingo 0.1.3 · Foundry 連線診斷")
+        appendLine("LiveLingo 0.1.4 · Foundry 連線診斷")
         appendLine("時間：$originalTime（台灣時間：$taiwanTime +08:00）")
         appendLine("結果：${if (success) "成功" else "失敗"}")
         appendLine("階段：${safeDiagnosticField(diagnostic.stage, secret)}")

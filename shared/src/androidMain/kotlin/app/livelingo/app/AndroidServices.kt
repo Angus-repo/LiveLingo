@@ -271,6 +271,9 @@ private class AndroidMicrophone(private val appContext: Context) : Microphone {
             session.job?.cancel()
             synchronized(stateLock) { if (recording === session) recording = null }
         }
+    }
+
+    override fun releaseSession() {
         AndroidTranslationForegroundService.requestStop(appContext)
     }
 }

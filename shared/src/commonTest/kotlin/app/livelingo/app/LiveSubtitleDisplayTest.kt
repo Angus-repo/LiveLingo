@@ -17,12 +17,12 @@ class LiveSubtitleDisplayTest {
         assertEquals("目前台灣是4.95兆美元，而印度是4.92兆美元。", liveCaptionText(record, TranscriptChannel.OUTPUT))
     }
 
-    @Test fun liveTextNormalizesProviderNewlinesOnlyForDisplay() {
+    @Test fun liveTextPreservesModelParagraphsAndRemovesIndentation() {
         val text = "Now this Taiwan\n\n  4.95 trillion dollars"
         val record = TranscriptRecord("r", "title", 0, SessionSettings(), listOf(
             TranscriptFragment("p1", TranscriptChannel.INPUT, 0, 200, text)
         ))
-        assertEquals("Now this Taiwan 4.95 trillion dollars", liveCaptionText(record, TranscriptChannel.INPUT))
+        assertEquals("Now this Taiwan\n\n4.95 trillion dollars", liveCaptionText(record, TranscriptChannel.INPUT))
         assertEquals(text, record.fragments.single().text)
     }
 

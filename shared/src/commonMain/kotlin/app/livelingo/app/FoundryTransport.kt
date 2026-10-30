@@ -6,6 +6,7 @@ import io.ktor.client.plugins.HttpResponseValidator
 import io.ktor.client.plugins.websocket.webSocketSession
 import io.ktor.client.request.header
 import io.ktor.client.request.url
+import io.ktor.http.Url
 import io.ktor.websocket.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.ReceiveChannel
@@ -28,7 +29,7 @@ interface TranslationTransport {
         emptyAudio.close()
         try {
             run(connection, apiKey, SessionSettings(), emptyAudio, {}, {})
-            return ConnectionProbeResult("Foundry 連線測試成功，GPT-Live 已啟動並正常結束。", FoundryDiagnostic(FoundryStages.COMPLETE, "OK", 101))
+            return ConnectionProbeResult("${connection.provider.label} 連線測試成功，GPT-Live 已啟動並正常結束。", FoundryDiagnostic(FoundryStages.COMPLETE, "OK", 101))
         } finally { emptyAudio.cancel() }
     }
     fun close()
@@ -56,7 +57,7 @@ internal class KtorFoundrySocketFactory(private val originalClient: HttpClient) 
             validateResponse { response ->
                 val request = response.call.request
                 if (request.url.protocol.name in setOf("ws", "wss") && response.status.value != 101) {
-                    val secret = request.headers["api-key"]
+                    val secret = request.headers["api-key"] ?: request.headers["Authorization"]?.removePrefix("Bearer ")
                     val requestId = safeRequestId(response.headers["apim-request-id"] ?: response.headers["x-request-id"] ?: response.headers["request-id"], secret)
                     // Failed WebSocket bodies are engine-specific and may not be readable channels.
                     // Native Android interception captures safe bounded JSON fields before this layer.
@@ -68,8 +69,9 @@ internal class KtorFoundrySocketFactory(private val originalClient: HttpClient) 
     override suspend fun open(url: String, apiKey: String): FoundrySocket {
         val session = client.webSocketSession {
             url(url)
-            // GPT-Live uses Azure resource-key authentication. Bearer is reserved for Entra tokens.
-            header("api-key", apiKey)
+            // Pin OpenAI credentials to its exact host. Azure resource keys use api-key.
+            if (Url(url).host == "api.openai.com") header("Authorization", "Bearer $apiKey")
+            else header("api-key", apiKey)
         }
         return object : FoundrySocket {
             override suspend fun send(payload: String) { session.send(Frame.Text(payload)) }
@@ -119,9 +121,11 @@ class KtorFoundryTransport internal constructor(
         var sender: Job? = null
         var drainDeadline: Job? = null
         var stage = FoundryStages.HANDSHAKE
+        fun providerMessage(value: String): String =
+            if (connection.provider == ModelProvider.OPENAI) value.replace("Foundry", "OpenAI").replace("部署", "模型") else value
         fun redacted(failure: TranslationFailure): TranslationFailure {
-            val diagnostic = failure.diagnostic ?: return failure
-            return TranslationFailure(failure.message ?: "Foundry 工作階段失敗。", diagnostic.copy(requestId = safeRequestId(diagnostic.requestId, key)))
+            val diagnostic = failure.diagnostic
+            return TranslationFailure(providerMessage(failure.message ?: "服務工作階段失敗。"), diagnostic?.copy(requestId = safeRequestId(diagnostic.requestId, key)))
         }
         fun decode(payload: String): FoundryEvent = try { parseFoundryEvent(payload) }
         catch (failure: FoundryProtocolException) {
@@ -180,9 +184,9 @@ class KtorFoundryTransport internal constructor(
             drainDeadline?.cancelAndJoin()
           }
         } catch (failure: FoundryProtocolException) {
-            throw TranslationFailure(failure.message ?: "Foundry 回應格式不正確。", FoundryDiagnostic(stage, "PROTOCOL"))
+            throw redacted(TranslationFailure(failure.message ?: "Foundry 回應格式不正確。", FoundryDiagnostic(stage, "PROTOCOL")))
         } catch (_: TimeoutCancellationException) {
-            throw TranslationFailure("Foundry 連線或啟動逾時，請檢查網路、資源端點與部署。", FoundryDiagnostic(stage, "TIMEOUT"))
+            throw redacted(TranslationFailure("Foundry 連線或啟動逾時，請檢查網路、資源端點與部署。", FoundryDiagnostic(stage, "TIMEOUT")))
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: TranslationFailure) {

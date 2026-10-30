@@ -1,64 +1,42 @@
-# LiveLingo 0.1.3 驗證狀態
+# LiveLingo 0.1.6 驗證狀態
 
-本版修正 Azure GPT-Live WebSocket 的 API key 認證，以 `api-key` 標頭取代先前的 Bearer 用法。維持 App 直接連接 Foundry、裝置安全儲存金鑰與禁止重新導向。
-
-## 問題與修正依據
-
-使用者在 0.1.2 回報 WebSocket 握手 HTTP 302。LiveKit 的 [Azure GPT-Live 實作](https://github.com/livekit/agents/blob/78c154d6edfff305b755ede26f42f11cf280bf4e/livekit-agents/livekit/agents/llm/_realtime/gpt_live.py#L580) 明確區分資源 API key（`api-key`）與 Entra token（`Authorization: Bearer`），並記錄 Bearer API key 會觸發帶 `?api-key=` 的轉址。
-
-共用連線工廠現在只送出 `api-key`；Android 與共用 HTTP 診斷也從此標頭取得金鑰遮蔽依據。金鑰不放進 URL，不自動跟隨 302，不改變已儲存的端點、部署或金鑰。
-
-此修正與使用者的 302 現象吻合；尚未使用其真實憑證驗證服務回應。
-
-## 已執行：2026-10-30
-
-以 JDK 17、Gradle 8.14.3、Android SDK 36 執行：
+2026-10-31（台灣時間），以 JDK 17、Gradle 8.14.3、Android SDK 36 建置及測試。
 
 ```sh
 ./gradlew :core:jvmTest :shared:testDebugUnitTest :androidApp:assembleDebug
 ```
 
-結果：**BUILD SUCCESSFUL，77 項測試全部通過，0 失敗、0 錯誤、0 略過。**
+**BUILD SUCCESSFUL；106 項測試，0 失敗、0 錯誤、0 略過。**
 
-| 範圍 | 測試數 | 覆蓋內容 |
+| 範圍 | 數量 | 重點 |
 | --- | ---: | --- |
-| Core | 27 | 端點、事件、PCM、語言、背景指示及字幕匯出 |
-| App controller | 23 | 設定與資料保存、遷移、金鑰綁定、連線測試與取消、診斷遮蔽 |
-| Shared transport | 13 | 原始 API key 傳遞、無 URL／JSON 金鑰、啟停、排空與逾時 |
-| Diagnostics | 5 | HTTP／DNS／TLS 分類、安全代碼與識別碼、回應夾帶金鑰時的遮蔽 |
-| Android native TLS | 9 | 正式連線工廠的 api-key 認證；101 握手、401／403／404／429／500、禁止轉址及錯誤回應遮蔽 |
+| Core | 36 | 繁中台灣字詞、畫面回報案例、數值保留、端點限制、GPT-Live 協定、字幕匯出 |
+| Controller | 31 | 舊設定載入、兩家服務金鑰隔離、重開還原、執行中不可切換、停止後 AI 分段保存、分段失敗保留字幕 |
+| Live display | 6 | 片段正序、單字接合、保留換行、語言推定 |
+| Paragraphs | 4 | AI 僅回傳編號、拒絕無效位置與改寫、限長、保留早期段落 |
+| Transport | 13 | 啟動、PCM 傳遞、停止排空、斷線、逾時 |
+| Diagnostics | 5 | 安全錯誤欄位、金鑰遮蔽 |
+| Native TLS WebSocket | 10 | 正式 OkHttp 工廠、Foundry api-key 與 OpenAI Bearer、禁止重新導向 |
+| Native TLS paragraph HTTP | 1 | 在同一測試逐一驗證兩家 API 的網址、認證、JSON 請求／回應、禁止轉址及拒絕無效 AI 編號 |
 
-新增原生測試直接呼叫 App 正式使用的 `KtorFoundrySocketFactory`。本機 TLS 伺服器模擬 Bearer 認證回傳 302、api-key 認證接受 WebSocket；驗證沒有 `Authorization`、沒有 URL query、只有一次 HTTP 請求且可交換訊息。它不是使用者 Azure 資源的連線測試。
+## 交付 APK
 
-Android 開發測試 APK：`LiveLingo-0.1.3.apk`，12,637,813 bytes。
+- 檔名：`LiveLingo-0.1.6-original-key.apk`
+- Application ID：`app.livelingo.android`
+- Version name／code：`0.1.6`／`7`
+- Minimum／target SDK：`26`／`36`
+- 大小：13,226,851 bytes
+- APK SHA-256：`7dc72ed3bb91997acbecc0ce9d24035370f07f445cb0b822390b402a17181b04`
+- 簽章憑證 SHA-256：`cf232e1f105c3ac5a93ce2449b41678027b4b1ef9a54c3765c85b65a045d4bfb`
+- `apksigner verify` 與 `zipalign -c -P 16 4` 通過，與原始 0.1.x 簽章一致，可覆蓋安裝。
+- APK 內含 OpenCC 資料授權。
 
-- Application ID：`app.livelingo.android`。
-- Version name／code：`0.1.3`／`4`。
-- Minimum／target SDK：`26`／`36`。
-- `apksigner verify` 與 `zipalign` 檢查通過。
-- 簽章憑證與 0.1.0／0.1.1／0.1.2 相同，可覆蓋安裝保留資料。
-- 憑證 SHA-256：`cf232e1f105c3ac5a93ce2449b41678027b4b1ef9a54c3765c85b65a045d4bfb`。
-- APK SHA-256：`5b603f880dc14561fc81ec13ad4fa4340cd64f42a824f44957fdb529c664cebf`。
-- 已直接檢查打包 DEX，確認包含 0.1.3 版本文字及「認證方式：api-key 標頭」。
+## 使用條件與驗證界線
 
-上述 APK 是本次交付檔案；其他環境重新建置的雜湊可能不同。CI 若未設定 Android 說明所列的簽章 secret，runner 會使用另一把開發簽章。
+AI 語意分段需設定可用的文字模型：Foundry 在同一資源另外部署文字模型並填入部署名稱；OpenAI 預設 `gpt-4.1-mini`。未設定或 API 失敗時，畫面顯示基本分段狀態。基本分段不是 AI 語意判斷。
 
-## GitHub Actions
+繁中轉換在裝置端完成，原始 provider fragments 不改寫，JSON 保留原始片段與 AI 分段位置；SRT／VTT／TXT 依目標語言呈現繁中，時間戳保留。
 
-[Run 41066607510](https://github.com/Angus-repo/LiveLingo/actions/runs/41066607510) 的三個工作全部成功，驗證程式碼 commit：`a4f41be620160733bc21c27d1b577b1b1a2251f9`。
+沒有使用真實 Foundry／OpenAI API key 進行雲端測試。上述 TLS 測試使用本機伺服器，驗證正式網路元件與協定，不代表已驗證帳號權限、實際模型翻譯品質或分段品質。
 
-| 工作 | 結果 |
-| --- | --- |
-| shared-tests | 無 Android SDK 的 headless core 測試通過 |
-| android | Android APK 建置、shared 單元測試及 APK artifact 上傳通過 |
-| ios | Kotlin/Native framework 及未簽章 ARM64 模擬器 App 編譯通過 |
-
-iOS 實際使用 Xcode 16.4（16F6）、iOS Simulator 18.5 SDK，Xcode 日誌回報 `BUILD SUCCEEDED`。
-
-## 尚待驗證
-
-沒有提供真實 Foundry 認證，尚未驗證雲端連線與翻譯品質。新版「測試連線」可在使用者裝置檢查實際資源、部署及金鑰；失敗報告不包含金鑰、音訊、背景知識或逐字稿。
-
-尚未做 Android／iOS 實機麥克風、背景切換與長時間會話驗證。iPhone 簽章與實機安裝仍須使用自己的 Apple Developer Team。
-
-iOS 專案宣告最低 16.0；此次 linker 提示 Skiko 內 ICU 資料物件以 iOS Simulator 17.2 編譯。模擬器編譯成功不代表已驗證 iOS 16 的執行相容性，發佈前需完成最低支援版本的實機驗證。
+本次未執行 Android 實機／模擬器的 UI、長時間背景收音測試，亦未在本機執行 iOS 編譯。共用程式與 iOS 版號已同步；iOS 仍須以 macOS CI 與實機驗收。原有 Android 前景服務、通知停止及無時間戳即時字幕流程保留。

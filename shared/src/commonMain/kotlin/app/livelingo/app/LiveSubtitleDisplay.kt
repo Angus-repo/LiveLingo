@@ -1,7 +1,6 @@
 package app.livelingo.app
 
-import app.livelingo.core.TranscriptChannel
-import app.livelingo.core.TranscriptRecord
+import app.livelingo.core.*
 
 /** UI-only cues. Provider timestamps are retained in the record for history and export. */
 internal data class DisplayCue(val ids: List<String>, val start: Long, val end: Long, val text: String, val speaker: String?)
@@ -22,7 +21,7 @@ internal fun displayCues(record: TranscriptRecord?, channel: TranscriptChannel):
             result += DisplayCue(listOf(fragment.id), fragment.startMs, fragment.endMs, fragment.text, fragment.speakerLabel)
         }
     }
-    return result.filter { it.text.isNotBlank() }
+    return result.filter { it.text.isNotBlank() }.map { it.copy(text = record?.localizedText(it.text, channel) ?: it.text) }
 }
 
 
@@ -32,6 +31,11 @@ internal fun displayCues(record: TranscriptRecord?, channel: TranscriptChannel):
  * some events split a word in half. Keep the raw record untouched for exports.
  */
 internal fun liveCaptionText(record: TranscriptRecord?, channel: TranscriptChannel): String {
+    val text = captionSourceText(record, channel)
+    return paragraphText(text, record?.paragraphLayouts?.find { it.channel == channel })
+}
+
+internal fun captionSourceText(record: TranscriptRecord?, channel: TranscriptChannel): String {
     val fragments = record?.fragments?.filter { it.channel == channel }?.sortedBy { it.startMs }.orEmpty()
     if (fragments.isEmpty()) return ""
     val fullText = buildString {
@@ -46,11 +50,12 @@ internal fun liveCaptionText(record: TranscriptRecord?, channel: TranscriptChann
             append(fragment.text)
         }
     }
-    // Incoming deltas may include newline/extra indentation that is not a sentence break.
-    // This is presentation-only: original transcript and timestamps remain unchanged.
-    return fullText.replace(Regex("[\\r\\n\\t]+"), " ")
+    // Preserve paragraph boundaries emitted by the model; only horizontal whitespace is collapsed.
+    val text = fullText.replace("\r\n", "\n").replace('\r', '\n').replace('\t', ' ')
         .replace(Regex(" {2,}"), " ")
+        .replace(Regex(" *\n *"), "\n")
         .trim()
+    return record?.localizedText(text, channel) ?: text
 }
 
 /** GPT-Live does not return a reliable source-language identifier in transcript events.

@@ -6,6 +6,8 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.encodeToString
 import kotlin.time.ExperimentalTime
 import kotlin.time.Instant
@@ -27,6 +29,7 @@ data class AppState(
     val lastConnectionReport: String? = null,
     val lastConnectionReportTitle: String = "Foundry 連線診斷",
     val showReportInMessage: Boolean = false,
+    val paragraphStatus: String? = null,
 ) {
     val active: Boolean get() = phase in setOf(ConnectionPhase.CONNECTING, ConnectionPhase.LISTENING, ConnectionPhase.STOPPING)
     val busy: Boolean get() = active || connectionTesting
@@ -36,6 +39,7 @@ class AppController(
     private val services: PlatformServices,
     private val transport: TranslationTransport = KtorFoundryTransport(services.createHttpClient()),
     dispatcher: CoroutineDispatcher = Dispatchers.Main.immediate,
+    private var paragraphFormatter: ParagraphFormatter? = null,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
     private val repository = AppRepository(services.storage)
@@ -46,13 +50,15 @@ class AppController(
     private var sessionJob: Job? = null
     private var probeJob: Job? = null
     private var sessionFailure: String? = null
+    private var paragraphJob: Job? = null
+    private val transcriptWrites = Mutex()
 
     init {
         try {
             val preferences = repository.preferences()
             val knowledge = repository.knowledge()
             val history = repository.history()
-            val connection = FoundryConnection(preferences.foundryEndpoint, preferences.deployment)
+            val connection = preferences.connection()
             var setupMessage: String? = null
             apiKey = if (connection.validationError() == null) {
                 try { repository.apiKey(connection.webSocketUrl()) }
@@ -95,25 +101,50 @@ class AppController(
         changePreferences(mutable.value.preferences.copy(pace = pace, quality = quality))
     }
 
+    fun selectProvider(provider: ModelProvider) {
+        if (mutable.value.busy || !mutable.value.storageAvailable || provider == mutable.value.preferences.provider) return
+        val preferences = mutable.value.preferences.copy(provider = provider)
+        try {
+            val connection = preferences.connection()
+            val key = if (connection.validationError() == null) repository.apiKey(connection.webSocketUrl()) else ""
+            repository.savePreferences(preferences)
+            apiKey = key
+            mutable.value = mutable.value.copy(preferences = preferences, hasApiKey = key.isNotBlank(),
+                lastConnectionReport = null, showReportInMessage = false, message = null)
+        } catch (_: Exception) { inform("無法切換服務，請確認儲存空間與安全儲存區。") }
+    }
+
+    fun setAiParagraphs(enabled: Boolean) {
+        if (!mutable.value.busy) changePreferences(mutable.value.preferences.copy(aiParagraphs = enabled))
+    }
+
     private fun changePreferences(value: AppPreferences) {
         if (!mutable.value.storageAvailable) return
         try { repository.savePreferences(value); mutable.value = mutable.value.copy(preferences = value) }
         catch (_: Exception) { inform("設定無法儲存，請確認裝置儲存空間。") }
     }
 
-    fun saveConnection(endpoint: String, deployment: String, replacementApiKey: String): Boolean {
+    fun saveConnection(endpoint: String, deployment: String, replacementApiKey: String, paragraphModel: String? = null): Boolean {
         if (mutable.value.busy || !mutable.value.storageAvailable) return false
+        if (paragraphModel != null && paragraphModel.isNotBlank() && !Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}").matches(paragraphModel.trim())) {
+            inform("請填入有效的 AI 分段文字模型名稱。")
+            return false
+        }
         val resolved = resolveConnection(endpoint, deployment, replacementApiKey) ?: return false
         val connection = resolved.connection
         val canonicalEndpoint = connection.webSocketUrl()
-        val previous = FoundryConnection(mutable.value.preferences.foundryEndpoint, mutable.value.preferences.deployment)
+        val previous = mutable.value.preferences.connection()
         val previousEndpoint = if (previous.validationError() == null) previous.webSocketUrl() else null
-        val preferences = mutable.value.preferences.copy(foundryEndpoint = connection.endpoint, deployment = connection.deployment)
+        val current = mutable.value.preferences
+        val preferences = if (connection.provider == ModelProvider.OPENAI)
+            current.copy(openaiModel = connection.deployment, openaiTextModel = paragraphModel?.trim() ?: current.openaiTextModel)
+        else current.copy(foundryEndpoint = connection.endpoint, deployment = connection.deployment,
+            foundryTextModel = paragraphModel?.trim() ?: current.foundryTextModel)
         return try {
             repository.saveApiKey(canonicalEndpoint, resolved.apiKey)
             repository.savePreferences(preferences)
             apiKey = resolved.apiKey
-            mutable.value = mutable.value.copy(preferences = preferences, hasApiKey = true, message = "Foundry 連線設定已儲存。", showReportInMessage = false)
+            mutable.value = mutable.value.copy(preferences = preferences, hasApiKey = true, message = "${connection.provider.label} 連線設定已儲存。", showReportInMessage = false)
             true
         } catch (_: Exception) {
             // Reconcile with the encrypted destination binding; never send a newly stored key to an old endpoint.
@@ -127,13 +158,13 @@ class AppController(
     private data class ResolvedConnection(val connection: FoundryConnection, val apiKey: String)
 
     private fun resolveConnection(endpoint: String, deployment: String, replacementApiKey: String): ResolvedConnection? {
-        val connection = FoundryConnection(endpoint.trim(), deployment.trim())
+        val connection = FoundryConnection(endpoint.trim(), deployment.trim(), mutable.value.preferences.provider)
         connection.validationError()?.let { inform(it); return null }
         val canonicalEndpoint = connection.webSocketUrl()
-        val previous = FoundryConnection(mutable.value.preferences.foundryEndpoint, mutable.value.preferences.deployment)
+        val previous = mutable.value.preferences.connection()
         val previousEndpoint = if (previous.validationError() == null) previous.webSocketUrl() else null
         if (canonicalEndpoint != previousEndpoint && replacementApiKey.isEmpty()) {
-            inform("新增或變更 Foundry 端點時，請重新輸入這個資源的 API key。")
+            inform("新增或變更服務端點時，請重新輸入這個服務的 API key。")
             return null
         }
         if (replacementApiKey.any { it.code < 0x20 || it.code == 0x7f }) {
@@ -142,7 +173,7 @@ class AppController(
         }
         val nextKey = if (replacementApiKey.isEmpty()) apiKey else replacementApiKey.trim()
         if (nextKey.isBlank() || nextKey.any { it.isWhitespace() }) {
-            inform("請輸入有效的 Foundry API key，且不要包含空白。")
+            inform("請輸入有效的 ${connection.provider.label} API key，且不要包含空白。")
             return null
         }
         return ResolvedConnection(connection, nextKey)
@@ -151,8 +182,9 @@ class AppController(
     fun clearApiKey() {
         if (mutable.value.busy || !mutable.value.storageAvailable) return
         try {
-            repository.clearApiKey(); apiKey = ""
-            mutable.value = mutable.value.copy(hasApiKey = false, message = "已移除 Foundry API key。", showReportInMessage = false)
+            val provider = mutable.value.preferences.provider
+            repository.clearApiKey(provider); apiKey = ""
+            mutable.value = mutable.value.copy(hasApiKey = false, message = "已移除 ${provider.label} API key。", showReportInMessage = false)
         } catch (_: Exception) { inform("無法移除 API key，請重試。") }
     }
 
@@ -208,7 +240,7 @@ class AppController(
         mutable.value = mutable.value.copy(
             message = safeMessage,
             lastConnectionReport = connectionReport(connection, diagnostic, safeMessage, success, services.currentTimeMillis(), secret),
-            lastConnectionReportTitle = if (success) "連線測試成功" else "Foundry 連線失敗",
+            lastConnectionReportTitle = if (success) "連線測試成功" else "${connection.provider.label} 連線失敗",
             showReportInMessage = true,
         )
     }
@@ -243,14 +275,15 @@ class AppController(
     fun start() {
         val snapshot = mutable.value
         if (snapshot.busy || sessionJob?.isActive == true || !snapshot.storageAvailable) return
-        val connection = FoundryConnection(snapshot.preferences.foundryEndpoint, snapshot.preferences.deployment)
-        connection.validationError()?.let { inform("請先到「設定」完成 Foundry 連線。$it"); return }
-        if (apiKey.isBlank()) { inform("請先到「設定」儲存 Foundry API key。"); return }
+        val connection = snapshot.preferences.connection()
+        connection.validationError()?.let { inform("請先到「設定」完成 ${connection.provider.label} 連線。$it"); return }
+        if (apiKey.isBlank()) { inform("請先到「設定」儲存 ${connection.provider.label} API key。"); return }
         val sessionApiKey = apiKey
         val settings = SessionSettings(
             snapshot.preferences.source, snapshot.preferences.target,
             snapshot.knowledge.find { it.id == snapshot.preferences.knowledgeId },
             snapshot.preferences.pace, snapshot.preferences.quality,
+            snapshot.preferences.provider,
         )
         settings.validationError()?.let { inform(it); return }
         val now = services.currentTimeMillis()
@@ -261,8 +294,10 @@ class AppController(
         audio = queue
         sessionFailure = null
         var savedFragmentCount = 0
+        val paragraphModel = snapshot.preferences.paragraphModel().takeIf { snapshot.preferences.aiParagraphs }.orEmpty()
         mutable.value = snapshot.copy(phase = ConnectionPhase.CONNECTING, current = record, transcriptSaved = true,
-            history = listOf(record) + snapshot.history, message = null, lastConnectionReport = null, showReportInMessage = false)
+            history = listOf(record) + snapshot.history, message = null, lastConnectionReport = null, showReportInMessage = false,
+            paragraphStatus = if (paragraphModel.isBlank()) "基本分段；AI 語意分段可至設定指定文字模型。" else "AI 語意分段：等待完整句子")
         sessionJob = scope.launch {
             try {
                 // Android must create its microphone foreground service while Activity is visible,
@@ -294,6 +329,12 @@ class AppController(
                         }
                         ensureActive()
                         mutable.value = mutable.value.copy(phase = ConnectionPhase.LISTENING)
+                        if (paragraphModel.isNotBlank()) paragraphJob = scope.launch {
+                            while (isActive && mutable.value.current?.id == record.id && mutable.value.active) {
+                                delay(20_000)
+                                formatParagraphs(record.id, connection, sessionApiKey, paragraphModel)
+                            }
+                        }
                     },
                     onTranscript = { event ->
                         if (event.startMs < 0 || event.endMs <= event.startMs || event.text.length > 65_536)
@@ -308,7 +349,7 @@ class AppController(
                             replaceRecord(next)
                             mutable.value = mutable.value.copy(transcriptSaved = false)
                             try {
-                                withContext(Dispatchers.Default) { repository.saveTranscript(next) }
+                                persistCurrentTranscript(record.id)
                                 savedFragmentCount = next.fragments.size
                                 mutable.value = mutable.value.copy(transcriptSaved = true)
                             }
@@ -323,7 +364,7 @@ class AppController(
             } catch (failure: Exception) {
                 sessionFailure = when (failure) {
                     is TranslationFailure -> safeDiagnosticField(failure.message.orEmpty(), sessionApiKey)
-                    else -> "Foundry 連線失敗。請檢查端點、部署名稱、API key 與網路狀態；已收到的字幕已保留。"
+                    else -> "${connection.provider.label} 連線失敗。請檢查端點、模型名稱、API key 與網路狀態；已收到的字幕已保留。"
                 }
                 (failure as? TranslationFailure)?.diagnostic?.let { diagnostic ->
                     recordDiagnostic(connection, sessionApiKey, diagnostic, sessionFailure.orEmpty(), success = false)
@@ -332,11 +373,17 @@ class AppController(
                 runCatching { services.microphone.stop() }
                 queue.cancel()
                 audio = null
+                withContext(NonCancellable) {
+                    paragraphJob?.cancelAndJoin()
+                    paragraphJob = null
+                    if (sessionFailure == null && paragraphModel.isNotBlank())
+                        formatParagraphs(record.id, connection, sessionApiKey, paragraphModel)
+                }
                 val latest = mutable.value.current?.takeIf { it.id == record.id }
-                if (latest != null && latest.fragments.size != savedFragmentCount) {
+                if (latest != null && (latest.fragments.size != savedFragmentCount || !mutable.value.transcriptSaved)) {
                     var saved = false
                     withContext(NonCancellable + Dispatchers.Default) {
-                        try { repository.saveTranscript(latest); saved = true }
+                        try { persistCurrentTranscript(record.id); saved = true }
                         catch (_: Exception) { sessionFailure = "最後收到的字幕無法寫入裝置。請先從逐字稿匯出目前內容，再確認儲存空間。" }
                     }
                     mutable.value = mutable.value.copy(transcriptSaved = saved)
@@ -349,6 +396,40 @@ class AppController(
                 // frames and transcript writes have completed.
                 services.microphone.releaseSession()
             }
+        }
+    }
+
+    private suspend fun persistCurrentTranscript(id: String) = transcriptWrites.withLock {
+        val latest = mutable.value.current?.takeIf { it.id == id } ?: return@withLock
+        withContext(Dispatchers.Default) { repository.saveTranscript(latest) }
+    }
+
+    private suspend fun formatParagraphs(id: String, connection: FoundryConnection, key: String, model: String) {
+        val snapshot = mutable.value.current?.takeIf { it.id == id } ?: return
+        val windows = paragraphWindows(snapshot)
+        if (windows.isEmpty() || windows.all { w -> snapshot.paragraphLayouts.any { it.channel == w.channel && it.source == w.source } }) return
+        try {
+            mutable.value = mutable.value.copy(paragraphStatus = "AI 正在整理段落…")
+            val formatter = paragraphFormatter ?: HttpParagraphFormatter(services.createHttpClient()).also { paragraphFormatter = it }
+            val layouts = withTimeout(22_000) { formatter.format(connection, key, model, snapshot) }
+            val latest = mutable.value.current?.takeIf { it.id == id } ?: return
+            val accepted = layouts.filter { layout ->
+                captionSourceText(latest, layout.channel).startsWith(layout.source) &&
+                    layout.breakOffsets.all { it in sentenceEnds(layout.source) }
+            }
+            if (accepted.isEmpty()) {
+                mutable.value = mutable.value.copy(paragraphStatus = "字幕已更新，等待下一次 AI 分段。")
+                return
+            }
+            replaceRecord(latest.copy(paragraphLayouts = latest.paragraphLayouts.filter { old -> accepted.none { it.channel == old.channel } } + accepted))
+            mutable.value = mutable.value.copy(transcriptSaved = false)
+            persistCurrentTranscript(id)
+            mutable.value = mutable.value.copy(paragraphStatus = "AI 語意分段已更新", transcriptSaved = true)
+        } catch (_: TimeoutCancellationException) {
+            mutable.value = mutable.value.copy(paragraphStatus = "AI 分段逾時，暫以基本分段顯示。")
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) {
+            mutable.value = mutable.value.copy(paragraphStatus = "AI 分段暫時無法使用，請檢查設定的文字模型與配額；字幕仍持續更新。")
         }
     }
 
@@ -440,6 +521,7 @@ class AppController(
         audio?.cancel()
         scope.cancel()
         transport.close()
+        paragraphFormatter?.close()
         apiKey = ""
     }
 }
@@ -462,15 +544,15 @@ private fun connectionReport(connection: FoundryConnection, diagnostic: FoundryD
     val originalTime = Instant.fromEpochMilliseconds(timestamp).toString()
     val taiwanTime = Instant.fromEpochMilliseconds(timestamp + 8 * 60 * 60 * 1000).toString().removeSuffix("Z")
     return buildString {
-        appendLine("LiveLingo 0.1.5 · Foundry 連線診斷")
+        appendLine("LiveLingo 0.1.6 · ${connection.provider.label} 連線診斷")
         appendLine("時間：$originalTime（台灣時間：$taiwanTime +08:00）")
         appendLine("結果：${if (success) "成功" else "失敗"}")
         appendLine("階段：${safeDiagnosticField(diagnostic.stage, secret)}")
         appendLine("分類：${safeDiagnosticField(diagnostic.code, secret)}")
         appendLine("HTTP 狀態：${diagnostic.httpStatus?.toString() ?: "未取得"}")
-        appendLine("認證方式：api-key 標頭")
-        appendLine("資源：wss://$endpointFamily/openai/v1/live/sessions")
-        appendLine("部署名稱：已遮蔽（${connection.deployment.length} 個字元）")
+        appendLine("認證方式：${if (connection.provider == ModelProvider.OPENAI) "Authorization: Bearer" else "api-key 標頭"}")
+        appendLine("資源：${if (connection.provider == ModelProvider.OPENAI) "wss://api.openai.com/v1/live/sessions" else "wss://$endpointFamily/openai/v1/live/sessions"}")
+        appendLine("${if (connection.provider == ModelProvider.OPENAI) "模型" else "部署"}名稱：已遮蔽（${connection.deployment.length} 個字元）")
         diagnostic.providerCode?.let { appendLine("服務錯誤碼：${safeDiagnosticField(it, secret)}") }
         diagnostic.requestId?.let { appendLine("Request ID：${safeDiagnosticField(it, secret)}") }
         appendLine("說明：${safeDiagnosticField(message, secret)}")

@@ -28,12 +28,19 @@ object SubtitleExporter {
         record.settings.knowledge?.let { appendLine("背景知識：${cleanSingleLine(it.name)}") }
         appendLine("原文與譯文使用各自的音訊時間；發言者標記由使用者手動指定。")
         appendLine()
+        for (channel in TranscriptChannel.entries) {
+            val full = record.fragments.filter { it.channel == channel }.sortedBy { it.startMs }.joinToString("") { it.text }
+            appendLine(if (channel == TranscriptChannel.INPUT) "【原文・閱讀段落】" else "【譯文・閱讀段落】")
+            appendLine(paragraphText(record.localizedText(full, channel), record.paragraphLayouts.find { it.channel == channel }))
+            appendLine()
+        }
+        appendLine("【時間戳明細】")
         record.fragments.sortedWith(compareBy<TranscriptFragment> { it.startMs }.thenBy { it.endMs }).forEach { fragment ->
             val channel = if (fragment.channel == TranscriptChannel.INPUT) "原文" else "譯文"
             val speaker = fragment.speakerLabel?.let(::cleanSingleLine)?.takeIf(String::isNotBlank)
             append("[${timestamp(fragment.startMs, '.')} → ${timestamp(fragment.endMs, '.')}] [$channel]")
             speaker?.let { append(" [手動：$it]") }
-            appendLine(" ${cleanText(fragment.text)}")
+            appendLine(" ${record.localizedText(cleanText(fragment.text), fragment.channel)}")
         }
     }.trimEnd() + "\n"
 
@@ -62,7 +69,7 @@ object SubtitleExporter {
             }
         }
         // Keep whitespace deltas while grouping, but don't export a cue with no content.
-        return result.filter { cleanText(it.text).isNotBlank() }
+        return result.filter { cleanText(it.text).isNotBlank() }.map { it.copy(text = record.localizedText(it.text, channel)) }
     }
 
     private fun cueText(cue: Cue): String {

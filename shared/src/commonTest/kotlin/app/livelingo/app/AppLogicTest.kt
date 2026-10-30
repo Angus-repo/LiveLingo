@@ -8,6 +8,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.channels.ReceiveChannel
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -15,6 +16,92 @@ import kotlinx.serialization.encodeToString
 import kotlin.test.*
 
 class AppLogicTest {
+    @Test fun providersKeepIndependentKeysModelsAndSurviveRestart() = runTest {
+        val services = configuredServices()
+        val transport = FakeTransport()
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
+        controller.selectProvider(ModelProvider.OPENAI)
+        assertFalse(controller.state.value.hasApiKey)
+        assertFalse(controller.saveConnection("https://api.openai.com", "gpt-live-1", ""))
+        assertTrue(controller.saveConnection("https://api.openai.com", "gpt-live-1", "openai-secret", "text-model"))
+        controller.start(); runCurrent()
+        assertEquals(ModelProvider.OPENAI, transport.connections.single().provider)
+        assertEquals("openai-secret", transport.keys.single())
+        controller.selectProvider(ModelProvider.FOUNDRY)
+        assertEquals(ModelProvider.OPENAI, controller.state.value.preferences.provider) // active sessions are pinned
+        controller.stop(); runCurrent()
+        controller.selectProvider(ModelProvider.FOUNDRY)
+        assertTrue(controller.state.value.hasApiKey)
+        assertEquals("https://example.openai.azure.com", controller.state.value.preferences.foundryEndpoint)
+        controller.selectProvider(ModelProvider.OPENAI)
+        controller.dispose()
+        val restored = AppController(services, FakeTransport(), StandardTestDispatcher(testScheduler))
+        assertEquals(ModelProvider.OPENAI, restored.state.value.preferences.provider)
+        assertEquals("text-model", restored.state.value.preferences.openaiTextModel)
+        assertTrue(restored.state.value.hasApiKey)
+        restored.clearApiKey()
+        assertFalse(restored.state.value.hasApiKey)
+        restored.selectProvider(ModelProvider.FOUNDRY)
+        assertTrue(restored.state.value.hasApiKey)
+        assertTrue(services.memory.regular.values.none { "openai-secret" in it })
+        restored.dispose()
+    }
+
+    @Test fun failedProviderSwitchDoesNotReplaceActiveProviderOrCredential() = runTest {
+        val services = configuredServices()
+        val controller = AppController(services, FakeTransport(), StandardTestDispatcher(testScheduler))
+        services.memory.failPreferencesWrite = true
+        controller.selectProvider(ModelProvider.OPENAI)
+        assertEquals(ModelProvider.FOUNDRY, controller.state.value.preferences.provider)
+        assertTrue(controller.state.value.hasApiKey)
+        controller.dispose()
+    }
+
+    @Test fun finalParagraphFormattingPersistsLayoutWithoutChangingRawTextOrTimes() = runTest {
+        val services = configuredServices()
+        val transport = FakeTransport()
+        val formatter = object : ParagraphFormatter {
+            var calls = 0
+            override suspend fun format(connection: FoundryConnection, apiKey: String, model: String, record: TranscriptRecord): List<ParagraphLayout> {
+                calls++
+                assertEquals("paragraph-deployment", model)
+                val windows = paragraphWindows(record)
+                return parseParagraphLayouts("""{"output":[2]}""", windows, emptyList())
+            }
+        }
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler), formatter)
+        assertTrue(controller.saveConnection("https://example.openai.azure.com", "gpt-live-1", "", "paragraph-deployment"))
+        controller.start(); runCurrent()
+        val raw = "台湾是4.95兆美元。印度是4.92兆美元。那么，台湾为何领先？"
+        transport.receiver!!(TranscriptDelta(TranscriptChannel.OUTPUT, raw, 100, 1500))
+        controller.stop()
+        controller.state.first { it.phase == ConnectionPhase.IDLE }
+        val record = controller.state.value.current!!
+        assertEquals(raw, record.fragments.single().text)
+        assertEquals(100L, record.fragments.single().startMs)
+        assertTrue("4.92兆美元。\n\n" in liveCaptionText(record, TranscriptChannel.OUTPUT))
+        assertEquals(record.paragraphLayouts, AppRepository(services.memory).history().single().paragraphLayouts)
+        assertEquals(1, formatter.calls)
+        controller.dispose()
+    }
+
+    @Test fun paragraphServiceFailureDoesNotLoseTranscriptOrFailTranslation() = runTest {
+        val services = configuredServices()
+        val transport = FakeTransport()
+        val formatter = object : ParagraphFormatter {
+            override suspend fun format(connection: FoundryConnection, apiKey: String, model: String, record: TranscriptRecord): List<ParagraphLayout> = error("provider-secret")
+        }
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler), formatter)
+        controller.saveConnection("https://example.openai.azure.com", "gpt-live-1", "", "paragraph-deployment")
+        controller.start(); runCurrent()
+        transport.receiver!!(TranscriptDelta(TranscriptChannel.OUTPUT, "第一句。第二句。第三句。", 0, 1000))
+        controller.stop(); controller.state.first { it.phase == ConnectionPhase.IDLE }
+        assertEquals(ConnectionPhase.IDLE, controller.state.value.phase)
+        assertEquals(1, AppRepository(services.memory).history().single().fragments.size)
+        assertFalse("provider-secret" in controller.state.value.paragraphStatus.orEmpty())
+        assertTrue("暫時無法使用" in controller.state.value.paragraphStatus.orEmpty())
+        controller.dispose()
+    }
     @Test fun onlyValidatedFoundryResourcesAreAccepted() {
         assertNull(FoundryConnection("https://example.openai.azure.com").validationError())
         listOf("ws://example.openai.azure.com", "https://example.com", "https://example.openai.azure.com?key=secret")
@@ -513,6 +600,7 @@ private class FakeServices : PlatformServices {
 }
 
 private class FakeTransport(val ready: CompletableDeferred<Unit> = CompletableDeferred(Unit)) : TranslationTransport {
+    var receiver: (suspend (TranscriptDelta) -> Unit)? = null
     var starts = 0
     var closed = false
     val audio = mutableListOf<ByteArray>()
@@ -534,6 +622,7 @@ private class FakeTransport(val ready: CompletableDeferred<Unit> = CompletableDe
         sessionSettings += settings
         runFailure?.let { throw it }
         ready.await()
+        receiver = onTranscript
         onReady()
         for (chunk in audio) this.audio += chunk
     }

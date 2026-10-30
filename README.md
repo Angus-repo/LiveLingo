@@ -1,6 +1,6 @@
 # 即時譯 LiveLingo
 
-使用 Kotlin Multiplatform + Compose Multiplatform 的 Android／iOS 即時字幕翻譯 App。**0.1.1 起由 App 直接連接 Microsoft Foundry GPT-Live，不需自架後端。**
+使用 Kotlin Multiplatform + Compose Multiplatform 的 Android／iOS 即時字幕翻譯 App。**0.1.6 可選 Microsoft Foundry 或 OpenAI GPT-Live，由 App 直接連線，不需自架後端。**
 
 API key 由使用者自行輸入，Android 以 Keystore 保護加密金鑰並加密保存，iOS 以 Keychain 保存。原始碼、APK、逐字稿匯出及一般設定均不內建或保存明文 API key。
 
@@ -8,14 +8,16 @@ API key 由使用者自行輸入，Android 以 Keystore 保護加密金鑰並加
 
 | 功能 | 說明 |
 | --- | --- |
-| 直接連線 | 設定 Foundry 資源端點、GPT-Live 部署名稱與 API key |
+| 直接連線 | Microsoft Foundry／OpenAI，模型與加密金鑰獨立保存 |
 | 連線診斷 | 不開啟麥克風測試連線，顯示錯誤階段與可取得的 HTTP 狀態碼 |
 | 來源語言 | 自動、英文、印度英文、繁體中文、日文、韓文；自動模式於收到字幕後顯示文字推定語言 |
 | 目標語言 | 英文、印度英文、繁體中文、日文、韓文 |
 | 背景知識 | 管理多組場景與術語，翻譯前選擇一組或不使用 |
 | 即時字幕 | 原文在上、譯文在下；依時間由舊至新排列並自動捲至最新，文字不再按每段音訊換行，畫面不顯示時間戳 |
 | 逐字稿 | 自動保存在裝置，保留原文與譯文各自時間戳，支援歷史記錄、重新命名與刪除 |
-| 匯出 | SRT、WebVTT、TXT、JSON |
+| 匯出 | SRT／WebVTT 保留時間戳，TXT 含閱讀段落與時間明細，JSON 保留原始片段及 AI 段落位置 |
+| 繁中校正 | 目標選繁中台灣時，提示詞加本機 OpenCC 字詞資料轉換；保留數字與原始片段 |
+| AI 語意分段 | 使用所選服務的文字模型判斷原文、譯文的段落位置；未設定時採基本句子分段 |
 | 發言者 | 手動標記接下來收到的原文，或於停止後修正 |
 | Android 背景翻譯 | 前景啟動錄音服務後，可切換 App／鎖定螢幕，從通知停止並儲存；iOS 仍為前景翻譯 |
 | 翻譯策略 | 速度：優先即時／平衡；品質：忠實原文／自然流暢，工作階段開始前選定並保存到本機 |
@@ -42,6 +44,36 @@ API key 由使用者自行輸入，Android 以 Keystore 保護加密金鑰並加
 不需要服務網址、relay token、Docker、Java 後端或另外申請伺服器。App 會將 HTTPS 資源端點轉成對應的 WSS GPT-Live 工作階段路徑。不要填入 Foundry Portal 網頁、專案管理網址或舊版 `/realtime` API。
 
 API key 儲存後不會重新顯示。只修改部署名稱時，API key 留空可保留原值；變更資源端點時必須重新輸入對應 key，避免將舊 key 傳給另一個資源。若按「移除 API key」，再次翻譯前須重新輸入。
+
+## 0.1.6 繁中、AI 分段與服務切換
+
+- 修正即時字幕把換行全部轉成空白的問題。原文、譯文、歷史閱讀及 TXT 都能呈現段落；音訊分片不會被當成句子。
+- 繁中台灣以嚴格提示詞加離線字詞轉換處理。使用 OpenCC 授權字典，以最長詞組匹配，再套用台灣詞彙；不是重寫內容的 AI 校稿。字幕中的數值不做修正或推算。原始 provider fragments 與時間戳繼續保留在 JSON。
+- 設定可選 Microsoft Foundry／OpenAI，兩者模型名稱與加密 API key 獨立保存。切換不會刪除另一服務的設定；舊版 Foundry 設定自動沿用，工作階段中不可切換服務。
+- OpenAI 預設 `gpt-live-1`，使用官方 `wss://api.openai.com/v1/live/sessions` 與 Bearer 認證。Foundry 使用資源 `/openai/v1/live/sessions` 與 `api-key` 標頭。兩者皆為 GPT-Live 協定，不是一般 Realtime 模型。
+
+### AI 分段設定
+
+設定開啟「AI 語意分段」，填入相容 Chat Completions 與 JSON object 的**文字模型**後儲存：
+
+| 服務 | AI 分段文字模型 |
+| --- | --- |
+| Microsoft Foundry | 在同一資源部署文字模型（例如 `gpt-4.1-mini`），填入實際部署名稱；預設留空，避免假設使用者已有部署 |
+| OpenAI | 預設 `gpt-4.1-mini`，可改為帳號可使用的相容模型 |
+
+GPT-Live 是語音模型，不能填在 AI 分段文字模型欄。分段只將字幕送至所選服務，使用該服務金鑰，另計文字模型用量。
+
+約每 20 秒與停止時，將每個軌道最近最多 40 個完整句子、約 6,000 字元送出。AI 只回傳「哪些句子之後換段」的編號；App 驗證編號後插入空白行，不接受模型改寫原文、數字或譯文。尚未完成的句子立即顯示，後續再整理。保留既有模型換行；沒有設定、暫時失敗或尚未完成 AI 判斷時，先以 2–3 句的基本分段顯示，畫面明示狀態。
+
+「測試連線」只測 GPT-Live。文字模型於有字幕時使用，失敗不停止錄音或丟棄逐字稿。AI 段落位置與來源快照一起保存，亂序或新增文字造成快照不符時不套用舊位置。
+
+### OpenAI 開始使用
+
+選「OpenAI」，填入可使用 GPT-Live 的模型名稱與 API key，儲存後測試連線。端點固定為官方 API 網域，不能輸入代理主機。來源、目標語言、背景知識、速度、品質與 Android 背景服務沿用原本操作。
+
+本次 Android 為 `0.1.6`／versionCode `7`。建置、測試、簽章驗證與未驗證項目見 [BUILD_STATUS.md](BUILD_STATUS.md)。
+
+實作依據：[OpenAI GPT-Live WebSocket](https://developers.openai.com/api/docs/guides/voice-websockets?api=live)、[OpenAI GPT-Live 工作階段](https://developers.openai.com/api/docs/guides/live-conversations)、[Foundry v1 Chat Completions](https://learn.microsoft.com/en-us/azure/foundry/openai/latest?view=foundry-classic)。OpenCC 授權與版本見 `third_party/OpenCC/`，授權亦包含於 App 資源。
 
 ## 0.1.5 語言推定、字幕閱讀與翻譯策略
 
@@ -112,14 +144,14 @@ Android 正式簽章與 GitHub Actions 開發簽章設定見 [Android 說明](an
 
 ## 連線、錄音與資料處理
 
-- App 以 WSS 直接連接 Microsoft Foundry，沒有中繼後端。使用 `api-key` 標頭傳送使用者的資源 API key，不把 key 放在 URL，也不額外傳送 `Authorization` 標頭。
+- App 以 WSS 直接連接所選服務，沒有中繼後端。Foundry 使用 `api-key`，OpenAI 使用 `Authorization: Bearer`；金鑰不放在 URL。
 - 錄音為 24 kHz、單聲道、PCM16 little-endian。iOS 會從裝置實際取樣率轉換。
 - 收到 `session.started` 後才開始收音；停止時送出最後已擷取的音訊與 `session.close`，等候最後字幕及 `session.closed`。
 - Android 在前景建立麥克風前景服務後可持續背景收音，切換 App 或鎖定螢幕不會主動停止；iOS 目前仍只在前景收音。來電、音訊中斷、系統強制停止、斷線或錯誤可能中止，且不會自動重啟錄音或重播舊音訊。
 - 未收到任何服務事件達 90 秒時視為連線異常並停止；這是 App 的逾時策略，並非模型的回覆時限保證。
-- 不保存原始錄音檔。音訊與選定背景知識會直接傳至 Microsoft Foundry。
+- 不保存原始錄音檔。音訊與選定背景知識只傳至選定服務；啟用 AI 分段時，最近字幕也送至該服務的文字模型。
 - 逐字稿與背景知識保存在 App 專用空間；API key 使用系統保護的安全儲存區，與一般資料分開。
-- 停用重新導向，避免認證資訊跟隨轉址；App 只接受受支援的 Azure HTTPS 資源端點。
+- 停用重新導向，避免認證資訊跟隨轉址；Foundry 僅接受受支援的 Azure 資源端點，OpenAI 僅接受官方 API 主機。
 
 ## 字幕與發言者限制
 
@@ -131,9 +163,7 @@ GPT-Live 回傳的是帶時間範圍的串流片段，沒有每個字的精準�
 
 ## 驗證狀態
 
-0.1.3 的 77 項自動化測試通過，其中 9 項使用實際 TLS 與 Android 所用的 OkHttp 引擎，涵蓋正式連線工廠的 api-key 認證、WebSocket 握手、錯誤碼及金鑰遮蔽。GitHub Actions 的共用測試、Android APK 與 iOS ARM64 模擬器 App 編譯皆通過。實機與真實 Foundry 連線尚待驗證。
-
-實際執行結果見 [BUILD_STATUS.md](BUILD_STATUS.md)，實機驗收步驟見 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)。沒有真實 Foundry 憑證時，離線協定與流程測試不能取代模型連線及翻譯品質驗證。
+0.1.6 的 106 項測試及 Android APK 建置通過，已驗證原始簽章、版本與 APK 對齊。測試涵蓋兩家服務的本機 TLS 連線、繁中與數值保留、AI 段落位置及金鑰隔離。尚未使用真實雲端憑證驗證翻譯／分段品質，也尚未驗證本版 iOS 編譯與實機。詳見 [BUILD_STATUS.md](BUILD_STATUS.md)。
 
 ## 官方介面參考
 

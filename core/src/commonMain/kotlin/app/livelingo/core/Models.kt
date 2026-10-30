@@ -33,6 +33,7 @@ data class SessionSettings(
     val knowledge: BackgroundKnowledge? = null,
     val pace: TranslationPace = TranslationPace.BALANCED,
     val quality: TranslationQuality = TranslationQuality.FAITHFUL,
+    val provider: ModelProvider = ModelProvider.FOUNDRY,
 )
 
 /** Shared by the mobile UI and trusted relay; do not rely on UI-only validation. */
@@ -78,7 +79,12 @@ data class TranscriptRecord(
     val createdAtMs: Long,
     val settings: SessionSettings,
     val fragments: List<TranscriptFragment> = emptyList(),
+    val paragraphLayouts: List<ParagraphLayout> = emptyList(),
 )
+
+/** Breaks are character offsets into an exact source snapshot. No model-rewritten text is stored. */
+@Serializable
+data class ParagraphLayout(val channel: TranscriptChannel, val source: String, val breakOffsets: List<Int>)
 
 internal fun Char.isUnsafeControl(): Boolean =
     (code < 0x20 && this != '\n' && this != '\r' && this != '\t') || code == 0x7f

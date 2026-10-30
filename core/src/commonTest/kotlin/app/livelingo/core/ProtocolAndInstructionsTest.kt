@@ -44,7 +44,8 @@ class ProtocolAndInstructionsTest {
         assertTrue(prompt.contains("Indian English (en-IN)"))
         assertTrue(prompt.contains("lakh and crore"))
         assertTrue(prompt.contains("do not assume the speaker is speaking Hindi"))
-        assertTrue(prompt.contains("Traditional Chinese and Taiwan terminology"))
+        assertTrue(prompt.contains("zh-Hant-TW"))
+        assertTrue(prompt.contains("never Simplified or mixed script"))
     }
 
     @Test

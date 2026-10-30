@@ -11,6 +11,8 @@ interface LocalStorage {
 }
 
 interface Microphone {
+    /** Called from a visible user action before network setup; platforms without FGS may no-op. */
+    suspend fun prepare() {}
     suspend fun start(onAudio: (ByteArray) -> Unit, onError: (String) -> Unit)
     fun stop()
 }

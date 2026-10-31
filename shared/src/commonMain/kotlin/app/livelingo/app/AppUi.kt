@@ -429,7 +429,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                     Text("${item.fragments.size} 個串流片段 · ${formatTime(item.fragments.maxOfOrNull { it.endMs } ?: 0)}", style = MaterialTheme.typography.bodySmall)
                     if (item.contentFilterCount > 0) Text("有內容篩選記錄，部分片段可能不完整", style = MaterialTheme.typography.bodySmall, color = Color(0xFF9A473E))
                     item.settings.knowledge?.let { Text("背景：${it.name}", style = MaterialTheme.typography.bodySmall) }
-                    Text(item.fragments.filter { it.channel == TranscriptChannel.OUTPUT }.take(8).joinToString("") { it.text }.ifBlank { "尚未收到譯文" }, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Text(liveCaptionText(item, TranscriptChannel.OUTPUT).ifBlank { "尚未收到字幕" }, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     Row {
                         TextButton(onClick = { selectedId = item.id }) { Text("開啟逐字稿 →") }
                         Spacer(Modifier.weight(1f))

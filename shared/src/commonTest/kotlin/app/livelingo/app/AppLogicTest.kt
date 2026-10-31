@@ -16,6 +16,57 @@ import kotlinx.serialization.encodeToString
 import kotlin.test.*
 
 class AppLogicTest {
+    @Test fun chineseSourceIsVisibleSavedAndExportedWhenParagraphServiceFails() = runTest {
+        val services = configuredServices()
+        val transport = FakeTransport()
+        var formatCalls = 0
+        val formatter = object : ParagraphFormatter {
+            override suspend fun format(connection: FoundryConnection, apiKey: String, model: String, record: TranscriptRecord): List<ParagraphLayout> {
+                formatCalls++
+                throw TranslationFailure("文字模型無法使用")
+            }
+        }
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler), formatter)
+        controller.start(); runCurrent()
+        transport.receiver!!(TranscriptDelta(TranscriptChannel.INPUT, "I worked at Sony. ", 0, 3000))
+        transport.receiver!!(TranscriptDelta(TranscriptChannel.OUTPUT, "我曾在Sony工作。", 8000, 12000))
+        transport.receiver!!(TranscriptDelta(TranscriptChannel.INPUT, "我要去臺南。\n\n我的祕書說OK。", 3000, 6000))
+        val live = controller.state.value.current!!
+        assertTrue(liveCaptionText(live, TranscriptChannel.OUTPUT).contains("我要去臺南。\n\n我的祕書說OK。"))
+        assertEquals("我曾在Sony工作。", captionSourceText(live, TranscriptChannel.OUTPUT))
+        assertTrue(paragraphWindows(live).none { it.channel == TranscriptChannel.OUTPUT && "原文補充" in it.source })
+        controller.stop(); controller.state.first { it.phase == ConnectionPhase.IDLE }
+        assertTrue(formatCalls > 0)
+        assertTrue(controller.state.value.paragraphStatus.orEmpty().contains("暫時無法使用"))
+        val saved = AppRepository(services.memory).history().single()
+        assertTrue(liveCaptionText(saved, TranscriptChannel.OUTPUT).contains("我的祕書說OK。"))
+        assertEquals(3, saved.fragments.size)
+        controller.export(saved, "txt", TranscriptChannel.OUTPUT)
+        controller.export(saved, "srt", TranscriptChannel.OUTPUT)
+        controller.export(saved, "vtt", TranscriptChannel.OUTPUT)
+        assertTrue(services.exports.all { "原文補充" in it && "我的祕書說OK。" in it })
+        controller.dispose()
+        val restored = AppController(services, FakeTransport(), StandardTestDispatcher(testScheduler))
+        assertEquals(liveCaptionText(saved, TranscriptChannel.OUTPUT), liveCaptionText(restored.state.value.history.single(), TranscriptChannel.OUTPUT))
+        restored.dispose()
+    }
+
+    @Test fun fallbackDoesNotWaitForParagraphsAndLateOutputIsNotDisplayedTwice() = runTest {
+        val services = configuredServices()
+        val transport = FakeTransport()
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
+        controller.setAiParagraphs(false)
+        controller.start(); runCurrent()
+        transport.receiver!!(TranscriptDelta(TranscriptChannel.INPUT, "我要去臺南。", 0, 1000))
+        assertEquals("〔原文補充〕\n我要去臺南。", liveCaptionText(controller.state.value.current, TranscriptChannel.OUTPUT))
+        transport.receiver!!(TranscriptDelta(TranscriptChannel.OUTPUT, "我要去", 8000, 9000))
+        transport.receiver!!(TranscriptDelta(TranscriptChannel.OUTPUT, "臺南。", 9000, 10000))
+        assertEquals("我要去臺南。", liveCaptionText(controller.state.value.current, TranscriptChannel.OUTPUT))
+        controller.stop(); controller.state.first { it.phase == ConnectionPhase.IDLE }
+        assertTrue(AppRepository(services.memory).history().single().translationSupplements().isEmpty())
+        controller.dispose()
+    }
+
     @Test fun failedTranscriptWriteCannotBeOverwrittenByStartingAnotherSession() = runTest {
         val services = configuredServices()
         val transport = FakeTransport()

@@ -89,7 +89,10 @@ class ProtocolAndInstructionsTest {
     @Test
     fun allConcreteTargetsProduceTranslationPolicy() {
         Language.entries.filter { it != Language.AUTO }.forEach { target ->
-            assertTrue(translationInstructions(SessionSettings(targetLanguage = target)).contains("simultaneous speech interpreter"))
+            val prompt = translationInstructions(SessionSettings(targetLanguage = target))
+            assertTrue(prompt.contains("simultaneous speech interpreter"))
+            assertTrue(prompt.contains("non-empty target-language text"))
+            assertTrue(prompt.contains("Never skip or suppress a passage because it is already in the target language"))
         }
     }
 }

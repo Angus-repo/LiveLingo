@@ -561,7 +561,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
             if (state.hasApiKey) Text("✓ API key 已加密儲存在這台裝置", style = MaterialTheme.typography.bodySmall, color = Mint)
             if (!isOpenAi) Text("使用 Azure 資源的 HTTPS 根網址；變更端點時須重新輸入對應的 API key。", style = MaterialTheme.typography.bodySmall)
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text("AI 語意分段", modifier = Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
+                Text("AI 標點與分段", modifier = Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
                 Switch(state.preferences.aiParagraphs, controller::setAiParagraphs, enabled = !state.busy)
             }
             if (state.preferences.aiParagraphs || speechKind.transcribes) {
@@ -588,7 +588,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                     else if (customTextId || textKind == TextModel.CUSTOM) "此欄指定同一模型的 API ID，不是第二個模型；請確認 ID 與所選類型相符。"
                     else "選擇上方模型即可，API ID 會自動帶入。只有指定其他模型版本時才需要進階設定。", style = MaterialTheme.typography.bodySmall)
                 if (speechKind.transcribes) Text("每約 3 秒完成一段原文轉錄，再由文字模型翻譯；即使關閉 AI 分段，文字翻譯仍會執行並計費。", style = MaterialTheme.typography.bodySmall)
-                if (state.preferences.aiParagraphs) Text("約每 20 秒與停止時先判斷原文段落，再讓譯文依對應語意換段；沒有原文時才獨立分段。AI 只調整換行，不改寫內容；字幕尚未對應完整時會顯示等待狀態。", style = MaterialTheme.typography.bodySmall)
+                if (state.preferences.aiParagraphs) Text("收音時定期整理新字幕的標點與段落，停止時完成最後一段；譯文依原文分段，原文補充也沿用相同格式。只補標點與換行，不改寫文字或數字。此功能會使用所選文字模型並計費，需有可用部署與配額。", style = MaterialTheme.typography.bodySmall)
             }
             Text("費用為美元公開參考價，查核：$PRICE_CHECKED_DATE；非帳單即時報價。實際費用依用量、部署與合約而定。", style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971))
             if (!isOpenAi) TextButton(onClick = { runCatching { uriHandler.openUri(FOUNDRY_PRICING_URL) }.onFailure { controller.inform("無法開啟定價網頁。") } }) { Text("查看 Azure 官方定價 ↗") }

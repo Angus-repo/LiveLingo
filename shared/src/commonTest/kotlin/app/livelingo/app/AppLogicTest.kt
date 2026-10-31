@@ -12,10 +12,46 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.serialization.encodeToString
 import kotlin.test.*
 
 class AppLogicTest {
+    @Test fun unpunctuatedSpeechGetsPeriodicFormattingAndFinalPeriodOnStop() = runTest {
+        val services = configuredServices()
+        val transport = FakeTransport()
+        val raw = "今天確認付款流程明天討論整合測試最後決定部署時間"
+        var finishes = 0
+        val formatter = object : ParagraphFormatter {
+            fun restored(record: TranscriptRecord, final: Boolean): List<ParagraphLayout> {
+                val window = paragraphWindows(record, final).single()
+                val first = window.ends.indexOf(raw.indexOf("明天")) + 1
+                val second = window.ends.indexOf(raw.indexOf("最後")) + 1
+                val last = if (final) ",{\"after\":${window.ends.size},\"mark\":\"。\"}" else ""
+                return parseParagraphLayouts("""{"input":[$second],"punctuation":{"input":[{"after":$first,"mark":"，"},{"after":$second,"mark":"。"}$last]}}""", listOf(window), record.paragraphLayouts)
+            }
+            override suspend fun format(connection: FoundryConnection, apiKey: String, model: String, record: TranscriptRecord) = restored(record, false)
+            override suspend fun finish(connection: FoundryConnection, apiKey: String, model: String, record: TranscriptRecord): List<ParagraphLayout> {
+                finishes++
+                return restored(record, true)
+            }
+        }
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler), formatter)
+        controller.start(); runCurrent()
+        transport.receiver!!(TranscriptDelta(TranscriptChannel.INPUT, raw, 0, 8000))
+        advanceTimeBy(8_000); runCurrent()
+        val live = controller.state.first { it.current?.paragraphLayouts?.isNotEmpty() == true }.current!!
+        assertEquals("今天確認付款流程，明天討論整合測試。\n\n最後決定部署時間", liveCaptionText(live, TranscriptChannel.INPUT))
+        assertEquals("〔原文補充〕\n" + liveCaptionText(live, TranscriptChannel.INPUT), liveCaptionText(live, TranscriptChannel.OUTPUT))
+        controller.stop(); controller.state.first { it.phase == ConnectionPhase.IDLE }
+        assertEquals(1, finishes)
+        val saved = AppRepository(services.memory).history().single()
+        assertTrue(liveCaptionText(saved, TranscriptChannel.INPUT).endsWith("部署時間。"))
+        assertTrue(liveCaptionText(saved, TranscriptChannel.OUTPUT).endsWith("部署時間。"))
+        assertEquals(raw, saved.fragments.single().text)
+        controller.dispose()
+    }
+
     @Test fun chineseSourceIsVisibleSavedAndExportedWhenParagraphServiceFails() = runTest {
         val services = configuredServices()
         val transport = FakeTransport()

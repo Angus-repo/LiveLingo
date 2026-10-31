@@ -86,7 +86,14 @@ object SubtitleExporter {
         }
         // Keep whitespace deltas while grouping, but don't export a cue with no content.
         val texts = record.localizedChunks(result.map { it.text }, channel)
-        val actual = result.mapIndexed { index, cue -> cue.copy(text = texts[index]) }.filter { cleanText(it.text).isNotBlank() }
+        .map { it.replace("\r\n", "\n").replace('\r', '\n') }
+        val joined = texts.joinToString("")
+        val layout = alignedSourceLayout(joined, record.paragraphLayouts.find { it.channel == channel })
+        var offset = 0
+        val actual = result.mapIndexed { index, cue ->
+            val end = offset + texts[index].length
+            cue.copy(text = formattedSourceSlice(joined, layout, offset, end)).also { offset = end }
+        }.filter { cleanText(it.text).isNotBlank() }
         val supplements = if (channel == TranscriptChannel.OUTPUT) record.translationSupplements().map {
             Cue(it.startMs, it.endMs, supplementReadingText(it.text), null)
         } else emptyList()

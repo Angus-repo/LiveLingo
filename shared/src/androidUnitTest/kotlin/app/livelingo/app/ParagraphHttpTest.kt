@@ -69,9 +69,28 @@ class ParagraphHttpTest {
                     assertEquals("isolated-test-secret", request.getHeader("api-key"))
                     assertNull(request.getHeader("Authorization"))
                 }
+                val raw = "今天確認付款流程明天討論整合測試最後決定部署時間"
+                val unpunctuated = record.copy(fragments = listOf(TranscriptFragment("in", TranscriptChannel.INPUT, 0, 1000, raw)))
+                val window = paragraphWindows(unpunctuated, final = true).single()
+                val split = window.ends.indexOf(raw.indexOf("最後")) + 1
+                val punctuatedResponse = buildJsonObject { putJsonArray("choices") { add(buildJsonObject {
+                    put("finish_reason", "stop")
+                    putJsonObject("message") { put("content", """{"input":[$split],"punctuation":{"input":[{"after":$split,"mark":"。"},{"after":${window.ends.size},"mark":"。"}]}}""") }
+                }) } }.toString()
+                server.enqueue(MockResponse().setHeader("Content-Type", "application/json").setBody(punctuatedResponse))
+                val restored = unpunctuated.copy(paragraphLayouts = formatter.finish(connection, "isolated-test-secret", "my-text-model", unpunctuated))
+                val displayed = liveCaptionText(restored, TranscriptChannel.INPUT)
+                assertEquals("今天確認付款流程明天討論整合測試。\n\n最後決定部署時間。", displayed)
+                assertEquals("〔原文補充〕\n$displayed", liveCaptionText(restored, TranscriptChannel.OUTPUT))
+                assertEquals(raw, restored.fragments.single().text)
+                val punctuationRequest = assertNotNull(server.takeRequest(2, TimeUnit.SECONDS)).body.readUtf8()
+                val punctuationPayload = WireJson.parseToJsonElement(punctuationRequest).jsonObject
+                val punctuationData = WireJson.parseToJsonElement(punctuationPayload["messages"]!!.jsonArray[1].jsonObject["content"]!!.jsonPrimitive.content).jsonObject
+                assertTrue(punctuationData["punctuation_tracks"]!!.jsonObject["input"]!!.jsonPrimitive.boolean)
+                assertTrue(punctuationData["finalized_tracks"]!!.jsonObject["input"]!!.jsonPrimitive.boolean)
                 server.enqueue(MockResponse().setResponseCode(302).setHeader("Location", "https://other.example/test"))
                 assertFails { formatter.format(connection.copy(textModelKind = TextModel.GPT6_LUNA), "isolated-test-secret", "my-text-model", record) }
-                assertEquals(2, server.requestCount) // No redirect to the other destination.
+                assertEquals(3, server.requestCount) // No redirect to the other destination.
                 server.enqueue(MockResponse().setHeader("Content-Type", "application/json").setBody(success("[999]")))
                 assertFails { formatter.format(connection.copy(textModelKind = TextModel.GPT6_LUNA), "isolated-test-secret", "my-text-model", record) }
             } finally { formatter.close(); server.shutdown() }

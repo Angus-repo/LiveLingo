@@ -11,8 +11,9 @@ const val TRANSLATION_SUPPLEMENT_LABEL = "原文補充"
 fun TranscriptRecord.translationSupplements(): List<TranscriptFragment> {
     val inputs = fragments.filter { it.channel == TranscriptChannel.INPUT }.sortedBy { it.startMs }
     if (inputs.isEmpty()) return emptyList()
-    val source = inputs.joinToString("") { it.text }
+    val source = localizedText(inputs.joinToString("") { it.text }.replace("\r\n", "\n").replace('\r', '\n'), TranscriptChannel.INPUT)
     if (source.isBlank()) return emptyList()
+    val sourceLayout = alignedSourceLayout(source, paragraphLayouts.find { it.channel == TranscriptChannel.INPUT })
     val arrival = fragments.mapIndexed { index, fragment -> fragment.id to index }.toMap()
     val outputs = fragments.filter { it.channel == TranscriptChannel.OUTPUT }.sortedBy { it.startMs }
     val outputChunks = localizedChunks(outputs.map { it.text }, TranscriptChannel.OUTPUT).map { matchingText(it).text }
@@ -60,7 +61,7 @@ fun TranscriptRecord.translationSupplements(): List<TranscriptFragment> {
         val first = inputs.indices.firstOrNull { offsets[it] + inputs[it].text.length > start } ?: continue
         val last = inputs.indices.lastOrNull { offsets[it] < end } ?: first
         val sourceArrival = arrival.getValue(inputs[first].id)
-        val localized = localizedText(raw, TranscriptChannel.OUTPUT)
+        val localized = localizedText(formattedSourceSlice(source, sourceLayout, start, end), TranscriptChannel.OUTPUT)
         var remainder = localized
         if (!noOutput) {
             val candidate = matchingText(localized)

@@ -39,6 +39,21 @@ fun paragraphText(text: String, layout: ParagraphLayout? = null): String {
     if (text.isBlank()) return ""
     val normalized = text.replace("\r\n", "\n").replace('\r', '\n')
     val current = layout?.takeIf { normalized.startsWith(it.source) }
+    if (current != null && current.punctuation.isNotEmpty() &&
+        validPunctuation(current.source, current.punctuation, current.finalized)) {
+        val edits = current.punctuation.sortedBy { it.offset }
+        fun decorated(value: String): String = buildString {
+            var start = 0
+            edits.forEach { edit ->
+                append(value.substring(start, edit.offset)); append(edit.mark); start = edit.offset
+            }
+            append(value.substring(start))
+        }
+        val decoratedLayout = current.copy(source = decorated(current.source),
+            breakOffsets = current.breakOffsets.map { offset -> offset + edits.count { it.offset <= offset } },
+            punctuation = emptyList())
+        return paragraphText(decorated(normalized), decoratedLayout)
+    }
     val offsets = current?.breakOffsets.orEmpty()
     // Only an accepted new layout may replace provider line breaks. Old records keep their behavior.
     if (offsets.isEmpty() && '\n' in normalized && current?.replaceExistingBreaks != true) return normalized.trim()

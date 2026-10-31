@@ -105,7 +105,13 @@ data class ParagraphLayout(
     val replaceExistingBreaks: Boolean = false,
     val originalReference: String? = null,
     val awaitingSourceAlignment: Boolean = false,
+    val punctuation: List<PunctuationInsertion> = emptyList(),
+    val finalized: Boolean = false,
 )
+
+/** Only an allowlisted punctuation mark may be inserted after an existing character. */
+@Serializable
+data class PunctuationInsertion(val offset: Int, val mark: String)
 
 internal fun Char.isUnsafeControl(): Boolean =
     (code < 0x20 && this != '\n' && this != '\r' && this != '\t') || code == 0x7f

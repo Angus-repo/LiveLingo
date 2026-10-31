@@ -15,6 +15,41 @@ private class SettingsMemory : LocalStorage {
 }
 
 class ModelSettingsTest {
+    @Test fun modelMenusKeepExistingCustomIdsAndAreScopedToProviderAndResource() {
+        val original = AppPreferences(foundryEndpoint = "https://one.openai.azure.com", deployment = "company-live",
+            foundryTextModel = "company-sol", foundryTextKind = TextModel.GPT61_SOL, foundrySourceTranscript = "company-whisper")
+        val next = original.connection().copy(deployment = "gpt-realtime-translate", speechModel = SpeechModel.REALTIME_TRANSLATE,
+            textDeployment = "gpt-6-luna", textModelKind = TextModel.GPT6_LUNA, sourceTranscriptionModel = "")
+        val memory = SettingsMemory(); val repo = AppRepository(memory)
+        repo.savePreferences(original.copy(deployment = next.deployment, foundrySpeechKind = next.speechModel,
+            foundryTextModel = next.textDeployment, foundryTextKind = next.textModelKind, foundrySourceTranscript = "",
+            savedModelChoices = original.rememberModelChoices(next)))
+        val restored = repo.preferences()
+        val sameResource = next.copy(endpoint = "https://one.openai.azure.com/openai/v1/")
+        assertTrue(ModelSelection(SpeechModel.GPT_LIVE.name, "company-live") in modelSelections(restored, sameResource, ModelRole.SPEECH))
+        assertTrue(ModelSelection(TextModel.GPT61_SOL.name, "company-sol") in modelSelections(restored, sameResource, ModelRole.TEXT))
+        assertTrue(ModelSelection("", "company-whisper") in modelSelections(restored, sameResource, ModelRole.SOURCE_TRANSCRIPT))
+        val otherResource = next.copy(endpoint = "https://two.openai.azure.com")
+        assertTrue(modelSelections(restored, otherResource, ModelRole.SPEECH).none { it.modelId == "company-live" })
+        val openai = restored.copy(provider = ModelProvider.OPENAI).connection()
+        assertTrue(modelSelections(restored, openai, ModelRole.TEXT).none { it.modelId == "company-sol" })
+        assertTrue(modelSelections(restored, openai, ModelRole.SPEECH).none { it.kind == SpeechModel.MAI_TRANSCRIBE.name })
+    }
+
+    @Test fun aSavedOpenAiSnapshotKeepsItsParametersAndKnownModelsHaveOneOption() {
+        val prefs = AppPreferences(provider = ModelProvider.OPENAI, openaiTextKind = TextModel.GPT61_SOL,
+            openaiTextModel = "gpt-6.1-sol-2026-10-01")
+        val choices = modelSelections(prefs, prefs.connection(), ModelRole.TEXT)
+        val snapshot = choices.single { it.modelId == prefs.openaiTextModel }
+        val parameters = WireJson.parseToJsonElement(paragraphRequest(snapshot.modelId, emptyList(), TextModel.valueOf(snapshot.kind))).jsonObject
+        assertEquals("low", parameters.eventString("reasoning_effort"))
+        assertEquals(prefs.openaiTextModel, parameters.eventString("model"))
+        assertEquals(1, choices.count { it.modelId == "gpt-6-luna" })
+        assertNotNull(ModelSelection(SpeechModel.GPT_LIVE.name, "gpt-realtime-translate").validationError(ModelRole.SPEECH, ModelProvider.OPENAI))
+        assertNotNull(ModelSelection(TextModel.GPT6_LUNA.name, "gpt-6.1-sol").validationError(ModelRole.TEXT, ModelProvider.OPENAI))
+        assertNull(ModelSelection(SpeechModel.GPT_LIVE.name, "company-live").validationError(ModelRole.SPEECH, ModelProvider.FOUNDRY))
+    }
+
     @Test fun bothProvidersDefaultToLuna() {
         val p = AppPreferences()
         assertEquals("gpt-6-luna", p.foundryTextModel); assertEquals("gpt-6-luna", p.openaiTextModel)

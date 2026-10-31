@@ -12,10 +12,120 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.serialization.encodeToString
 import kotlin.test.*
 
 class AppLogicTest {
+    @Test fun selectingAnotherModelRetainsPreviousDeploymentAndRestoresTheExactConnection() = runTest {
+        val services = configuredServices()
+        val controller = AppController(services, FakeTransport(), StandardTestDispatcher(testScheduler))
+        assertTrue(controller.saveConnection("https://example.openai.azure.com", "bank-live", "", "bank-sol", SpeechModel.GPT_LIVE, TextModel.GPT61_SOL))
+        assertTrue(controller.saveConnection("https://example.openai.azure.com", "bank-transcribe", "", "bank-luna", SpeechModel.LIVE_TRANSCRIBE, TextModel.GPT6_LUNA))
+        controller.dispose()
+        val transport = FakeTransport()
+        val reopened = AppController(services, transport, StandardTestDispatcher(testScheduler))
+        val prefs = reopened.state.value.preferences
+        val voice = modelSelections(prefs, prefs.connection(), ModelRole.SPEECH).single { it.modelId == "bank-live" }
+        val text = modelSelections(prefs, prefs.connection(), ModelRole.TEXT).single { it.modelId == "bank-sol" }
+        assertTrue(reopened.saveConnection(prefs.foundryEndpoint, voice.modelId, "", text.modelId,
+            SpeechModel.valueOf(voice.kind), TextModel.valueOf(text.kind)))
+        reopened.start(); runCurrent()
+        assertEquals("bank-live", transport.connections.single().deployment)
+        assertEquals(SpeechModel.GPT_LIVE, transport.connections.single().speechModel)
+        assertEquals("bank-sol", transport.connections.single().textDeployment)
+        assertEquals(TextModel.GPT61_SOL, transport.connections.single().textModelKind)
+        assertEquals(listOf("short-key"), transport.keys)
+        assertTrue(services.memory.regular.values.none { "short-key" in it })
+        reopened.stop(); runCurrent(); reopened.dispose()
+    }
+
+    @Test fun unpunctuatedSpeechGetsPeriodicFormattingAndFinalPeriodOnStop() = runTest {
+        val services = configuredServices()
+        val transport = FakeTransport()
+        val raw = "今天確認付款流程明天討論整合測試最後決定部署時間"
+        var finishes = 0
+        val formatter = object : ParagraphFormatter {
+            fun restored(record: TranscriptRecord, final: Boolean): List<ParagraphLayout> {
+                val window = paragraphWindows(record, final).single()
+                val first = window.ends.indexOf(raw.indexOf("明天")) + 1
+                val second = window.ends.indexOf(raw.indexOf("最後")) + 1
+                val last = if (final) ",{\"after\":${window.ends.size},\"mark\":\"。\"}" else ""
+                return parseParagraphLayouts("""{"input":[$second],"punctuation":{"input":[{"after":$first,"mark":"，"},{"after":$second,"mark":"。"}$last]}}""", listOf(window), record.paragraphLayouts)
+            }
+            override suspend fun format(connection: FoundryConnection, apiKey: String, model: String, record: TranscriptRecord) = restored(record, false)
+            override suspend fun finish(connection: FoundryConnection, apiKey: String, model: String, record: TranscriptRecord): List<ParagraphLayout> {
+                finishes++
+                return restored(record, true)
+            }
+        }
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler), formatter)
+        controller.start(); runCurrent()
+        transport.receiver!!(TranscriptDelta(TranscriptChannel.INPUT, raw, 0, 8000))
+        advanceTimeBy(8_000); runCurrent()
+        val live = controller.state.first { it.current?.paragraphLayouts?.isNotEmpty() == true }.current!!
+        assertEquals("今天確認付款流程，明天討論整合測試。\n\n最後決定部署時間", liveCaptionText(live, TranscriptChannel.INPUT))
+        assertEquals("〔原文補充〕\n" + liveCaptionText(live, TranscriptChannel.INPUT), liveCaptionText(live, TranscriptChannel.OUTPUT))
+        controller.stop(); controller.state.first { it.phase == ConnectionPhase.IDLE }
+        assertEquals(1, finishes)
+        val saved = AppRepository(services.memory).history().single()
+        assertTrue(liveCaptionText(saved, TranscriptChannel.INPUT).endsWith("部署時間。"))
+        assertTrue(liveCaptionText(saved, TranscriptChannel.OUTPUT).endsWith("部署時間。"))
+        assertEquals(raw, saved.fragments.single().text)
+        controller.dispose()
+    }
+
+    @Test fun chineseSourceIsVisibleSavedAndExportedWhenParagraphServiceFails() = runTest {
+        val services = configuredServices()
+        val transport = FakeTransport()
+        var formatCalls = 0
+        val formatter = object : ParagraphFormatter {
+            override suspend fun format(connection: FoundryConnection, apiKey: String, model: String, record: TranscriptRecord): List<ParagraphLayout> {
+                formatCalls++
+                throw TranslationFailure("文字模型無法使用")
+            }
+        }
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler), formatter)
+        controller.start(); runCurrent()
+        transport.receiver!!(TranscriptDelta(TranscriptChannel.INPUT, "I worked at Sony. ", 0, 3000))
+        transport.receiver!!(TranscriptDelta(TranscriptChannel.OUTPUT, "我曾在Sony工作。", 8000, 12000))
+        transport.receiver!!(TranscriptDelta(TranscriptChannel.INPUT, "我要去臺南。\n\n我的祕書說OK。", 3000, 6000))
+        val live = controller.state.value.current!!
+        assertTrue(liveCaptionText(live, TranscriptChannel.OUTPUT).contains("我要去臺南。\n\n我的祕書說OK。"))
+        assertEquals("我曾在Sony工作。", captionSourceText(live, TranscriptChannel.OUTPUT))
+        assertTrue(paragraphWindows(live).none { it.channel == TranscriptChannel.OUTPUT && "原文補充" in it.source })
+        controller.stop(); controller.state.first { it.phase == ConnectionPhase.IDLE }
+        assertTrue(formatCalls > 0)
+        assertTrue(controller.state.value.paragraphStatus.orEmpty().contains("暫時無法使用"))
+        val saved = AppRepository(services.memory).history().single()
+        assertTrue(liveCaptionText(saved, TranscriptChannel.OUTPUT).contains("我的祕書說OK。"))
+        assertEquals(3, saved.fragments.size)
+        controller.export(saved, "txt", TranscriptChannel.OUTPUT)
+        controller.export(saved, "srt", TranscriptChannel.OUTPUT)
+        controller.export(saved, "vtt", TranscriptChannel.OUTPUT)
+        assertTrue(services.exports.all { "原文補充" in it && "我的祕書說OK。" in it })
+        controller.dispose()
+        val restored = AppController(services, FakeTransport(), StandardTestDispatcher(testScheduler))
+        assertEquals(liveCaptionText(saved, TranscriptChannel.OUTPUT), liveCaptionText(restored.state.value.history.single(), TranscriptChannel.OUTPUT))
+        restored.dispose()
+    }
+
+    @Test fun fallbackDoesNotWaitForParagraphsAndLateOutputIsNotDisplayedTwice() = runTest {
+        val services = configuredServices()
+        val transport = FakeTransport()
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
+        controller.setAiParagraphs(false)
+        controller.start(); runCurrent()
+        transport.receiver!!(TranscriptDelta(TranscriptChannel.INPUT, "我要去臺南。", 0, 1000))
+        assertEquals("〔原文補充〕\n我要去臺南。", liveCaptionText(controller.state.value.current, TranscriptChannel.OUTPUT))
+        transport.receiver!!(TranscriptDelta(TranscriptChannel.OUTPUT, "我要去", 8000, 9000))
+        transport.receiver!!(TranscriptDelta(TranscriptChannel.OUTPUT, "臺南。", 9000, 10000))
+        assertEquals("我要去臺南。", liveCaptionText(controller.state.value.current, TranscriptChannel.OUTPUT))
+        controller.stop(); controller.state.first { it.phase == ConnectionPhase.IDLE }
+        assertTrue(AppRepository(services.memory).history().single().translationSupplements().isEmpty())
+        controller.dispose()
+    }
+
     @Test fun failedTranscriptWriteCannotBeOverwrittenByStartingAnotherSession() = runTest {
         val services = configuredServices()
         val transport = FakeTransport()

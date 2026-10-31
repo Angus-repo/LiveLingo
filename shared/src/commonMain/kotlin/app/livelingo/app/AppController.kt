@@ -40,7 +40,7 @@ data class AppState(
 
 class AppController(
     private val services: PlatformServices,
-    private val transport: TranslationTransport = KtorFoundryTransport(services.createHttpClient()),
+    private val transport: TranslationTransport = ModelTranslationTransport { services.createHttpClient() },
     dispatcher: CoroutineDispatcher = Dispatchers.Main.immediate,
     private var paragraphFormatter: ParagraphFormatter? = null,
 ) {
@@ -66,7 +66,7 @@ class AppController(
             val connection = preferences.connection()
             var setupMessage: String? = if (sourceRemoved) "Teams 音源已移除，已改選麥克風。請在開始前確認音源；既有逐字稿會保留。" else null
             apiKey = if (connection.validationError() == null) {
-                try { repository.apiKey(connection.webSocketUrl()) }
+                try { repository.apiKey(connection.credentialEndpoint()) }
                 catch (_: Exception) {
                     setupMessage = "無法讀取已儲存的 API key。逐字稿與背景知識仍可使用；請到設定移除或重新輸入 API key。"
                     ""
@@ -124,7 +124,7 @@ class AppController(
         val preferences = mutable.value.preferences.copy(provider = provider)
         try {
             val connection = preferences.connection()
-            val key = if (connection.validationError() == null) repository.apiKey(connection.webSocketUrl()) else ""
+            val key = if (connection.validationError() == null) repository.apiKey(connection.credentialEndpoint()) else ""
             repository.savePreferences(preferences)
             apiKey = key
             mutable.value = mutable.value.copy(preferences = preferences, hasApiKey = key.isNotBlank(),
@@ -142,22 +142,24 @@ class AppController(
         catch (_: Exception) { inform("設定無法儲存，請確認裝置儲存空間。") }
     }
 
-    fun saveConnection(endpoint: String, deployment: String, replacementApiKey: String, paragraphModel: String? = null): Boolean {
+    fun saveConnection(endpoint: String, deployment: String, replacementApiKey: String, paragraphModel: String? = null, speechKind: SpeechModel? = null, textKind: TextModel? = null, sourceTranscript: String? = null): Boolean {
         if (mutable.value.busy || !mutable.value.storageAvailable) return false
         if (paragraphModel != null && paragraphModel.isNotBlank() && !Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}").matches(paragraphModel.trim())) {
             inform("請填入有效的 AI 分段文字模型名稱。")
             return false
         }
-        val resolved = resolveConnection(endpoint, deployment, replacementApiKey) ?: return false
+        val resolved = resolveConnection(endpoint, deployment, replacementApiKey, speechKind, textKind, paragraphModel, sourceTranscript) ?: return false
         val connection = resolved.connection
-        val canonicalEndpoint = connection.webSocketUrl()
+        val canonicalEndpoint = connection.credentialEndpoint()
         val previous = mutable.value.preferences.connection()
-        val previousEndpoint = if (previous.validationError() == null) previous.webSocketUrl() else null
+        val previousEndpoint = if (previous.validationError() == null) previous.credentialEndpoint() else null
         val current = mutable.value.preferences
         val preferences = if (connection.provider == ModelProvider.OPENAI)
-            current.copy(openaiModel = connection.deployment, openaiTextModel = paragraphModel?.trim() ?: current.openaiTextModel)
+            current.copy(openaiModel = connection.deployment, openaiTextModel = connection.textDeployment,
+                openaiSpeechKind = connection.speechModel, openaiTextKind = connection.textModelKind, openaiSourceTranscript = connection.sourceTranscriptionModel)
         else current.copy(foundryEndpoint = connection.endpoint, deployment = connection.deployment,
-            foundryTextModel = paragraphModel?.trim() ?: current.foundryTextModel)
+            foundryTextModel = connection.textDeployment, foundrySpeechKind = connection.speechModel,
+            foundryTextKind = connection.textModelKind, foundrySourceTranscript = connection.sourceTranscriptionModel)
         return try {
             repository.saveApiKey(canonicalEndpoint, resolved.apiKey)
             repository.savePreferences(preferences)
@@ -175,12 +177,25 @@ class AppController(
 
     private data class ResolvedConnection(val connection: FoundryConnection, val apiKey: String)
 
-    private fun resolveConnection(endpoint: String, deployment: String, replacementApiKey: String): ResolvedConnection? {
-        val connection = FoundryConnection(endpoint.trim(), deployment.trim(), mutable.value.preferences.provider)
+    private fun resolveConnection(endpoint: String, deployment: String, replacementApiKey: String,
+        speechKind: SpeechModel? = null, textKind: TextModel? = null, textDeployment: String? = null, sourceTranscript: String? = null): ResolvedConnection? {
+        val saved = mutable.value.preferences.connection()
+        val connection = saved.copy(endpoint = endpoint.trim(), deployment = deployment.trim(),
+            speechModel = speechKind ?: saved.speechModel, textModelKind = textKind ?: saved.textModelKind,
+            textDeployment = textDeployment?.trim() ?: saved.textDeployment,
+            sourceTranscriptionModel = sourceTranscript?.trim() ?: saved.sourceTranscriptionModel)
         connection.validationError()?.let { inform(it); return null }
-        val canonicalEndpoint = connection.webSocketUrl()
+        if (connection.provider == ModelProvider.OPENAI) {
+            val namedSpeech = SpeechModel.entries.firstOrNull { connection.deployment == it.modelId }
+            if (namedSpeech != null && namedSpeech != connection.speechModel) { inform("語音模型 ID 與選擇的模型類型不符，請重新選擇。"); return null }
+            val namedText = TextModel.infer(connection.textDeployment)
+            if (namedText != TextModel.CUSTOM && connection.textModelKind != TextModel.CUSTOM && namedText != connection.textModelKind) {
+                inform("文字模型 ID 與選擇的模型類型不符，請重新選擇。"); return null
+            }
+        }
+        val canonicalEndpoint = connection.credentialEndpoint()
         val previous = mutable.value.preferences.connection()
-        val previousEndpoint = if (previous.validationError() == null) previous.webSocketUrl() else null
+        val previousEndpoint = if (previous.validationError() == null) previous.credentialEndpoint() else null
         if (canonicalEndpoint != previousEndpoint && replacementApiKey.isEmpty()) {
             inform("新增或變更服務端點時，請重新輸入這個服務的 API key。")
             return null
@@ -207,9 +222,9 @@ class AppController(
     }
 
     /** Tests the displayed form without saving it, recording audio, or selecting any background knowledge. */
-    fun testConnection(endpoint: String, deployment: String, replacementApiKey: String) {
+    fun testConnection(endpoint: String, deployment: String, replacementApiKey: String, speechKind: SpeechModel? = null, textKind: TextModel? = null, textDeployment: String? = null, sourceTranscript: String? = null) {
         if (mutable.value.busy || !mutable.value.storageAvailable) return
-        val resolved = resolveConnection(endpoint, deployment, replacementApiKey) ?: return
+        val resolved = resolveConnection(endpoint, deployment, replacementApiKey, speechKind, textKind, textDeployment, sourceTranscript) ?: return
         mutable.value = mutable.value.copy(connectionTesting = true, message = null,
             lastConnectionReport = null, showReportInMessage = false)
         val job = scope.launch(start = CoroutineStart.LAZY) {
@@ -300,13 +315,17 @@ class AppController(
         if (apiKey.isBlank()) { inform("請先到「設定」儲存 ${connection.provider.label} API key。"); return }
         val sessionApiKey = apiKey
         val settings = SessionSettings(
-            snapshot.preferences.source, snapshot.preferences.target,
-            snapshot.knowledge.find { it.id == snapshot.preferences.knowledgeId },
+            if (connection.speechModel == SpeechModel.REALTIME_TRANSLATE) Language.AUTO else snapshot.preferences.source, snapshot.preferences.target,
+            if (connection.speechModel == SpeechModel.REALTIME_TRANSLATE) null else snapshot.knowledge.find { it.id == snapshot.preferences.knowledgeId },
             snapshot.preferences.pace, snapshot.preferences.quality,
             snapshot.preferences.provider,
             snapshot.preferences.audioSource,
+            connection.speechModel,
         )
         settings.validationError()?.let { inform(it); return }
+        if (connection.speechModel.transcribes && connection.textDeployment.isBlank()) {
+            inform("此轉錄方案需設定文字翻譯模型；請到設定選擇 GPT-6 Luna 或其他文字模型。"); return
+        }
         val now = services.currentTimeMillis()
         val record = TranscriptRecord(services.uniqueId(), "${settings.sourceLanguage.label} → ${settings.targetLanguage.label}", now, settings)
         try { repository.saveTranscript(record) }
@@ -579,7 +598,7 @@ class AppController(
 }
 
 /** Only curated error fields enter this report; headers, provider bodies and exception text are excluded. */
-private fun safeDiagnosticField(value: String, secret: String): String {
+internal fun safeDiagnosticField(value: String, secret: String): String {
     val masked = if (secret.isEmpty()) value else value.replace(secret, "[已遮蔽]")
     return masked.map { if (it.code < 0x20 || it.code == 0x7f) ' ' else it }.joinToString("").take(400)
 }
@@ -596,7 +615,7 @@ private fun connectionReport(connection: FoundryConnection, diagnostic: FoundryD
     val originalTime = Instant.fromEpochMilliseconds(timestamp).toString()
     val taiwanTime = Instant.fromEpochMilliseconds(timestamp + 8 * 60 * 60 * 1000).toString().removeSuffix("Z")
     return buildString {
-        appendLine("LiveLingo 0.1.8 · ${connection.provider.label} 連線診斷")
+        appendLine("LiveLingo 0.1.9 · ${connection.provider.label} 連線診斷")
         appendLine("時間：$originalTime（台灣時間：$taiwanTime +08:00）")
         appendLine("結果：${if (warning) "通知（尚未收到工作階段結束事件）" else if (success) "成功" else "失敗"}")
         appendLine("階段：${safeDiagnosticField(diagnostic.stage, secret)}")
@@ -607,7 +626,15 @@ private fun connectionReport(connection: FoundryConnection, diagnostic: FoundryD
             appendLine("工作階段結束原因：${safeSessionCloseReason(diagnostic.sessionCloseReason) ?: "未收到可辨識的結束原因"}")
         }
         appendLine("認證方式：${if (connection.provider == ModelProvider.OPENAI) "Authorization: Bearer" else "api-key 標頭"}")
-        appendLine("資源：${if (connection.provider == ModelProvider.OPENAI) "wss://api.openai.com/v1/live/sessions" else "wss://$endpointFamily/openai/v1/live/sessions"}")
+        val safePath = when (connection.speechModel) {
+            SpeechModel.GPT_LIVE -> "/live/sessions"
+            SpeechModel.REALTIME_TRANSLATE -> "/realtime/translations"
+            SpeechModel.LIVE_TRANSCRIBE -> "/realtime?intent=transcription"
+            SpeechModel.MAI_TRANSCRIBE -> "/realtime?intent=transcription"
+        }
+        val basePath = if (connection.speechModel == SpeechModel.MAI_TRANSCRIBE) "/mai/v1" else if (connection.provider == ModelProvider.OPENAI) "/v1" else "/openai/v1"
+        appendLine("資源：wss://${if (connection.provider == ModelProvider.OPENAI) "api.openai.com" else endpointFamily}$basePath$safePath")
+        appendLine("語音模型類型：${connection.speechModel.label}")
         appendLine("${if (connection.provider == ModelProvider.OPENAI) "模型" else "部署"}名稱：已遮蔽（${connection.deployment.length} 個字元）")
         diagnostic.providerCode?.let { appendLine("服務錯誤碼：${safeDiagnosticField(it, secret)}") }
         diagnostic.requestId?.let { appendLine("Request ID：${safeDiagnosticField(it, secret)}") }

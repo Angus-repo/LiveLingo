@@ -16,15 +16,22 @@ data class AppPreferences(
     val quality: TranslationQuality = TranslationQuality.FAITHFUL,
     val provider: ModelProvider = ModelProvider.FOUNDRY,
     val openaiModel: String = "gpt-live-1",
-    val foundryTextModel: String = "",
-    val openaiTextModel: String = "gpt-4.1-mini",
+    val foundryTextModel: String = "gpt-6-luna",
+    val openaiTextModel: String = "gpt-6-luna",
+    val foundrySpeechKind: SpeechModel = SpeechModel.GPT_LIVE,
+    val openaiSpeechKind: SpeechModel = SpeechModel.GPT_LIVE,
+    val foundryTextKind: TextModel = TextModel.GPT6_LUNA,
+    val openaiTextKind: TextModel = TextModel.GPT6_LUNA,
+    val foundrySourceTranscript: String = "",
+    val openaiSourceTranscript: String = "gpt-realtime-whisper",
+    val modelSettingsVersion: Int = 1,
     val aiParagraphs: Boolean = true,
     val audioSource: AudioSource = AudioSource.MICROPHONE,
 )
 
 fun AppPreferences.connection(): FoundryConnection = if (provider == ModelProvider.OPENAI)
-    FoundryConnection("https://api.openai.com", openaiModel, provider)
-else FoundryConnection(foundryEndpoint, deployment, provider)
+    FoundryConnection("https://api.openai.com", openaiModel, provider, openaiSpeechKind, openaiTextKind, openaiTextModel, openaiSourceTranscript)
+else FoundryConnection(foundryEndpoint, deployment, provider, foundrySpeechKind, foundryTextKind, foundryTextModel, foundrySourceTranscript)
 
 fun AppPreferences.paragraphModel(): String = if (provider == ModelProvider.OPENAI) openaiTextModel else foundryTextModel
 
@@ -33,7 +40,19 @@ private data class StoredFoundryKey(val endpoint: String, val apiKey: String)
 
 /** Private app files contain transcripts and reference text, never credentials. */
 class AppRepository(private val storage: LocalStorage) {
-    fun preferences(): AppPreferences = decode("preferences", AppPreferences())
+    fun preferences(): AppPreferences {
+        val raw = storage.read("preferences") ?: return AppPreferences()
+        val old = WireJson.decodeFromString<AppPreferences>(raw)
+        if ("modelSettingsVersion" in WireJson.parseToJsonElement(raw).jsonObject) return old
+        // Only migrate the old defaults; arbitrary Azure deployment names must remain intact.
+        fun migrated(value: String) = if (value.isBlank() || value == "gpt-4.1-mini") "gpt-6-luna" else value
+        val foundryText = migrated(old.foundryTextModel)
+        val openaiText = migrated(old.openaiTextModel)
+        return old.copy(foundryTextModel = foundryText, openaiTextModel = openaiText,
+            foundryTextKind = TextModel.infer(foundryText), openaiTextKind = TextModel.infer(openaiText),
+            foundrySpeechKind = SpeechModel.entries.firstOrNull { it.modelId == old.deployment } ?: SpeechModel.GPT_LIVE,
+            openaiSpeechKind = SpeechModel.entries.firstOrNull { it.supportedBy(ModelProvider.OPENAI) && it.modelId == old.openaiModel } ?: SpeechModel.GPT_LIVE)
+    }
     fun savePreferences(value: AppPreferences) = storage.write("preferences", WireJson.encodeToString(value))
     fun knowledge(): List<BackgroundKnowledge> = decode("knowledge", defaults)
     fun saveKnowledge(value: List<BackgroundKnowledge>) = storage.write("knowledge", WireJson.encodeToString(value))
@@ -53,7 +72,10 @@ class AppRepository(private val storage: LocalStorage) {
     /** Run only after all existing user data has loaded successfully. */
     fun migrateLegacyConnection(preferences: AppPreferences) {
         val raw = storage.read("preferences")
-        if (raw != null && "relayUrl" in WireJson.parseToJsonElement(raw).jsonObject) savePreferences(preferences)
+        if (raw != null) {
+            val fields = WireJson.parseToJsonElement(raw).jsonObject
+            if ("relayUrl" in fields || "modelSettingsVersion" !in fields) savePreferences(preferences)
+        }
         // Never decrypt or reinterpret an obsolete relay credential as a provider key.
         storage.writeSecret("relay_token", "")
     }

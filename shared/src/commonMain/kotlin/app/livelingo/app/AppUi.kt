@@ -197,7 +197,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                 SectionCard("準備翻譯") {
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                         Box(Modifier.weight(1f)) {
-                            Choice("聽到的語言", source.label, Language.entries.map { it.name to it.label }, !state.busy, wrapSelection = true) {
+                            Choice("聽到的語言", if (state.preferences.connection().speechModel == SpeechModel.REALTIME_TRANSLATE) "自動偵測（模型決定）" else source.label, Language.entries.map { it.name to it.label }, !state.busy && state.preferences.connection().speechModel != SpeechModel.REALTIME_TRANSLATE, wrapSelection = true) {
                                 controller.setLanguages(Language.valueOf(it), target)
                             }
                         }
@@ -208,6 +208,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                             }
                         }
                     }
+                    if (state.preferences.connection().speechModel == SpeechModel.REALTIME_TRANSLATE) Text("即時口譯：自動辨識語言，背景知識與翻譯策略不適用。", style = MaterialTheme.typography.bodySmall)
                     Choice("音源", audioSource.label, controller.availableAudioSources().map { it.name to it.label }, !state.busy) {
                         controller.selectAudioSource(AudioSource.valueOf(it))
                     }
@@ -219,20 +220,21 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                         Text("更多選項", Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
                         Text(if (advanced) "收合 ⌃" else "展開 ⌄")
                     }
-                    if (!advanced) Text("${knowledge?.name ?: "未使用背景知識"} · ${state.preferences.pace.label} · ${state.preferences.quality.label}",
+                    if (!advanced) Text(if (state.preferences.connection().speechModel == SpeechModel.REALTIME_TRANSLATE) "本模型自動決定口譯策略"
+                        else "${knowledge?.name ?: "未使用背景知識"} · ${state.preferences.pace.label} · ${state.preferences.quality.label}",
                         style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971))
                     if (advanced) {
-                        Choice("背景知識", knowledge?.name ?: "不使用背景知識", listOf("" to "不使用背景知識") + state.knowledge.map { it.id to it.name }, !state.busy) {
+                        Choice("背景知識", knowledge?.name ?: "不使用背景知識", listOf("" to "不使用背景知識") + state.knowledge.map { it.id to it.name }, !state.busy && state.preferences.connection().speechModel != SpeechModel.REALTIME_TRANSLATE) {
                             controller.selectKnowledge(it.ifBlank { null })
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             Box(Modifier.weight(1f)) {
-                                Choice("翻譯速度", state.preferences.pace.label, TranslationPace.entries.map { it.name to it.label }, !state.busy) {
+                                Choice("翻譯速度", state.preferences.pace.label, TranslationPace.entries.map { it.name to it.label }, !state.busy && state.preferences.connection().speechModel != SpeechModel.REALTIME_TRANSLATE) {
                                     controller.setTranslationOptions(TranslationPace.valueOf(it), state.preferences.quality)
                                 }
                             }
                             Box(Modifier.weight(1f)) {
-                                Choice("翻譯品質", state.preferences.quality.label, TranslationQuality.entries.map { it.name to it.label }, !state.busy) {
+                                Choice("翻譯品質", state.preferences.quality.label, TranslationQuality.entries.map { it.name to it.label }, !state.busy && state.preferences.connection().speechModel != SpeechModel.REALTIME_TRANSLATE) {
                                     controller.setTranslationOptions(state.preferences.pace, TranslationQuality.valueOf(it))
                                 }
                             }
@@ -499,11 +501,14 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
     var endpoint by remember(provider, state.preferences.foundryEndpoint) { mutableStateOf(if (isOpenAi) "https://api.openai.com" else state.preferences.foundryEndpoint) }
     var deployment by remember(provider, state.preferences.connection().deployment) { mutableStateOf(state.preferences.connection().deployment) }
     var paragraphModel by remember(provider, state.preferences.paragraphModel()) { mutableStateOf(state.preferences.paragraphModel()) }
+    var speechKind by remember(provider, state.preferences.connection().speechModel) { mutableStateOf(state.preferences.connection().speechModel) }
+    var textKind by remember(provider, state.preferences.connection().textModelKind) { mutableStateOf(state.preferences.connection().textModelKind) }
+    var sourceTranscript by remember(provider, state.preferences.connection().sourceTranscriptionModel) { mutableStateOf(state.preferences.connection().sourceTranscriptionModel) }
     var apiKey by remember(provider) { mutableStateOf("") }
     var clearConfirm by remember { mutableStateOf(false) }
     val clipboard = LocalClipboardManager.current
     var copiedReport by remember(state.lastConnectionReport) { mutableStateOf(false) }
-    val previewConnection = FoundryConnection(endpoint.trim(), deployment.trim(), provider)
+    val previewConnection = FoundryConnection(endpoint.trim(), deployment.trim(), provider, speechKind, textKind, paragraphModel.trim(), sourceTranscript.trim())
     val webSocketPreview = if (previewConnection.validationError() == null) previewConnection.webSocketUrl() else null
     LazyColumn(contentPadding = PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         item { PageIntro("翻譯服務與模型", "選擇服務，分別保存模型與 API key。") }
@@ -516,8 +521,20 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
         item { SectionCard("連線設定", "API key 使用裝置的安全儲存機制加密保存。") {
             if (!isOpenAi) OutlinedTextField(endpoint, { endpoint = it }, label = { Text("Azure OpenAI／Foundry 資源端點") }, placeholder = { Text("https://your-resource.openai.azure.com") }, singleLine = true, enabled = !state.busy, modifier = Modifier.fillMaxWidth())
             else Text("OpenAI 官方端點：api.openai.com", style = MaterialTheme.typography.bodySmall, color = Mint)
-            OutlinedTextField(deployment, { deployment = it }, label = { Text(if (isOpenAi) "OpenAI 即時語音模型" else "GPT-Live 部署名稱") }, placeholder = { Text("gpt-live-1") }, singleLine = true, enabled = !state.busy, modifier = Modifier.fillMaxWidth())
-            Text(if (isOpenAi) "請填入帳號可使用的 GPT-Live 模型，例如 gpt-live-1。" else "請填入 Foundry 中實際部署的 GPT-Live 名稱。", style = MaterialTheme.typography.bodySmall)
+            Choice("即時語音模型", speechKind.label,
+                SpeechModel.entries.filter { it.supportedBy(provider) }.map { it.name to it.label }, !state.busy, wrapSelection = true) {
+                val next = SpeechModel.valueOf(it)
+                if (isOpenAi || deployment.isBlank() || SpeechModel.entries.any { model -> model.modelId == deployment }) deployment = next.modelId
+                speechKind = next
+            }
+            Text(speechKind.description, style = MaterialTheme.typography.bodySmall)
+            OutlinedTextField(deployment, { deployment = it }, label = { Text(if (isOpenAi) "模型 ID" else "實際語音部署名稱") }, placeholder = { Text(speechKind.modelId) }, singleLine = true, enabled = !state.busy, modifier = Modifier.fillMaxWidth())
+            Text(if (isOpenAi) "模型 ID 須對應上方模型類型，並可由此 API key 使用。" else "上方選擇部署的基礎模型類型；此欄填入 Foundry 實際部署名稱，可保留自訂名稱。", style = MaterialTheme.typography.bodySmall)
+            if (speechKind == SpeechModel.REALTIME_TRANSLATE) {
+                OutlinedTextField(sourceTranscript, { sourceTranscript = it }, label = { Text(if (isOpenAi) "原文字幕轉錄模型（選填）" else "原文字幕轉錄部署（選填）") },
+                    placeholder = { Text("gpt-realtime-whisper") }, singleLine = true, enabled = !state.busy, modifier = Modifier.fillMaxWidth())
+                Text(if (isOpenAi) "使用 gpt-realtime-whisper 同時產生原文字幕；留空只顯示譯文，原文轉錄另計用量。" else "若需原文字幕，請另部署 gpt-realtime-whisper 並填入部署名稱；留空只顯示譯文。", style = MaterialTheme.typography.bodySmall)
+            }
             OutlinedTextField(apiKey, { apiKey = it }, label = { Text(if (state.hasApiKey) "新 API key（留空保留原值）" else "${provider.label} API key") }, singleLine = true, visualTransformation = PasswordVisualTransformation(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false),
                 enabled = !state.busy, modifier = Modifier.fillMaxWidth())
@@ -527,20 +544,27 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                 Text("AI 語意分段", modifier = Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
                 Switch(state.preferences.aiParagraphs, controller::setAiParagraphs, enabled = !state.busy)
             }
-            if (state.preferences.aiParagraphs) {
-                OutlinedTextField(paragraphModel, { paragraphModel = it }, label = { Text(if (isOpenAi) "AI 分段文字模型" else "AI 分段文字模型部署名稱") }, placeholder = { Text("gpt-4.1-mini") }, singleLine = true, enabled = !state.busy, modifier = Modifier.fillMaxWidth())
-                Text(if (isOpenAi) "用文字模型判斷合理段落，預設 gpt-4.1-mini，可改為相容 Chat Completions 的模型。" else "請先在同一 Foundry 資源部署文字模型（例如 gpt-4.1-mini），再填入部署名稱；GPT-Live 語音部署不能用於此欄。", style = MaterialTheme.typography.bodySmall)
-                Text("約每 20 秒與停止時整理原文、譯文的完整句子，只加入段落換行，不改寫內容。使用所選服務與金鑰，另計文字模型用量；未設定或失敗時先顯示基本分段。", style = MaterialTheme.typography.bodySmall)
+            if (state.preferences.aiParagraphs || speechKind.transcribes) {
+                Choice(if (speechKind.transcribes) "文字模型（翻譯與 AI 分段）" else "AI 分段文字模型", textKind.label,
+                    TextModel.entries.map { it.name to it.label }, !state.busy, wrapSelection = true) {
+                    val next = TextModel.valueOf(it)
+                    if (next != TextModel.CUSTOM && (isOpenAi || paragraphModel.isBlank() || TextModel.infer(paragraphModel) != TextModel.CUSTOM)) paragraphModel = next.modelId
+                    textKind = next
+                }
+                OutlinedTextField(paragraphModel, { paragraphModel = it }, label = { Text(if (isOpenAi) "文字模型 ID" else "實際文字部署名稱") }, placeholder = { Text("gpt-6-luna") }, singleLine = true, enabled = !state.busy, modifier = Modifier.fillMaxWidth())
+                Text(if (isOpenAi) "預設 GPT-6 Luna；依上方類型使用對應的請求參數。" else "預設 GPT-6 Luna；請先在同一資源部署文字模型，填入實際名稱並選擇對應類型。", style = MaterialTheme.typography.bodySmall)
+                if (speechKind.transcribes) Text("每約 3 秒完成一段原文轉錄，再由文字模型翻譯；即使關閉 AI 分段，文字翻譯仍會執行並計費。", style = MaterialTheme.typography.bodySmall)
+                if (state.preferences.aiParagraphs) Text("約每 20 秒與停止時整理原文、譯文的完整句子。AI 只決定段落位置，不改寫內容；失敗時保留基本分段。", style = MaterialTheme.typography.bodySmall)
             }
             webSocketPreview?.let { preview ->
                 SelectionContainer { Text("實際連線網址：\n$preview", style = MaterialTheme.typography.labelSmall, color = Mint) }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = { if (controller.saveConnection(endpoint, deployment, apiKey, paragraphModel)) apiKey = "" }, enabled = !state.busy && state.storageAvailable, shape = RoundedCornerShape(12.dp)) { Text("儲存連線設定") }
+                Button(onClick = { if (controller.saveConnection(endpoint, deployment, apiKey, paragraphModel, speechKind, textKind, sourceTranscript)) apiKey = "" }, enabled = !state.busy && state.storageAvailable, shape = RoundedCornerShape(12.dp)) { Text("儲存連線設定") }
                 TextButton(onClick = { clearConfirm = true }, enabled = !state.busy && state.storageAvailable) { Text("移除 API key") }
             }
             OutlinedButton(
-                onClick = { if (state.connectionTesting) controller.cancelConnectionTest() else controller.testConnection(endpoint, deployment, apiKey) },
+                onClick = { if (state.connectionTesting) controller.cancelConnectionTest() else controller.testConnection(endpoint, deployment, apiKey, speechKind, textKind, paragraphModel, sourceTranscript) },
                 enabled = !state.active && state.storageAvailable,
                 modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp),
             ) {
@@ -550,8 +574,8 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                 }
                 Text(if (state.connectionTesting) "取消連線測試" else "測試連線")
             }
-            Text("測試目前欄位中的即時語音模型連線，不啟用麥克風。AI 分段文字模型於有字幕時使用。測試不會儲存欄位。", style = MaterialTheme.typography.bodySmall)
-            Text("測試會建立並關閉短暫的 GPT-Live 工作階段，可能產生服務用量。", style = MaterialTheme.typography.bodySmall)
+            Text("測試目前欄位中的語音模型連線，不啟用麥克風、不儲存欄位。文字翻譯與 AI 分段需有字幕時才能驗證。", style = MaterialTheme.typography.bodySmall)
+            Text("測試會建立並關閉所選語音模型的工作階段，可能產生服務用量。", style = MaterialTheme.typography.bodySmall)
         } }
         state.lastConnectionReport?.let { report -> item { SectionCard("最近一次連線診斷", "資源名稱、部署名稱與金鑰已遮蔽，可將報告提供給維護人員。") {
             Text(report, style = MaterialTheme.typography.bodySmall, maxLines = 7, overflow = TextOverflow.Ellipsis)
@@ -562,19 +586,19 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
             }
         } } }
         item { SectionCard("開始使用") {
-            Text("1  選擇 Microsoft Foundry 或 OpenAI。\n\n2  填入可用的 GPT-Live 模型與該服務的 API key，儲存設定。\n\n3  回到即時翻譯，選語言與背景知識，允許麥克風後開始。", style = MaterialTheme.typography.bodyMedium)
+            Text("1  選擇 Microsoft Foundry 或 OpenAI。\n\n2  選擇模型並填入實際部署名稱與該服務的 API key，儲存設定。\n\n3  回到即時翻譯，選語言與背景知識，允許麥克風後開始。", style = MaterialTheme.typography.bodyMedium)
         } }
         item { SectionCard("翻譯策略說明") {
             Text("開始翻譯前，可在「即時翻譯」選擇速度與品質。優先即時偏向短語盡早輸出；平衡保留較多上下文。忠實原文偏重數字、語義與完整性；自然流暢偏重譯句自然。所有策略均禁止增添未說出的事實。", style = MaterialTheme.typography.bodyMedium)
             Text("GPT-Live 的 session.start 不支援直接指定 temperature、推理強度或 Realtime VAD 靜音閾值；因此上述控制採用提示指令，不能保證固定延遲。", style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971))
         } }
         item { SectionCard("資料與收音") {
-            Text("逐字稿與背景知識儲存在這台裝置；App 不保存原始錄音。音訊、所選背景知識及啟用 AI 分段時的字幕，只送至所選服務。", style = MaterialTheme.typography.bodyMedium)
+            Text("逐字稿與背景知識儲存在這台裝置；App 不保存原始錄音。音訊及模型適用的背景知識只送至所選服務；轉錄方案會再傳送原文進行文字翻譯，啟用 AI 分段時也會傳送字幕。", style = MaterialTheme.typography.bodyMedium)
             Text("API key 僅用於對應服務，不會包含在逐字稿或匯出內容中。繁中台灣另經本機字詞轉換，數字不變。", style = MaterialTheme.typography.bodySmall)
             Text("Android 開始翻譯後可切換至背景或鎖定螢幕，系統會顯示麥克風前景服務通知及停止操作。來電、音訊中斷、系統強制停止或網路錯誤仍可能中止；iOS 目前需維持前景。", style = MaterialTheme.typography.bodySmall)
-            Text("目前提供手動發言者標記。GPT-Live 不回傳多人身分；原文與譯文字幕也可能有辨識或翻譯誤差。", style = MaterialTheme.typography.bodySmall)
+            Text("目前提供手動發言者標記，不自動推測多人身分。轉錄模式的字幕時間由音訊區段估算；口譯模式使用串流時間，均非逐字對齊。", style = MaterialTheme.typography.bodySmall)
         } }
-        item { Text("LiveLingo 0.1.8 · Kotlin Multiplatform\nAndroid / iOS · Microsoft Foundry / OpenAI", style = MaterialTheme.typography.labelSmall, color = Color(0xFF657971), modifier = Modifier.padding(6.dp)) }
+        item { Text("LiveLingo 0.1.9 · Kotlin Multiplatform\nAndroid / iOS · Microsoft Foundry / OpenAI", style = MaterialTheme.typography.labelSmall, color = Color(0xFF657971), modifier = Modifier.padding(6.dp)) }
     }
     if (clearConfirm) ConfirmDelete("移除 ${provider.label} API key？", "只移除目前所選服務的金鑰。", { clearConfirm = false }) { controller.clearApiKey(); clearConfirm = false }
 }

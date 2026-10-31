@@ -46,6 +46,7 @@ data class SessionSettings(
     val quality: TranslationQuality = TranslationQuality.FAITHFUL,
     val provider: ModelProvider = ModelProvider.FOUNDRY,
     val audioSource: AudioSource = AudioSource.MICROPHONE,
+    val speechModel: SpeechModel = SpeechModel.GPT_LIVE,
 )
 
 /** Shared by the mobile UI and trusted relay; do not rely on UI-only validation. */

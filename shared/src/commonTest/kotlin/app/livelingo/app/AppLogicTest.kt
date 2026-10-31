@@ -749,6 +749,38 @@ class AppLogicTest {
         controller.dispose()
     }
 
+    @Test fun changingVoiceProtocolKeepsStoredKeyAndProbingDraftDoesNotSaveIt() = runTest {
+        val services = configuredServices(); val transport = FakeTransport()
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
+        controller.testConnection("https://example.openai.azure.com", "my-transcribe", "", SpeechModel.LIVE_TRANSCRIBE, TextModel.GPT6_LUNA, "my-luna")
+        runCurrent()
+        assertEquals(SpeechModel.LIVE_TRANSCRIBE, transport.probeConnections.single().speechModel)
+        assertEquals("my-luna", transport.probeConnections.single().textDeployment)
+        assertEquals("short-key", transport.probeKeys.single())
+        assertEquals(SpeechModel.GPT_LIVE, AppRepository(services.memory).preferences().foundrySpeechKind)
+        assertEquals(0, services.mic.starts)
+        assertTrue(controller.saveConnection("https://example.openai.azure.com", "my-translate", "", "my-luna", SpeechModel.REALTIME_TRANSLATE, TextModel.GPT6_LUNA, "my-whisper"))
+        controller.selectKnowledge("banking")
+        controller.start(); runCurrent()
+        assertEquals("short-key", transport.keys.single())
+        assertEquals(SpeechModel.REALTIME_TRANSLATE, transport.connections.single().speechModel)
+        assertEquals("my-whisper", transport.connections.single().sourceTranscriptionModel)
+        assertNull(transport.sessionSettings.single().knowledge)
+        assertEquals(Language.AUTO, transport.sessionSettings.single().sourceLanguage)
+        controller.stop(); runCurrent(); controller.dispose()
+    }
+
+    @Test fun transcriptionWithoutTextDeploymentDoesNotStartCapture() = runTest {
+        val services = configuredServices(); val transport = FakeTransport()
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
+        assertTrue(controller.saveConnection("https://example.openai.azure.com", "my-transcribe", "", "", SpeechModel.LIVE_TRANSCRIBE, TextModel.GPT6_LUNA))
+        controller.start(); runCurrent()
+        assertEquals(0, transport.starts); assertEquals(0, services.mic.starts)
+        assertTrue("文字翻譯模型" in controller.state.value.message.orEmpty())
+        assertTrue(AppRepository(services.memory).history().isEmpty())
+        controller.dispose()
+    }
+
     private fun configuredServices() = FakeServices().also {
         val repository = AppRepository(it.memory)
         repository.savePreferences(AppPreferences(foundryEndpoint = "https://example.openai.azure.com"))

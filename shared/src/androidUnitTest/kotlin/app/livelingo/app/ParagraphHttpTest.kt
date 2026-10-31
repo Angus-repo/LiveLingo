@@ -42,7 +42,7 @@ class ParagraphHttpTest {
                 else FoundryConnection("https://demo.openai.azure.com")
             try {
                 server.enqueue(MockResponse().setHeader("Content-Type", "application/json").setBody(success()))
-                val layout = formatter.format(connection, "isolated-test-secret", "my-text-model", record).single()
+                val layout = formatter.format(connection.copy(textModelKind = TextModel.GPT6_LUNA), "isolated-test-secret", "my-text-model", record).single()
                 assertEquals(1, layout.breakOffsets.size)
                 assertTrue(layout.source.startsWith("台灣4.95兆"))
                 val request = assertNotNull(server.takeRequest(2, TimeUnit.SECONDS))
@@ -50,6 +50,8 @@ class ParagraphHttpTest {
                 assertFalse("isolated-test-secret" in body)
                 val payload = WireJson.parseToJsonElement(body).jsonObject
                 assertEquals("my-text-model", payload["model"]?.jsonPrimitive?.content)
+                assertEquals("none", payload["reasoning_effort"]?.jsonPrimitive?.content)
+                assertFalse("temperature" in payload)
                 if (provider == ModelProvider.OPENAI) {
                     assertEquals("api.openai.com", originalHost)
                     assertEquals("/v1/chat/completions", request.path)
@@ -62,10 +64,10 @@ class ParagraphHttpTest {
                     assertNull(request.getHeader("Authorization"))
                 }
                 server.enqueue(MockResponse().setResponseCode(302).setHeader("Location", "https://other.example/test"))
-                assertFails { formatter.format(connection, "isolated-test-secret", "my-text-model", record) }
+                assertFails { formatter.format(connection.copy(textModelKind = TextModel.GPT6_LUNA), "isolated-test-secret", "my-text-model", record) }
                 assertEquals(2, server.requestCount) // No redirect to the other destination.
                 server.enqueue(MockResponse().setHeader("Content-Type", "application/json").setBody(success("[999]")))
-                assertFails { formatter.format(connection, "isolated-test-secret", "my-text-model", record) }
+                assertFails { formatter.format(connection.copy(textModelKind = TextModel.GPT6_LUNA), "isolated-test-secret", "my-text-model", record) }
             } finally { formatter.close(); server.shutdown() }
         }
     }

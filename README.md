@@ -1,6 +1,6 @@
 # 即時譯 LiveLingo
 
-使用 Kotlin Multiplatform + Compose Multiplatform 的 Android／iOS 即時字幕翻譯 App。**0.1.8 精簡翻譯操作流程、加入繁中全型逗號，並改善串流中斷的診斷與下一段操作。可用 Microsoft Foundry 或 OpenAI GPT-Live，由 App 直接連線，不需自架後端。**
+使用 Kotlin Multiplatform + Compose Multiplatform 的 Android／iOS 即時字幕翻譯 App。**0.1.9 加入語音與文字模型下拉選單，依模型使用不同串流協定；AI 分段預設 GPT-6 Luna。可用 Microsoft Foundry 或 OpenAI，由 App 直接連線，不需自架後端。**
 
 API key 由使用者自行輸入，Android 以 Keystore 保護加密金鑰並加密保存，iOS 以 Keychain 保存。原始碼、APK、逐字稿匯出及一般設定均不內建或保存明文 API key。
 
@@ -27,24 +27,59 @@ API key 由使用者自行輸入，Android 以 Keystore 保護加密金鑰並加
 
 「自動」是來源語言偵測，目標語言需明確選定。印度英文是口音與慣用語提示，並非另一個保證準確的辨識引擎。繁體中文使用台灣用語。
 
-本版顯示字幕，不播放合成譯音。GPT-Live 仍會在服務端產生語音，App 使用其輸出逐字稿作為譯文，仍會有模型使用量。
+本版顯示字幕，不播放合成譯音。直接口譯模型仍可能在服務端產生語音，App 使用其輸出逐字稿作為譯文，仍會有模型使用量。
+
+## 0.1.9 模型選擇與請求格式
+
+「設定」先選服務，再以語音模型、文字模型兩個下拉選單選擇類型。OpenAI 選擇會帶入模型 ID；Foundry 另填實際部署名稱，可沿用自訂名稱。選單是已實作的協定清單，不代表帳號已有權限、配額或部署。
+
+| 語音選項 | 服務 | 行為與限制 |
+| --- | --- | --- |
+| GPT-Live 1 | OpenAI／Foundry | 保留既有直接翻譯、背景知識、速度及品質設定；使用 `/live/sessions` 與 `session.start` |
+| GPT Realtime Translate | OpenAI／Foundry | 使用 `/realtime/translations?model=…`、`session.update`、`session.input_audio_buffer.append`；自動偵測來源語言，不支援背景知識或自訂策略 |
+| GPT Live Transcribe ＋文字翻譯 | OpenAI／Foundry | 使用 `/realtime?intent=transcription` 與 transcription session；先取得原文，再由所選文字模型產生譯文 |
+| MAI Transcribe 2 Streaming ＋文字翻譯（預覽） | Foundry | 需 `services.ai.azure.com` 資源與可用部署；使用 `/mai/v1/realtime?intent=transcription`，不傳送 GPT-Live 專用欄位 |
+
+- Realtime Translate 的原文字幕須另外設定轉錄模型。OpenAI 預填 `gpt-realtime-whisper`；Foundry 預設留空，需另部署並填入實際名稱。留空只有譯文；轉錄另計用量。
+- 兩種轉錄方案使用 24 kHz／16-bit／單聲道 PCM，約每 3 秒 commit，停止時提交剩餘音訊。確認全文會取代暫存 delta，依 commit 順序翻譯，不重複串接 delta 與全文；不提供自動說話者辨識。
+- 文字翻譯逐段執行，附上有限前文；來源字幕先保存，文字翻譯失敗會停止本次翻譯並保留原文，不重送音訊或重試被阻擋內容。AI 分段失敗則沿用基本分段，不中止翻譯。
+- 轉錄模式時間由音訊區段估算；Realtime Translate 由串流 elapsed time 估算，均非逐字對齊。GPT-Live 原有時間戳保留。
+
+| 文字選項 | Chat Completions 參數 |
+| --- | --- |
+| GPT-6 Luna（預設、建議） | `reasoning_effort: none` |
+| GPT-5.4 Mini | `reasoning_effort: none` |
+| GPT-6.1 Sol | `reasoning_effort: low`，增加推理與輸出 token 預算 |
+| GPT-4.1 Mini（原有模型） | 不傳推理參數 |
+| 自訂相容文字模型 | 不傳推理參數；須支援 Chat Completions，AI 分段另須支援 JSON object |
+
+全部文字選項使用 `max_completion_tokens`，不傳 `temperature`。分段只取得句子換段編號；轉錄方案的文字翻譯使用獨立請求，不受 AI 分段開關影響。兩者共用所選文字模型及服務金鑰，分別計算用量。
+
+升級會將舊的空白／`gpt-4.1-mini` 預設遷移為 `gpt-6-luna`；原有任意自訂文字部署名稱保留，請在下拉選單指定其基礎模型。遷移只執行一次，之後可自行改回其他選項。Foundry 必須先部署對應文字模型。切換同一資源的語音模型不會清除或改綁金鑰；兩個服務的模型與金鑰獨立保存。
+
+「測試連線」依目前表單測試語音模型，成功後仍須儲存。它不開啟收音、不建立逐字稿、不測試文字模型。需實際收到字幕後確認文字翻譯與 AI 分段。
+
+版本 `0.1.9`／versionCode `10`。協定與原生 HTTP 自動化測試結果見 [BUILD_STATUS.md](BUILD_STATUS.md)，真實服務與裝置驗收另列於 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)。
+
+協定依據：[Foundry Realtime 翻譯與轉錄](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/realtime-audio-websockets)、[MAI Transcribe 串流協定](https://learn.microsoft.com/en-us/azure/ai-services/speech-service/mai-transcribe-2-streaming-realtime)、[GPT-6 Luna 模型](https://developers.openai.com/api/docs/models/gpt-6-luna)。
 
 ## 開始使用
 
-1. 在 Microsoft Foundry 中準備可用的 `gpt-live-1` 部署與配額。
+1. 在 Microsoft Foundry 中準備所選語音模型部署與配額；文字翻譯／AI 分段另需文字模型部署。
 2. 打開 App「設定」，填入三個欄位：
 
 | 欄位 | 範例／用途 |
 | --- | --- |
 | Foundry 端點 | `https://YOUR-RESOURCE.openai.azure.com`，使用資源根端點 |
-| 部署名稱 | `gpt-live-1`；如果部署使用自訂名稱，填入該名稱 |
+| 語音模型／部署名稱 | 選擇基礎模型類型，再填入實際部署名稱，例如 `gpt-live-1` |
+| 文字模型／部署名稱 | 預設 GPT-6 Luna；填入同一資源的實際部署名稱 |
 | API key | 該 Foundry 資源的 API key |
 
 3. 按「測試連線」檢查目前欄位。測試成功後按「儲存連線設定」，再返回「即時翻譯」。測試本身不會儲存欄位。
 4. 選擇音源、來源／目標語言與本次背景知識。開始翻譯後依系統提示授權；播放音訊模式須再同意音訊擷取，然後切換到來源 App 播放。
 5. 停止後可到「逐字稿」檢視、修正發言者與匯出字幕。
 
-不需要服務網址、relay token、Docker、Java 後端或另外申請伺服器。App 會將 HTTPS 資源端點轉成對應的 WSS GPT-Live 工作階段路徑。不要填入 Foundry Portal 網頁、專案管理網址或舊版 `/realtime` API。
+不需要 relay token、Docker、Java 後端或另外申請伺服器。App 會依選擇的模型將 HTTPS 資源端點轉成對應 WSS 路徑。請填資源根網址，不要填 Foundry Portal、專案管理網址或自行拼接 API 路徑。
 
 API key 儲存後不會重新顯示。只修改部署名稱時，API key 留空可保留原值；變更資源端點時必須重新輸入對應 key，避免將舊 key 傳給另一個資源。若按「移除 API key」，再次翻譯前須重新輸入。
 
@@ -103,24 +138,24 @@ Android 公開 AudioPlaybackCapture 只允許 `USAGE_MEDIA`、`USAGE_GAME`、`US
 - 設定可選 Microsoft Foundry／OpenAI，兩者模型名稱與加密 API key 獨立保存。切換不會刪除另一服務的設定；舊版 Foundry 設定自動沿用，工作階段中不可切換服務。
 - OpenAI 預設 `gpt-live-1`，使用官方 `wss://api.openai.com/v1/live/sessions` 與 Bearer 認證。Foundry 使用資源 `/openai/v1/live/sessions` 與 `api-key` 標頭。兩者皆為 GPT-Live 協定，不是一般 Realtime 模型。
 
-### AI 分段設定
+### AI 分段設定（0.1.9 更新）
 
 設定開啟「AI 語意分段」，填入相容 Chat Completions 與 JSON object 的**文字模型**後儲存：
 
 | 服務 | AI 分段文字模型 |
 | --- | --- |
-| Microsoft Foundry | 在同一資源部署文字模型（例如 `gpt-4.1-mini`），填入實際部署名稱；預設留空，避免假設使用者已有部署 |
-| OpenAI | 預設 `gpt-4.1-mini`，可改為帳號可使用的相容模型 |
+| Microsoft Foundry | 預設選 GPT-6 Luna；先在同一資源部署，再填入實際部署名稱 |
+| OpenAI | 預設 `gpt-6-luna`，可從文字模型選單切換為帳號可使用的模型 |
 
 GPT-Live 是語音模型，不能填在 AI 分段文字模型欄。分段只將字幕送至所選服務，使用該服務金鑰，另計文字模型用量。
 
 約每 20 秒與停止時，將每個軌道最近最多 40 個完整句子、約 6,000 字元送出。AI 只回傳「哪些句子之後換段」的編號；App 驗證編號後插入空白行，不接受模型改寫原文、數字或譯文。尚未完成的句子立即顯示，後續再整理。保留既有模型換行；沒有設定、暫時失敗或尚未完成 AI 判斷時，先以 2–3 句的基本分段顯示，畫面明示狀態。
 
-「測試連線」只測 GPT-Live。文字模型於有字幕時使用，失敗不停止錄音或丟棄逐字稿。AI 段落位置與來源快照一起保存，亂序或新增文字造成快照不符時不套用舊位置。
+「測試連線」只測所選語音模型。AI 分段於有字幕時使用，分段失敗不停止錄音或丟棄逐字稿。轉錄方案的文字翻譯另有獨立請求，翻譯失敗會停止本次工作階段並保留原文。AI 段落位置與來源快照一起保存，亂序或新增文字造成快照不符時不套用舊位置。
 
 ### OpenAI 開始使用
 
-選「OpenAI」，填入可使用 GPT-Live 的模型名稱與 API key，儲存後測試連線。端點固定為官方 API 網域，不能輸入代理主機。來源、目標語言、背景知識、速度、品質與 Android 背景服務沿用原本操作。
+選「OpenAI」，選取帳號可使用的語音模型並填入 API key，測試後儲存。端點固定為官方 API 網域，不能輸入代理主機。背景知識、速度與品質是否生效依上方模型表；Android 音源與背景服務沿用原本操作。
 
 本次 Android 為 `0.1.6`／versionCode `7`。建置、測試、簽章驗證與未驗證項目見 [BUILD_STATUS.md](BUILD_STATUS.md)。
 

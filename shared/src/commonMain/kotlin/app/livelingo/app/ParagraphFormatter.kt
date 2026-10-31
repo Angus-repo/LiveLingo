@@ -27,9 +27,9 @@ internal fun paragraphWindows(record: TranscriptRecord): List<ParagraphWindow> =
     ParagraphWindow(channel, text.take(ends.last()), start, ends)
 }
 
-internal fun paragraphRequest(model: String, windows: List<ParagraphWindow>): String = buildJsonObject {
+internal fun paragraphRequest(model: String, windows: List<ParagraphWindow>, kind: TextModel = TextModel.infer(model)): String = buildJsonObject {
     put("model", model)
-    put("max_completion_tokens", 1024)
+    textModelParameters(kind, 1024)
     putJsonObject("response_format") { put("type", "json_object") }
     putJsonArray("messages") {
         add(buildJsonObject {
@@ -81,7 +81,7 @@ class HttpParagraphFormatter(private val original: HttpClient) : ParagraphFormat
             contentType(ContentType.Application.Json)
             if (connection.provider == ModelProvider.OPENAI) header(HttpHeaders.Authorization, "Bearer $apiKey")
             else header("api-key", apiKey)
-            setBody(paragraphRequest(model, windows))
+            setBody(paragraphRequest(model, windows, connection.textModelKind))
         }
         if (response.status.value !in 200..299) throw TranslationFailure("AI 分段回應 HTTP ${response.status.value}，請確認文字模型名稱、權限與配額。")
         val body = response.bodyAsText()

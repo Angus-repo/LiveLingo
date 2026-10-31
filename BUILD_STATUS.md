@@ -1,3 +1,13 @@
+# LiveLingo 0.1.14 驗證狀態
+
+本版以 GitHub Actions 執行 `:core:jvmTest`、`:shared:testDebugUnitTest`、Android APK 建置與 iOS 模擬器編譯；最終結果見 PR 的 checks 與 Actions 工作紀錄。下列 0.1.13 結果為上一版歷史紀錄，不代表本版測試結果。
+
+本次新增驗證涵蓋自訂部署保存／重新載入、服務與資源隔離、模型與參數配對，以及切換後重新選回舊部署時實際送出的連線設定。常用模型、費用與原文字幕均使用下拉選單；只有選擇新增自訂項目才開啟名稱輸入對話框。
+
+Android／iOS 版本同步為 `0.1.14`／`15`。尚未完成 Android 實機選單排版、覆蓋安裝或真實雲端帳號驗收；詳見 `docs/ACCEPTANCE.md`。此 UI 變更不發送額外模型探索請求，Foundry 預設名稱須已部署，自訂部署依資源保存。
+
+---
+
 # LiveLingo 0.1.13 驗證狀態
 
 2026-10-31，以 JDK 17、Gradle 8.14.3、Android SDK 36 建置及測試。

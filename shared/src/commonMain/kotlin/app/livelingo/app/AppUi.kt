@@ -163,6 +163,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
 @Composable private fun Choice(label: String, selected: String, choices: List<Pair<String, String>>, enabled: Boolean = true, wrapSelection: Boolean = false,
     selectedDetail: String? = null, choiceDetails: Map<String, String> = emptyMap(), onSelect: (String) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
+    LaunchedEffect(enabled) { if (!enabled) expanded = false }
     Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
         Text(label, style = MaterialTheme.typography.labelMedium, color = Color(0xFF657971))
         Box {
@@ -180,7 +181,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                         Text(text)
                         choiceDetails[id]?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971)) }
                     }
-                }, onClick = { expanded = false; onSelect(id) }) }
+                }, enabled = enabled, onClick = { expanded = false; onSelect(id) }) }
             }
         }
     }
@@ -515,9 +516,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
     var paragraphModel by remember(provider, state.preferences.paragraphModel()) { mutableStateOf(state.preferences.paragraphModel()) }
     var speechKind by remember(provider, state.preferences.connection().speechModel) { mutableStateOf(state.preferences.connection().speechModel) }
     var textKind by remember(provider, state.preferences.connection().textModelKind) { mutableStateOf(state.preferences.connection().textModelKind) }
-    var customTextId by remember(provider, state.preferences.paragraphModel(), state.preferences.connection().textModelKind) {
-        mutableStateOf(paragraphModel != textKind.modelId)
-    }
+    var customModelRole by remember(provider) { mutableStateOf<ModelRole?>(null) }
     var sourceTranscript by remember(provider, state.preferences.connection().sourceTranscriptionModel) { mutableStateOf(state.preferences.connection().sourceTranscriptionModel) }
     var apiKey by remember(provider) { mutableStateOf("") }
     var clearConfirm by remember { mutableStateOf(false) }
@@ -537,23 +536,19 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
         item { SectionCard("連線設定", "API key 使用裝置的安全儲存機制加密保存。") {
             if (!isOpenAi) OutlinedTextField(endpoint, { endpoint = it }, label = { Text("Azure OpenAI／Foundry 資源端點") }, placeholder = { Text("https://your-resource.openai.azure.com") }, singleLine = true, enabled = !state.busy, modifier = Modifier.fillMaxWidth())
             else Text("OpenAI 官方端點：api.openai.com", style = MaterialTheme.typography.bodySmall, color = Mint)
-            Choice("即時語音模型", speechKind.label,
-                SpeechModel.entries.filter { it.supportedBy(provider) }.map { it.name to it.label }, !state.busy, wrapSelection = true,
-                selectedDetail = speechKind.price(provider).label,
-                choiceDetails = SpeechModel.entries.filter { it.supportedBy(provider) }.associate { it.name to it.price(provider).label }) {
-                val next = SpeechModel.valueOf(it)
-                if (isOpenAi || deployment.isBlank() || SpeechModel.entries.any { model -> model.modelId == deployment }) deployment = next.modelId
-                speechKind = next
+            ModelDropdown("即時語音模型", state.preferences, previewConnection, ModelRole.SPEECH, !state.busy,
+                onCustom = { customModelRole = ModelRole.SPEECH }) {
+                speechKind = SpeechModel.valueOf(it.kind)
+                deployment = it.modelId
             }
             Text(speechKind.description, style = MaterialTheme.typography.bodySmall)
             Text(speechKind.price(provider).note, style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971))
             TextButton(onClick = { runCatching { uriHandler.openUri(speechKind.price(provider).sourceUrl) }.onFailure { controller.inform("無法開啟定價網頁。") } }) { Text("語音費用來源 ↗") }
-            OutlinedTextField(deployment, { deployment = it }, label = { Text(if (isOpenAi) "模型 ID" else "實際語音部署名稱") }, placeholder = { Text(speechKind.modelId) }, singleLine = true, enabled = !state.busy, modifier = Modifier.fillMaxWidth())
-            Text(if (isOpenAi) "模型 ID 須對應上方模型類型，並可由此 API key 使用。" else "上方選擇部署的基礎模型類型；此欄填入 Foundry 實際部署名稱，可保留自訂名稱。", style = MaterialTheme.typography.bodySmall)
+            if (!isOpenAi) Text("選單會顯示模型與部署名稱；若使用自訂部署，請選「新增自訂部署…」，儲存後即可直接選用。", style = MaterialTheme.typography.bodySmall)
             if (speechKind == SpeechModel.REALTIME_TRANSLATE) {
-                OutlinedTextField(sourceTranscript, { sourceTranscript = it }, label = { Text(if (isOpenAi) "原文字幕轉錄模型（選填）" else "原文字幕轉錄部署（選填）") },
-                    placeholder = { Text("gpt-realtime-whisper") }, singleLine = true, enabled = !state.busy, modifier = Modifier.fillMaxWidth())
-                Text(if (isOpenAi) "使用 gpt-realtime-whisper 同時產生原文字幕；留空只顯示譯文，原文轉錄另計用量。" else "若需原文字幕，請另部署 gpt-realtime-whisper 並填入部署名稱；留空只顯示譯文。", style = MaterialTheme.typography.bodySmall)
+                ModelDropdown("原文字幕", state.preferences, previewConnection, ModelRole.SOURCE_TRANSCRIPT, !state.busy,
+                    onCustom = { customModelRole = ModelRole.SOURCE_TRANSCRIPT }) { sourceTranscript = it.modelId }
+                Text(if (isOpenAi) "原文字幕可選擇不顯示；啟用轉錄時另計用量。" else "啟用原文字幕須有 gpt-realtime-whisper 部署，另計用量；也可選擇不顯示。", style = MaterialTheme.typography.bodySmall)
             }
             OutlinedTextField(apiKey, { apiKey = it }, label = { Text(if (state.hasApiKey) "新 API key（留空保留原值）" else "${provider.label} API key") }, singleLine = true, visualTransformation = PasswordVisualTransformation(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false),
@@ -565,28 +560,14 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                 Switch(state.preferences.aiParagraphs, controller::setAiParagraphs, enabled = !state.busy)
             }
             if (state.preferences.aiParagraphs || speechKind.transcribes) {
-                Choice(if (speechKind.transcribes) "文字模型（翻譯與 AI 分段）" else "AI 分段文字模型", textKind.label,
-                    TextModel.entries.map { it.name to it.label }, !state.busy, wrapSelection = true,
-                    selectedDetail = textKind.price(provider).label,
-                    choiceDetails = TextModel.entries.associate { it.name to it.price(provider).label }) {
-                    val next = TextModel.valueOf(it)
-                    if (next != TextModel.CUSTOM && (isOpenAi || paragraphModel.isBlank() || TextModel.infer(paragraphModel) != TextModel.CUSTOM)) paragraphModel = next.modelId
-                    textKind = next
-                    if (isOpenAi) customTextId = next == TextModel.CUSTOM
+                ModelDropdown(if (speechKind.transcribes) "文字模型（翻譯與標點分段）" else "AI 標點與分段模型",
+                    state.preferences, previewConnection, ModelRole.TEXT, !state.busy,
+                    onCustom = { customModelRole = ModelRole.TEXT }) {
+                    textKind = TextModel.valueOf(it.kind)
+                    paragraphModel = it.modelId
                 }
                 Text(textKind.price(provider).note, style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971))
                 TextButton(onClick = { runCatching { uriHandler.openUri(textKind.price(provider).sourceUrl) }.onFailure { controller.inform("無法開啟定價網頁。") } }) { Text("文字費用來源 ↗") }
-                if (!isOpenAi || textKind == TextModel.CUSTOM || customTextId) {
-                    OutlinedTextField(paragraphModel, { paragraphModel = it }, label = { Text(if (isOpenAi) "自訂模型 ID（同一個文字模型）" else "此模型在 Foundry 的部署名稱") }, placeholder = { Text("gpt-6-luna") }, singleLine = true, enabled = !state.busy, modifier = Modifier.fillMaxWidth())
-                }
-                if (isOpenAi && textKind != TextModel.CUSTOM) {
-                    TextButton(onClick = { customTextId = !customTextId; if (!customTextId) paragraphModel = textKind.modelId }, enabled = !state.busy) {
-                        Text(if (customTextId) "使用所選模型的預設 ID" else "進階：指定其他模型 ID")
-                    }
-                }
-                Text(if (!isOpenAi) "上方選擇模型類型，下方填入同一資源中該模型的部署名稱；兩者是同一個模型。"
-                    else if (customTextId || textKind == TextModel.CUSTOM) "此欄指定同一模型的 API ID，不是第二個模型；請確認 ID 與所選類型相符。"
-                    else "選擇上方模型即可，API ID 會自動帶入。只有指定其他模型版本時才需要進階設定。", style = MaterialTheme.typography.bodySmall)
                 if (speechKind.transcribes) Text("每約 3 秒完成一段原文轉錄，再由文字模型翻譯；即使關閉 AI 分段，文字翻譯仍會執行並計費。", style = MaterialTheme.typography.bodySmall)
                 if (state.preferences.aiParagraphs) Text("收音時定期整理新字幕的標點與段落，停止時完成最後一段；譯文依原文分段，原文補充也沿用相同格式。只補標點與換行，不改寫文字或數字。此功能會使用所選文字模型並計費，需有可用部署與配額。", style = MaterialTheme.typography.bodySmall)
             }
@@ -622,7 +603,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
             }
         } } }
         item { SectionCard("開始使用") {
-            Text("1  選擇 Microsoft Foundry 或 OpenAI。\n\n2  選擇模型並填入實際部署名稱與該服務的 API key，儲存設定。\n\n3  回到即時翻譯，選語言與背景知識，允許麥克風後開始。", style = MaterialTheme.typography.bodyMedium)
+            Text("1  選擇 Microsoft Foundry 或 OpenAI。\n\n2  從下拉選單選擇模型，填入該服務的 API key 並儲存。Foundry 自訂部署可由選單新增。\n\n3  回到即時翻譯，選語言與背景知識，允許麥克風後開始。", style = MaterialTheme.typography.bodyMedium)
         } }
         item { SectionCard("翻譯策略說明") {
             Text("開始翻譯前，可在「即時翻譯」選擇速度與品質。優先即時偏向短語盡早輸出；平衡保留較多上下文。忠實原文偏重數字、語義與完整性；自然流暢偏重譯句自然。所有策略均禁止增添未說出的事實。", style = MaterialTheme.typography.bodyMedium)
@@ -637,6 +618,67 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
         item { Text("LiveLingo $APP_VERSION · Kotlin Multiplatform\nAndroid / iOS · Microsoft Foundry / OpenAI", style = MaterialTheme.typography.labelSmall, color = Color(0xFF657971), modifier = Modifier.padding(6.dp)) }
     }
     if (clearConfirm) ConfirmDelete("移除 ${provider.label} API key？", "只移除目前所選服務的金鑰。", { clearConfirm = false }) { controller.clearApiKey(); clearConfirm = false }
+    customModelRole?.let { role ->
+        CustomModelDialog(role, provider, previewConnection.selection(role), !state.busy, onDismiss = { customModelRole = null }) { selection ->
+            when (role) {
+                ModelRole.SPEECH -> { speechKind = SpeechModel.valueOf(selection.kind); deployment = selection.modelId }
+                ModelRole.TEXT -> { textKind = TextModel.valueOf(selection.kind); paragraphModel = selection.modelId }
+                ModelRole.SOURCE_TRANSCRIPT -> sourceTranscript = selection.modelId
+            }
+            customModelRole = null
+        }
+    }
+}
+
+@Composable private fun ModelDropdown(label: String, preferences: AppPreferences, connection: FoundryConnection,
+    role: ModelRole, enabled: Boolean, onCustom: () -> Unit, onSelect: (ModelSelection) -> Unit) {
+    val options = modelSelections(preferences, connection, role)
+    val selected = connection.selection(role)
+    fun price(selection: ModelSelection): String? = when (role) {
+        ModelRole.SPEECH -> SpeechModel.entries.find { it.name == selection.kind }?.price(connection.provider)?.label
+        ModelRole.TEXT -> TextModel.entries.find { it.name == selection.kind }?.price(connection.provider)?.label
+        ModelRole.SOURCE_TRANSCRIPT -> null
+    }
+    Choice(label, selected.menuLabel(role, connection.provider),
+        options.map { it.key to it.menuLabel(role, connection.provider) } +
+            ("custom" to if (connection.provider == ModelProvider.OPENAI) "新增自訂模型…" else "新增自訂部署…"),
+        enabled, wrapSelection = true, selectedDetail = price(selected),
+        choiceDetails = options.mapNotNull { option -> price(option)?.let { option.key to it } }.toMap()) { key ->
+        if (key == "custom") onCustom() else options.find { it.key == key }?.let(onSelect)
+    }
+}
+
+@Composable private fun CustomModelDialog(role: ModelRole, provider: ModelProvider, initial: ModelSelection,
+    enabled: Boolean, onDismiss: () -> Unit, onSelect: (ModelSelection) -> Unit) {
+    var kind by remember { mutableStateOf(initial.kind) }
+    var modelId by remember { mutableStateOf(initial.modelId) }
+    val selection = ModelSelection(kind, modelId.trim())
+    val error = selection.validationError(role, provider)
+    val foundry = provider == ModelProvider.FOUNDRY
+    AlertDialog(onDismissRequest = onDismiss, title = { Text(if (foundry) "自訂部署" else "自訂模型") }, text = {
+        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(if (foundry) "填入此資源內的實際部署名稱；回到設定儲存後，便會保留在選單中。"
+                else "標準模型可直接從選單選取。只有使用其他版本或相容模型時，才需在此指定名稱。", style = MaterialTheme.typography.bodySmall)
+            val kinds = when (role) {
+                ModelRole.SPEECH -> SpeechModel.entries.filter { it.supportedBy(provider) }.map { it.name to it.label }
+                ModelRole.TEXT -> TextModel.entries.map { it.name to it.label }
+                ModelRole.SOURCE_TRANSCRIPT -> emptyList()
+            }
+            if (kinds.isNotEmpty()) Choice("模型類型", kinds.find { it.first == kind }?.second ?: "請選擇", kinds, enabled, wrapSelection = true) {
+                kind = it
+                modelId = if (foundry) "" else when (role) {
+                    ModelRole.SPEECH -> SpeechModel.valueOf(it).modelId
+                    ModelRole.TEXT -> TextModel.valueOf(it).modelId
+                    ModelRole.SOURCE_TRANSCRIPT -> ""
+                }
+            }
+            OutlinedTextField(modelId, { modelId = it }, label = { Text(if (foundry) "部署名稱" else "自訂模型 ID") },
+                singleLine = true, enabled = enabled, modifier = Modifier.fillMaxWidth(),
+                isError = modelId.isNotBlank() && error != null,
+                supportingText = { if (modelId.isNotBlank() && error != null) Text(error) })
+        }
+    }, confirmButton = { TextButton(onClick = { onSelect(selection) }, enabled = enabled && modelId.isNotBlank() && error == null) { Text("套用") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
 }
 
 @Composable private fun PageIntro(title: String, subtitle: String) {

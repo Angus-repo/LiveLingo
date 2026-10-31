@@ -1,6 +1,6 @@
 # 即時譯 LiveLingo
 
-使用 Kotlin Multiplatform + Compose Multiplatform 的 Android／iOS 即時字幕翻譯 App。**0.1.13 支援缺少標點的字幕整理，原文補充同步套用標點與段落；保留原文優先分段、模型費用與右上角版本。語音模型依類型使用不同串流協定，文字模型預設 GPT-6 Luna；可用 Microsoft Foundry 或 OpenAI，由 App 直接連線，不需自架後端。**
+使用 Kotlin Multiplatform + Compose Multiplatform 的 Android／iOS 即時字幕翻譯 App。**0.1.14 將語音、文字與原文字幕模型統一為下拉選單，保留自訂模型及部署；支援缺少標點的字幕整理，原文補充同步套用標點與段落；保留原文優先分段、模型費用與右上角版本。語音模型依類型使用不同串流協定，文字模型預設 GPT-6 Luna；可用 Microsoft Foundry 或 OpenAI，由 App 直接連線，不需自架後端。**
 
 API key 由使用者自行輸入，Android 以 Keystore 保護加密金鑰並加密保存，iOS 以 Keychain 保存。原始碼、APK、逐字稿匯出及一般設定均不內建或保存明文 API key。
 
@@ -28,6 +28,14 @@ API key 由使用者自行輸入，Android 以 Keystore 保護加密金鑰並加
 「自動」是來源語言偵測，目標語言需明確選定。印度英文是口音與慣用語提示，並非另一個保證準確的辨識引擎。繁體中文使用台灣用語。
 
 本版顯示字幕，不播放合成譯音。直接口譯模型仍可能在服務端產生語音，App 使用其輸出逐字稿作為譯文，仍會有模型使用量。
+
+## 0.1.14 模型統一使用下拉選單
+
+- 語音、文字與原文字幕轉錄各用一個下拉選單；模型類型、API ID 與請求參數一起切換，設定頁不再顯示另一個模型 ID 輸入欄位。
+- OpenAI 標準模型直接選取即可。Foundry 選項標示實際部署名稱，預設名稱須已在資源中部署；名稱不同時，從選單的「新增自訂部署…」設定一次並儲存。
+- 自訂模型版本／部署可從選單新增，既有設定自動列入選單；儲存後切換模型仍可選回。Foundry 選項依資源端點隔離，OpenAI 與 Foundry 互不混用。
+- 原文字幕可選「不顯示原文字幕」或轉錄模型；語音與文字模型的費用提示保留。「AI 標點與分段」仍由原本開關控制。
+- Android／iOS 版本 `0.1.14`／versionCode `15`。CI 驗證與 APK 見 PR 的 GitHub Actions。
 
 ## 0.1.13 缺少標點的字幕也能整理
 
@@ -207,8 +215,8 @@ Android 公開 AudioPlaybackCapture 只允許 `USAGE_MEDIA`、`USAGE_GAME`、`US
 
 | 服務 | 文字模型設定 |
 | --- | --- |
-| Microsoft Foundry | 選擇基礎模型並填入同一資源的實際部署名稱 |
-| OpenAI | 選取帳號可使用的文字模型；自訂模型於進階設定填入 ID |
+| Microsoft Foundry | 選擇同一資源的模型／部署；自訂部署從選單新增並儲存 |
+| OpenAI | 從下拉選單選擇可使用的文字模型；其他版本由選單的「新增自訂模型…」設定 |
 
 GPT-Live 是語音模型，不能填在文字模型欄。整理會將字幕送至所選服務，使用該服務金鑰，另計文字模型用量。
 

@@ -162,9 +162,10 @@ class AppController(
             foundryTextKind = connection.textModelKind, foundrySourceTranscript = connection.sourceTranscriptionModel)
         return try {
             repository.saveApiKey(canonicalEndpoint, resolved.apiKey)
-            repository.savePreferences(preferences)
+            val withChoices = preferences.copy(savedModelChoices = current.rememberModelChoices(connection))
+            repository.savePreferences(withChoices)
             apiKey = resolved.apiKey
-            mutable.value = mutable.value.copy(preferences = preferences, hasApiKey = true, message = "${connection.provider.label} 連線設定已儲存。", showReportInMessage = false)
+            mutable.value = mutable.value.copy(preferences = withChoices, hasApiKey = true, message = "${connection.provider.label} 連線設定已儲存。", showReportInMessage = false)
             true
         } catch (_: Exception) {
             // Reconcile with the encrypted destination binding; never send a newly stored key to an old endpoint.

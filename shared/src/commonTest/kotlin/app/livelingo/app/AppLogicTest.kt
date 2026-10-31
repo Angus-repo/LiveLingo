@@ -17,6 +17,29 @@ import kotlinx.serialization.encodeToString
 import kotlin.test.*
 
 class AppLogicTest {
+    @Test fun selectingAnotherModelRetainsPreviousDeploymentAndRestoresTheExactConnection() = runTest {
+        val services = configuredServices()
+        val controller = AppController(services, FakeTransport(), StandardTestDispatcher(testScheduler))
+        assertTrue(controller.saveConnection("https://example.openai.azure.com", "bank-live", "", "bank-sol", SpeechModel.GPT_LIVE, TextModel.GPT61_SOL))
+        assertTrue(controller.saveConnection("https://example.openai.azure.com", "bank-transcribe", "", "bank-luna", SpeechModel.LIVE_TRANSCRIBE, TextModel.GPT6_LUNA))
+        controller.dispose()
+        val transport = FakeTransport()
+        val reopened = AppController(services, transport, StandardTestDispatcher(testScheduler))
+        val prefs = reopened.state.value.preferences
+        val voice = modelSelections(prefs, prefs.connection(), ModelRole.SPEECH).single { it.modelId == "bank-live" }
+        val text = modelSelections(prefs, prefs.connection(), ModelRole.TEXT).single { it.modelId == "bank-sol" }
+        assertTrue(reopened.saveConnection(prefs.foundryEndpoint, voice.modelId, "", text.modelId,
+            SpeechModel.valueOf(voice.kind), TextModel.valueOf(text.kind)))
+        reopened.start(); runCurrent()
+        assertEquals("bank-live", transport.connections.single().deployment)
+        assertEquals(SpeechModel.GPT_LIVE, transport.connections.single().speechModel)
+        assertEquals("bank-sol", transport.connections.single().textDeployment)
+        assertEquals(TextModel.GPT61_SOL, transport.connections.single().textModelKind)
+        assertEquals(listOf("short-key"), transport.keys)
+        assertTrue(services.memory.regular.values.none { "short-key" in it })
+        reopened.stop(); runCurrent(); reopened.dispose()
+    }
+
     @Test fun unpunctuatedSpeechGetsPeriodicFormattingAndFinalPeriodOnStop() = runTest {
         val services = configuredServices()
         val transport = FakeTransport()

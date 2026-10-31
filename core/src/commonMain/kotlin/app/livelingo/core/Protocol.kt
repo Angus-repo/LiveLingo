@@ -19,6 +19,8 @@ sealed interface FoundryEvent {
     data class Ready(val sessionId: String) : FoundryEvent
     data class Transcript(val delta: TranscriptDelta) : FoundryEvent
     data class Closed(val reason: String?) : FoundryEvent
+    /** Moderation may interrupt output without closing a running GPT-Live session. */
+    data object ContentFiltered : FoundryEvent
     data object Ignored : FoundryEvent
 }
 
@@ -49,16 +51,19 @@ fun foundryAudioPayload(pcm16: ByteArray): String {
     return buildJsonObject { put("type", "session.input_audio.append"); put("audio", Base64.encode(pcm16)) }.toString()
 }
 
-fun foundryProviderError(code: String?): String = when (code) {
+fun isContentFilterCode(code: String?): Boolean = code?.lowercase() in setOf("content_filter", "responsibleaipolicyviolation")
+
+fun foundryProviderError(code: String?): String = when (code?.lowercase()) {
+    "content_filter", "responsibleaipolicyviolation" -> "Foundry 的內容安全篩選已阻擋部分內容，該片段可能沒有完整譯文。此錯誤不表示 API key 或部署權限有誤。"
     "rate_limit_exceeded", "quota_exceeded", "insufficient_quota" -> "Foundry 使用量或速率達上限，請稍後重試並檢查配額。"
     "invalid_api_key", "unauthorized", "authentication_error" -> "Foundry 認證失敗，請檢查 API key 與資源端點。"
-    "model_not_found", "deployment_not_found", "DeploymentNotFound" -> "找不到 GPT-Live 部署，請檢查部署名稱、資源端點與區域。"
+    "model_not_found", "deployment_not_found", "deploymentnotfound" -> "找不到 GPT-Live 部署，請檢查部署名稱、資源端點與區域。"
     else -> "Foundry 無法完成翻譯，請檢查部署、權限或服務狀態。"
 }
 
 fun foundryCloseError(reason: String?, requestedByClient: Boolean): String? = when {
     reason == "expired" -> "Foundry 工作階段已到期，已保留收到的逐字稿；請重新開始翻譯。"
-    reason == "content" -> "Foundry 因內容處理限制結束翻譯，最後字幕可能不完整。"
+    reason == "content" -> "Foundry 因內容安全篩選結束本次翻譯。已收到的字幕會保留，被阻擋的片段可能不完整；App 無法恢復服務已阻擋的內容。若一般對話反覆發生，請提供診斷給資源管理者確認。"
     reason == "connection_lost" || reason == "remote_hangup" -> "Foundry 連線已中斷，最後字幕可能不完整。"
     requestedByClient && (reason == null || reason == "close_requested") -> null
     else -> "Foundry 提前結束翻譯，已保留收到的逐字稿。"
@@ -89,8 +94,12 @@ fun parseFoundryEvent(text: String): FoundryEvent {
         }
         "session.closed" -> FoundryEvent.Closed(str("reason"))
         "error" -> {
-            val code = ((event["error"] as? JsonObject)?.get("code") as? JsonPrimitive)?.contentOrNull
-            throw FoundryProtocolException(foundryProviderError(code))
+            val error = event["error"] as? JsonObject
+            val code = (error?.get("code") as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
+            val inner = error?.get("innererror") as? JsonObject
+            val innerCode = (inner?.get("code") as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
+            if (isContentFilterCode(code) || isContentFilterCode(innerCode)) FoundryEvent.ContentFiltered
+            else throw FoundryProtocolException(foundryProviderError(code))
         }
         // Output audio is generated/billed but this app only displays subtitles.
         else -> FoundryEvent.Ignored

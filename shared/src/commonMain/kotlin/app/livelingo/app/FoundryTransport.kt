@@ -6,12 +6,14 @@ import io.ktor.client.plugins.HttpResponseValidator
 import io.ktor.client.plugins.websocket.webSocketSession
 import io.ktor.client.request.header
 import io.ktor.client.request.url
+import io.ktor.http.Url
 import io.ktor.websocket.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.channels.Channel
 
 class TranslationFailure(message: String, val diagnostic: FoundryDiagnostic? = null) : Exception(message)
+data class TranslationNotice(val message: String, val diagnostic: FoundryDiagnostic, val sessionEnded: Boolean = false)
 
 interface TranslationTransport {
     suspend fun run(
@@ -21,14 +23,17 @@ interface TranslationTransport {
         audio: ReceiveChannel<ByteArray>,
         onReady: suspend () -> Unit,
         onTranscript: suspend (TranscriptDelta) -> Unit,
+        onNotice: suspend (TranslationNotice) -> Unit = {},
     )
     /** Validates the real model lifecycle without using a microphone, knowledge profile, or transcript storage. */
     suspend fun probe(connection: FoundryConnection, apiKey: String): ConnectionProbeResult {
         val emptyAudio = Channel<ByteArray>(0)
         emptyAudio.close()
         try {
-            run(connection, apiKey, SessionSettings(), emptyAudio, {}, {})
-            return ConnectionProbeResult("Foundry 連線測試成功，GPT-Live 已啟動並正常結束。", FoundryDiagnostic(FoundryStages.COMPLETE, "OK", 101))
+            var notice: TranslationNotice? = null
+            run(connection, apiKey, SessionSettings(), emptyAudio, {}, {}, onNotice = { notice = it })
+            notice?.let { throw TranslationFailure(it.message, it.diagnostic) }
+            return ConnectionProbeResult("${connection.provider.label} 連線測試成功，GPT-Live 已啟動並正常結束。", FoundryDiagnostic(FoundryStages.COMPLETE, "OK", 101))
         } finally { emptyAudio.cancel() }
     }
     fun close()
@@ -38,6 +43,7 @@ interface TranslationTransport {
 internal interface FoundrySocket {
     suspend fun send(payload: String)
     suspend fun receive(): String?
+    suspend fun peerCloseCode(): Int? = null
     suspend fun close()
     fun cancel()
 }
@@ -56,7 +62,7 @@ internal class KtorFoundrySocketFactory(private val originalClient: HttpClient) 
             validateResponse { response ->
                 val request = response.call.request
                 if (request.url.protocol.name in setOf("ws", "wss") && response.status.value != 101) {
-                    val secret = request.headers["api-key"]
+                    val secret = request.headers["api-key"] ?: request.headers["Authorization"]?.removePrefix("Bearer ")
                     val requestId = safeRequestId(response.headers["apim-request-id"] ?: response.headers["x-request-id"] ?: response.headers["request-id"], secret)
                     // Failed WebSocket bodies are engine-specific and may not be readable channels.
                     // Native Android interception captures safe bounded JSON fields before this layer.
@@ -68,10 +74,12 @@ internal class KtorFoundrySocketFactory(private val originalClient: HttpClient) 
     override suspend fun open(url: String, apiKey: String): FoundrySocket {
         val session = client.webSocketSession {
             url(url)
-            // GPT-Live uses Azure resource-key authentication. Bearer is reserved for Entra tokens.
-            header("api-key", apiKey)
+            // Pin OpenAI credentials to its exact host. Azure resource keys use api-key.
+            if (Url(url).host == "api.openai.com") header("Authorization", "Bearer $apiKey")
+            else header("api-key", apiKey)
         }
         return object : FoundrySocket {
+            private var receivedCloseCode: Int? = null
             override suspend fun send(payload: String) { session.send(Frame.Text(payload)) }
             override suspend fun receive(): String? {
                 while (true) {
@@ -81,11 +89,17 @@ internal class KtorFoundrySocketFactory(private val originalClient: HttpClient) 
                     if (frame.data.size > MAX_FOUNDRY_FRAME_BYTES) throw TranslationFailure("Foundry 回傳的事件超過大小限制。")
                     when (frame) {
                         is Frame.Text -> return frame.readText()
-                        is Frame.Close -> return null
+                        is Frame.Close -> {
+                            receivedCloseCode = frame.readReason()?.code?.toInt()
+                            return null
+                        }
                         is Frame.Binary -> throw TranslationFailure("Foundry 回傳不支援的二進位事件。")
                         else -> Unit
                     }
                 }
+            }
+            override suspend fun peerCloseCode(): Int? = receivedCloseCode ?: withTimeoutOrNull(150) {
+                session.closeReason.await()?.code?.toInt()
             }
             override suspend fun close() { session.close(CloseReason(CloseReason.Codes.NORMAL, "Client finished")) }
             override fun cancel() { session.cancel() }
@@ -109,6 +123,7 @@ class KtorFoundryTransport internal constructor(
         audio: ReceiveChannel<ByteArray>,
         onReady: suspend () -> Unit,
         onTranscript: suspend (TranscriptDelta) -> Unit,
+        onNotice: suspend (TranslationNotice) -> Unit,
     ) {
         connection.validationError()?.let { throw TranslationFailure(it) }
         settings.validationError()?.let { throw TranslationFailure(it) }
@@ -119,9 +134,21 @@ class KtorFoundryTransport internal constructor(
         var sender: Job? = null
         var drainDeadline: Job? = null
         var stage = FoundryStages.HANDSHAKE
+        var pendingFilter: FoundryDiagnostic? = null
+        fun providerMessage(value: String): String =
+            if (connection.provider == ModelProvider.OPENAI) value.replace("Foundry", "OpenAI").replace("部署", "模型") else value
         fun redacted(failure: TranslationFailure): TranslationFailure {
-            val diagnostic = failure.diagnostic ?: return failure
-            return TranslationFailure(failure.message ?: "Foundry 工作階段失敗。", diagnostic.copy(requestId = safeRequestId(diagnostic.requestId, key)))
+            val diagnostic = failure.diagnostic
+            return TranslationFailure(providerMessage(failure.message ?: "服務工作階段失敗。"), diagnostic?.copy(requestId = safeRequestId(diagnostic.requestId, key)))
+        }
+        fun disconnectedAfterFilter(): TranslationFailure = TranslationFailure(
+            "Foundry 在內容篩選通知後斷線，但未回報工作階段結束原因。已收到的字幕已保留；可開始下一段收取新的音訊。若持續發生，請將診斷交給資源管理者確認。",
+            pendingFilter!!.copy(stage = stage, code = "DISCONNECTED_AFTER_FILTER"),
+        )
+        suspend fun withCloseDetails(failure: TranslationFailure): TranslationFailure {
+            // Read before client cleanup, otherwise our own normal close could look like the peer's.
+            val code = runCatching { socket?.peerCloseCode() }.getOrNull()
+            return TranslationFailure(failure.message.orEmpty(), failure.diagnostic?.copy(webSocketCloseCode = safeWebSocketCloseCode(code)))
         }
         fun decode(payload: String): FoundryEvent = try { parseFoundryEvent(payload) }
         catch (failure: FoundryProtocolException) {
@@ -142,6 +169,8 @@ class KtorFoundryTransport internal constructor(
                     val event = decode(active.receive() ?: throw TranslationFailure("Foundry 在準備完成前已中斷連線。", FoundryDiagnostic(stage, "CONNECTION_CLOSED")))
                     when (event) {
                         is FoundryEvent.Ready -> break
+                        FoundryEvent.ContentFiltered -> throw TranslationFailure(foundryProviderError("content_filter") + "工作階段尚未啟動，未開始收音。",
+                            FoundryDiagnostic(stage, "CONTENT_FILTER", providerCode = "content_filter"))
                         FoundryEvent.Ignored -> Unit
                         else -> throw TranslationFailure("Foundry 啟動順序不正確，尚未開始收音。")
                     }
@@ -165,11 +194,28 @@ class KtorFoundryTransport internal constructor(
                 // Usage/audio events count as activity; GPT-Live has no relay Ping/Pong event.
                 val payload = try { withTimeout(inactivityTimeoutMillis) { active.receive() } }
                 catch (_: TimeoutCancellationException) { throw TranslationFailure("Foundry 超過 90 秒沒有回應，已停止收音並保留收到的字幕。", FoundryDiagnostic(stage, "TIMEOUT")) }
-                    ?: throw TranslationFailure("Foundry 連線已中斷；已收到的字幕已保留，最後一句可能不完整。", FoundryDiagnostic(stage, "CONNECTION_CLOSED"))
+                    ?: throw if (pendingFilter != null) disconnectedAfterFilter()
+                    else TranslationFailure("Foundry 連線已中斷；已收到的字幕已保留，最後一句可能不完整。", FoundryDiagnostic(stage, "CONNECTION_CLOSED"))
                 when (val event = decode(payload)) {
-                    is FoundryEvent.Transcript -> onTranscript(event.delta)
+                    is FoundryEvent.Transcript -> {
+                        pendingFilter = null
+                        onTranscript(event.delta)
+                    }
+                    FoundryEvent.ContentFiltered -> {
+                        val fields = safeJsonErrorFields(payload, key)
+                        val diagnostic = FoundryDiagnostic(stage, "CONTENT_FILTER", requestId = fields.requestId, providerCode = "content_filter")
+                        pendingFilter = diagnostic
+                        // Keep this same session. Do not replay blocked audio, reconnect, or change filters.
+                        onNotice(TranslationNotice(providerMessage("Foundry 已阻擋部分內容，該片段可能不完整。正在接收後續服務事件；工作階段若仍可用，字幕會繼續更新。"), diagnostic))
+                    }
                     is FoundryEvent.Closed -> {
-                        foundryCloseError(event.reason, stopRequested.isCompleted)?.let { throw TranslationFailure(it, FoundryDiagnostic(stage, if (event.reason == "expired") "SESSION_EXPIRED" else "SESSION_CLOSED")) }
+                        if (event.reason == "content") {
+                            val diagnostic = (pendingFilter?.copy(stage = stage) ?: FoundryDiagnostic(stage, "CONTENT_FILTER", providerCode = "content_filter"))
+                                .copy(sessionCloseReason = "content")
+                            if (pendingFilter == null) onNotice(TranslationNotice(providerMessage(foundryCloseError(event.reason, stopRequested.isCompleted)!!), diagnostic, sessionEnded = true))
+                            throw TranslationFailure(foundryCloseError(event.reason, stopRequested.isCompleted)!!, diagnostic)
+                        }
+                        foundryCloseError(event.reason, stopRequested.isCompleted)?.let { throw TranslationFailure(it, FoundryDiagnostic(stage, if (event.reason == "expired") "SESSION_EXPIRED" else "SESSION_CLOSED", sessionCloseReason = safeSessionCloseReason(event.reason))) }
                         break
                     }
                     is FoundryEvent.Ready -> throw TranslationFailure("Foundry 重複啟動工作階段，已停止收音。")
@@ -180,15 +226,16 @@ class KtorFoundryTransport internal constructor(
             drainDeadline?.cancelAndJoin()
           }
         } catch (failure: FoundryProtocolException) {
-            throw TranslationFailure(failure.message ?: "Foundry 回應格式不正確。", FoundryDiagnostic(stage, "PROTOCOL"))
+            throw redacted(TranslationFailure(failure.message ?: "Foundry 回應格式不正確。", FoundryDiagnostic(stage, "PROTOCOL")))
         } catch (_: TimeoutCancellationException) {
-            throw TranslationFailure("Foundry 連線或啟動逾時，請檢查網路、資源端點與部署。", FoundryDiagnostic(stage, "TIMEOUT"))
+            throw redacted(TranslationFailure("Foundry 連線或啟動逾時，請檢查網路、資源端點與部署。", FoundryDiagnostic(stage, "TIMEOUT")))
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: TranslationFailure) {
-            throw redacted(if (failure.diagnostic != null) failure else TranslationFailure(failure.message ?: "Foundry 工作階段失敗。", FoundryDiagnostic(stage, "SESSION_FAILURE")))
+            throw redacted(withCloseDetails(if (failure.diagnostic != null) failure else TranslationFailure(failure.message ?: "Foundry 工作階段失敗。", FoundryDiagnostic(stage, "SESSION_FAILURE"))))
         } catch (failure: Exception) {
-            throw redacted(classifyFoundryFailure(failure, stage))
+            throw redacted(withCloseDetails(if (pendingFilter != null) disconnectedAfterFilter()
+            else classifyFoundryFailure(failure, stage)))
         } finally {
             sender?.cancel()
             drainDeadline?.cancel()

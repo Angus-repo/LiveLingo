@@ -25,15 +25,31 @@ object SubtitleExporter {
     fun text(record: TranscriptRecord): String = buildString {
         appendLine(cleanSingleLine(record.title))
         appendLine("來源：${record.settings.sourceLanguage.label}　譯文：${record.settings.targetLanguage.label}")
+        appendLine("音源：${record.settings.audioSource.label}")
+        if (record.contentFilterCount > 0) appendLine("注意：本次收到 ${record.contentFilterCount} 次內容安全篩選通知，部分片段可能不完整。")
         record.settings.knowledge?.let { appendLine("背景知識：${cleanSingleLine(it.name)}") }
         appendLine("原文與譯文使用各自的音訊時間；發言者標記由使用者手動指定。")
         appendLine()
+        for (channel in TranscriptChannel.entries) {
+            val full = record.fragments.filter { it.channel == channel }.sortedBy { it.startMs }.joinToString("") { it.text }
+            appendLine(if (channel == TranscriptChannel.INPUT) "【原文・閱讀段落】" else "【譯文・閱讀段落】")
+            appendLine(paragraphText(record.localizedText(full, channel), record.paragraphLayouts.find { it.channel == channel }))
+            appendLine()
+        }
+        appendLine("【時間戳明細】")
+        val localizedFragments = buildMap {
+            for (channel in TranscriptChannel.entries) {
+                val fragments = record.fragments.filter { it.channel == channel }.sortedBy { it.startMs }
+                val texts = record.localizedChunks(fragments.map { it.text }, channel)
+                fragments.forEachIndexed { index, fragment -> put(fragment.id, texts[index]) }
+            }
+        }
         record.fragments.sortedWith(compareBy<TranscriptFragment> { it.startMs }.thenBy { it.endMs }).forEach { fragment ->
             val channel = if (fragment.channel == TranscriptChannel.INPUT) "原文" else "譯文"
             val speaker = fragment.speakerLabel?.let(::cleanSingleLine)?.takeIf(String::isNotBlank)
             append("[${timestamp(fragment.startMs, '.')} → ${timestamp(fragment.endMs, '.')}] [$channel]")
             speaker?.let { append(" [手動：$it]") }
-            appendLine(" ${cleanText(fragment.text)}")
+            appendLine(" ${cleanText(localizedFragments.getValue(fragment.id))}")
         }
     }.trimEnd() + "\n"
 
@@ -62,7 +78,8 @@ object SubtitleExporter {
             }
         }
         // Keep whitespace deltas while grouping, but don't export a cue with no content.
-        return result.filter { cleanText(it.text).isNotBlank() }
+        val texts = record.localizedChunks(result.map { it.text }, channel)
+        return result.mapIndexed { index, cue -> cue.copy(text = texts[index]) }.filter { cleanText(it.text).isNotBlank() }
     }
 
     private fun cueText(cue: Cue): String {

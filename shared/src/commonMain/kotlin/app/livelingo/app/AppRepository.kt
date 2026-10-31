@@ -12,7 +12,21 @@ data class AppPreferences(
     val source: Language = Language.AUTO,
     val target: Language = Language.ZH_TW,
     val knowledgeId: String? = null,
+    val pace: TranslationPace = TranslationPace.BALANCED,
+    val quality: TranslationQuality = TranslationQuality.FAITHFUL,
+    val provider: ModelProvider = ModelProvider.FOUNDRY,
+    val openaiModel: String = "gpt-live-1",
+    val foundryTextModel: String = "",
+    val openaiTextModel: String = "gpt-4.1-mini",
+    val aiParagraphs: Boolean = true,
+    val audioSource: AudioSource = AudioSource.MICROPHONE,
 )
+
+fun AppPreferences.connection(): FoundryConnection = if (provider == ModelProvider.OPENAI)
+    FoundryConnection("https://api.openai.com", openaiModel, provider)
+else FoundryConnection(foundryEndpoint, deployment, provider)
+
+fun AppPreferences.paragraphModel(): String = if (provider == ModelProvider.OPENAI) openaiTextModel else foundryTextModel
 
 @Serializable
 private data class StoredFoundryKey(val endpoint: String, val apiKey: String)
@@ -25,13 +39,16 @@ class AppRepository(private val storage: LocalStorage) {
     fun saveKnowledge(value: List<BackgroundKnowledge>) = storage.write("knowledge", WireJson.encodeToString(value))
     /** Credentials are atomically bound to their canonical destination in encrypted storage. */
     fun apiKey(canonicalEndpoint: String): String {
-        val payload = storage.readSecret("foundry_api_key") ?: return ""
+        val payload = storage.readSecret(keySlot(canonicalEndpoint)) ?: return ""
         val saved = WireJson.decodeFromString<StoredFoundryKey>(payload)
         return saved.apiKey.takeIf { saved.endpoint == canonicalEndpoint }.orEmpty()
     }
     fun saveApiKey(canonicalEndpoint: String, value: String) = storage.writeSecret(
-        "foundry_api_key", if (value.isEmpty()) "" else WireJson.encodeToString(StoredFoundryKey(canonicalEndpoint, value)))
-    fun clearApiKey() = storage.writeSecret("foundry_api_key", "")
+        keySlot(canonicalEndpoint), if (value.isEmpty()) "" else WireJson.encodeToString(StoredFoundryKey(canonicalEndpoint, value)))
+    fun clearApiKey(provider: ModelProvider = ModelProvider.FOUNDRY) = storage.writeSecret(
+        if (provider == ModelProvider.OPENAI) "openai_api_key" else "foundry_api_key", "")
+    private fun keySlot(endpoint: String): String =
+        if (endpoint == "wss://api.openai.com/v1/live/sessions") "openai_api_key" else "foundry_api_key"
 
     /** Run only after all existing user data has loaded successfully. */
     fun migrateLegacyConnection(preferences: AppPreferences) {

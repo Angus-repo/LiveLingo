@@ -15,11 +15,37 @@ enum class Language(val label: String) {
 @Serializable
 data class BackgroundKnowledge(val id: String, val name: String, val content: String)
 
+/** Prompt strategy only: GPT-Live does not expose Realtime VAD/temperature knobs. */
+@Serializable
+enum class TranslationPace(val label: String) {
+    FAST("優先即時"), BALANCED("平衡")
+}
+
+@Serializable
+enum class TranslationQuality(val label: String) {
+    FAITHFUL("忠實原文"), NATURAL("自然流暢")
+}
+
+@Serializable
+enum class AudioSource(val label: String, val description: String) {
+    MICROPHONE("麥克風", "透過目前的麥克風收取現場或喇叭播放的聲音。"),
+    DEVICE_PLAYBACK("裝置播放音訊", "擷取此裝置上允許錄製的媒體聲音，不混入麥克風。其他 App 同時播放的聲音也可能被收取。"),
+    // Decode historical 0.1.7 records without rewriting their original source metadata.
+    TEAMS("Microsoft Teams（舊版音源）", "此音源已移除，請重新選擇音源。"),
+    ;
+    val isPlayback: Boolean get() = this != MICROPHONE
+    val selectable: Boolean get() = this != TEAMS
+}
+
 @Serializable
 data class SessionSettings(
     val sourceLanguage: Language = Language.AUTO,
     val targetLanguage: Language = Language.ZH_TW,
     val knowledge: BackgroundKnowledge? = null,
+    val pace: TranslationPace = TranslationPace.BALANCED,
+    val quality: TranslationQuality = TranslationQuality.FAITHFUL,
+    val provider: ModelProvider = ModelProvider.FOUNDRY,
+    val audioSource: AudioSource = AudioSource.MICROPHONE,
 )
 
 /** Shared by the mobile UI and trusted relay; do not rely on UI-only validation. */
@@ -65,7 +91,13 @@ data class TranscriptRecord(
     val createdAtMs: Long,
     val settings: SessionSettings,
     val fragments: List<TranscriptFragment> = emptyList(),
+    val paragraphLayouts: List<ParagraphLayout> = emptyList(),
+    val contentFilterCount: Int = 0,
 )
+
+/** Breaks are character offsets into an exact source snapshot. No model-rewritten text is stored. */
+@Serializable
+data class ParagraphLayout(val channel: TranscriptChannel, val source: String, val breakOffsets: List<Int>)
 
 internal fun Char.isUnsafeControl(): Boolean =
     (code < 0x20 && this != '\n' && this != '\r' && this != '\t') || code == 0x7f

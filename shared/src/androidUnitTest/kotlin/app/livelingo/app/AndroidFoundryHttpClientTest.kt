@@ -19,6 +19,7 @@ import okhttp3.tls.HandshakeCertificates
 import okhttp3.tls.HeldCertificate
 import java.io.Closeable
 import java.util.concurrent.TimeUnit
+import java.net.InetAddress
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -27,17 +28,66 @@ import kotlin.test.assertTrue
 
 /** Real TLS and OkHttp handshakes catch engine failures that an injected fake socket cannot. */
 class AndroidFoundryHttpClientTest {
+    @Test fun nativeFactoryRetainsPeerCloseCodeWithoutExposingCloseText() = runBlocking {
+        Fixture().use { fixture ->
+            fixture.server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                override fun onMessage(webSocket: WebSocket, text: String) {
+                    webSocket.send("""{"type":"error","error":{"code":"content_filter"}}""")
+                    webSocket.close(1008, "private-test-key PRIVATE_TRANSCRIPT")
+                }
+            }))
+            val factory = KtorFoundrySocketFactory(fixture.client)
+            try {
+                withTimeout(10_000) {
+                    val socket = factory.open(fixture.url, "private-test-key")
+                    try {
+                        socket.send("start")
+                        assertTrue(socket.receive().orEmpty().contains("content_filter"))
+                        assertEquals(null, socket.receive())
+                        assertEquals(1008, socket.peerCloseCode())
+                    } finally { socket.cancel() }
+                }
+            } finally { factory.close() }
+        }
+    }
+
     private class Fixture : Closeable {
         private val certificate = HeldCertificate.Builder().commonName("localhost")
-            .addSubjectAlternativeName("localhost").build()
+            .addSubjectAlternativeName("localhost").addSubjectAlternativeName("api.openai.com").build()
         private val serverCertificates = HandshakeCertificates.Builder().heldCertificate(certificate).build()
         private val clientCertificates = HandshakeCertificates.Builder().addTrustedCertificate(certificate.certificate).build()
         val server = MockWebServer().apply { useHttps(serverCertificates.sslSocketFactory(), false); start() }
         val client = createAndroidFoundryHttpClient {
             sslSocketFactory(clientCertificates.sslSocketFactory(), clientCertificates.trustManager)
+            dns { host -> if (host == "api.openai.com") listOf(InetAddress.getByName("127.0.0.1")) else okhttp3.Dns.SYSTEM.lookup(host) }
         }
         val url: String get() = server.url("/openai/v1/live/sessions").toString().replaceFirst("https://", "wss://")
         override fun close() { client.close(); server.shutdown() }
+    }
+
+    @Test fun productionFactoryUsesOpenAiBearerWithoutAzureHeaderOrQuery() = runBlocking {
+        Fixture().use { fixture ->
+            fixture.server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                override fun onMessage(webSocket: WebSocket, text: String) { webSocket.send("ack:$text") }
+                override fun onClosing(webSocket: WebSocket, code: Int, reason: String) { webSocket.close(code, reason) }
+            }))
+            val factory = KtorFoundrySocketFactory(fixture.client)
+            try {
+                withTimeout(10_000) {
+                    val url = fixture.server.url("/v1/live/sessions").toString().replace("https://localhost", "wss://api.openai.com")
+                    val socket = factory.open(url, "openai-test-key")
+                    try {
+                        socket.send("hello")
+                        assertEquals("ack:hello", socket.receive())
+                        val request = assertNotNull(fixture.server.takeRequest(2, TimeUnit.SECONDS))
+                        assertEquals("Bearer openai-test-key", request.getHeader("Authorization"))
+                        assertEquals(null, request.getHeader("api-key"))
+                        assertEquals("/v1/live/sessions", request.path)
+                        socket.close()
+                    } finally { socket.cancel() }
+                }
+            } finally { factory.close() }
+        }
     }
 
     @Test fun successfulTlsUpgradeExchangesFramesAndPreservesApiKeyHeader() = runBlocking {

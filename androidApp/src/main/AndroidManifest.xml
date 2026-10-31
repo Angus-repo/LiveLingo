@@ -4,6 +4,7 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-feature android:name="android.hardware.microphone" android:required="true" />
     <application android:allowBackup="false" android:label="即時譯 LiveLingo"
@@ -19,7 +20,7 @@
             </intent-filter>
         </activity>
         <service android:name="app.livelingo.app.AndroidTranslationForegroundService"
-            android:exported="false" android:foregroundServiceType="microphone"
+            android:exported="false" android:foregroundServiceType="microphone|mediaProjection"
             android:stopWithTask="false" />
         <provider android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.exports" android:exported="false"

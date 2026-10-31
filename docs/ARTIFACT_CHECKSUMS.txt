@@ -1,6 +1,6 @@
-LiveLingo 0.1.3
-SHA-256
-5b603f880dc14561fc81ec13ad4fa4340cd64f42a824f44957fdb529c664cebf  LiveLingo-0.1.3.apk
+LiveLingo 0.1.8
 
-Signing certificate SHA-256 (same as 0.1.0 / 0.1.1 / 0.1.2)
+229d682566686d5189de12537783481d96a5a26dc6d9e720bd904062a9b449a6  LiveLingo-0.1.8-original-key.apk
+
+Signing certificate SHA-256:
 cf232e1f105c3ac5a93ce2449b41678027b4b1ef9a54c3765c85b65a045d4bfb

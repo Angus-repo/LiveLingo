@@ -1,6 +1,8 @@
 package app.livelingo.app
 
 import app.livelingo.core.WireJson
+import app.livelingo.core.isContentFilterCode
+import app.livelingo.core.foundryProviderError
 import kotlinx.serialization.json.*
 
 data class FoundryDiagnostic(
@@ -9,7 +11,16 @@ data class FoundryDiagnostic(
     val httpStatus: Int? = null,
     val requestId: String? = null,
     val providerCode: String? = null,
+    val webSocketCloseCode: Int? = null,
+    val sessionCloseReason: String? = null,
 )
+
+/** Never include provider close text; it can contain speech, resource names or secrets. */
+internal fun safeSessionCloseReason(raw: String?): String? = raw?.takeIf {
+    it in setOf("close_requested", "expired", "content", "remote_hangup", "connection_lost")
+}
+
+internal fun safeWebSocketCloseCode(raw: Int?): Int? = raw?.takeIf { it in 1000..4999 }
 
 data class ConnectionProbeResult(val message: String, val diagnostic: FoundryDiagnostic)
 
@@ -27,7 +38,7 @@ private val knownProviderCodes = setOf(
     "permission_denied", "access_denied", "Forbidden", "DeploymentNotFound", "ResourceNotFound",
     "model_not_found", "deployment_not_found", "rate_limit_exceeded", "quota_exceeded", "insufficient_quota",
     "TooManyRequests", "invalid_request_error", "invalid_request", "BadRequest", "unsupported_model",
-    "model_not_supported", "OperationNotSupported", "content_filter", "server_error", "internal_error",
+    "model_not_supported", "OperationNotSupported", "content_filter", "ResponsibleAIPolicyViolation", "server_error", "internal_error",
     "service_unavailable", "invalid_audio", "context_length_exceeded",
 )
 
@@ -46,8 +57,9 @@ fun safeJsonErrorFields(body: String, secret: String? = null): SafeFoundryErrorF
     val root = runCatching { WireJson.parseToJsonElement(body).jsonObject }.getOrNull() ?: return SafeFoundryErrorFields()
     val error = (root["error"] as? JsonObject) ?: root
     fun JsonObject.string(key: String): String? = (get(key) as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
+    val innerCode = (error["innererror"] as? JsonObject)?.string("code")
     return SafeFoundryErrorFields(
-        providerCode = safeProviderCode(error.string("code")),
+        providerCode = if (isContentFilterCode(innerCode)) "content_filter" else safeProviderCode(error.string("code")),
         requestId = safeRequestId(root.string("request_id") ?: error.string("request_id"), secret),
     )
 }
@@ -61,6 +73,10 @@ internal object FoundryStages {
 }
 
 internal fun httpTranslationFailure(status: Int, stage: String, providerCode: String? = null, requestId: String? = null): TranslationFailure {
+    if (isContentFilterCode(providerCode)) return TranslationFailure(
+        foundryProviderError(providerCode) + "（HTTP $status）尚未建立可用的翻譯工作階段。",
+        FoundryDiagnostic(stage, "CONTENT_FILTER", status, safeRequestId(requestId), safeProviderCode(providerCode)),
+    )
     val message = when (status) {
         400 -> "Foundry 拒絕 WebSocket 請求（HTTP 400）。請確認資源端點與 GPT-Live 支援狀態。"
         401 -> "Foundry 認證失敗（HTTP 401）。請確認 API key 屬於這個資源且尚未失效。"

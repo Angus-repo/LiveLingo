@@ -35,6 +35,18 @@ class RealtimeTransportTest {
     private fun c(model: SpeechModel) = FoundryConnection("https://demo.services.ai.azure.com", "voice-custom", ModelProvider.FOUNDRY,
         model, TextModel.GPT6_LUNA, "luna-custom")
 
+    @Test fun durationIncludesOnlySentAudioAndOptionalSourceTranscription() = runTest {
+        val socket = RealtimeSocket(); val audio = Channel<ByteArray>(10)
+        val usage = mutableListOf<UsageSample>()
+        val transport = RealtimeTransport(FoundrySocketFactory { _, _ -> socket }, TextTranslator { _, _, _, _, _ -> error("Not used") })
+        transport.setUsageListener { usage += it }
+        audio.send(ByteArray(48_000)); audio.send(ByteArray(24_000)); audio.close()
+        transport.run(c(SpeechModel.REALTIME_TRANSLATE).copy(sourceTranscriptionModel = "whisper-deployment"), "test-key", SessionSettings(), audio, {}, {}, {})
+        assertEquals(1.5, usage.last { it.kind == UsageKind.VOICE }.seconds)
+        assertEquals(1.5, usage.last { it.kind == UsageKind.SOURCE }.seconds)
+        assertTrue(usage.all { it.estimated })
+    }
+
     @Test fun translationUsesUpdateAppendAndGracefulCloseAndRetainsBothCaptionTracks() = runTest {
         val socket = RealtimeSocket(); val audio = Channel<ByteArray>(10)
         val transcripts = mutableListOf<TranscriptDelta>(); val ready = CompletableDeferred<Unit>()

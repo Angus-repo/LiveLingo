@@ -38,11 +38,13 @@ private class Harness(scope: CoroutineScope, val socket: FakeFoundrySocket = Fak
     val result = CompletableDeferred<Result<Unit>>()
     val transcripts = mutableListOf<TranscriptDelta>()
     val notices = mutableListOf<TranslationNotice>()
+    val usages = mutableListOf<UsageSample>()
     var readyCount = 0
     var url: String? = null
     var apiKey: String? = null
     val transport = KtorFoundryTransport(FoundrySocketFactory { target, key -> url = target; apiKey = key; socket })
     val job = scope.launch {
+        transport.setUsageListener { usages += it }
         result.complete(runCatching {
             transport.run(FoundryConnection("https://Sample.openai.azure.com/openai/v1/", "custom-live"), "private-test-key", SessionSettings(), audio,
                 onReady = { readyCount++ }, onTranscript = { transcripts += it }, onNotice = { notices += it })
@@ -52,6 +54,32 @@ private class Harness(scope: CoroutineScope, val socket: FakeFoundrySocket = Fak
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class FoundryTransportTest {
+    @Test fun finalUsageOnContentClosureIsCapturedBeforeErrorAndCumulativeEventsReplace() = runTest {
+        val h = Harness(this)
+        h.socket.sent.receive(); h.socket.incoming.send(STARTED); runCurrent()
+        h.socket.incoming.send("""{"type":"session.usage.updated","usage":{"seconds":60}}""")
+        h.socket.incoming.send("""{"type":"session.usage.updated","usage":{"seconds":60}}""")
+        h.socket.incoming.send("""{"type":"session.closed","reason":"content","usage":{"seconds":61.5}}""")
+        assertIs<TranslationFailure>(h.result.await().exceptionOrNull())
+        val last = h.usages.last()
+        assertTrue(last.final)
+        assertFalse(last.estimated)
+        assertEquals(61.5, last.seconds)
+        val result = h.usages.fold(MeetingUsage("m", "m", 0, ModelProvider.OPENAI, "gpt-live-1", "", CostRates(voicePerMinute = 0.05))) { m, u -> m.update(u) }
+        assertEquals(0.05125, result.total().usd, 1e-12)
+        assertTrue(h.socket.closed && h.socket.cancelled)
+    }
+
+    @Test fun transportCloseWithoutFinalUsageKeepsReportedDurationAsLowerBound() = runTest {
+        val h = Harness(this)
+        h.socket.sent.receive(); h.socket.incoming.send(STARTED); runCurrent()
+        h.socket.incoming.send("""{"type":"session.usage.updated","usage":{"seconds":60}}""")
+        h.socket.incoming.close()
+        assertIs<TranslationFailure>(h.result.await().exceptionOrNull())
+        assertTrue(h.usages.last().estimated)
+        assertTrue(h.usages.last().seconds >= 60.0)
+    }
+
     @Test fun contentFilterDuringStreamingDoesNotDisconnectOrReplayAndLaterCaptionsContinue() = runTest {
         val h = Harness(this)
         h.socket.sent.receive()

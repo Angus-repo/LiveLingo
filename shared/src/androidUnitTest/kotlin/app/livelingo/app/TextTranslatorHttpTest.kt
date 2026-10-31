@@ -30,8 +30,11 @@ class TextTranslatorHttpTest {
             val connection = FoundryConnection("https://$host", "voice", provider,
                 if (provider == ModelProvider.OPENAI) SpeechModel.LIVE_TRANSCRIBE else SpeechModel.MAI_TRANSCRIBE,
                 TextModel.GPT6_LUNA, "my-luna")
+            val usages = mutableListOf<UsageSample>()
+            translator.setUsageListener { usages += it }
             fun enqueue(finish: String, content: String) {
                 server.enqueue(MockResponse().setHeader("Content-Type", "application/json").setBody(buildJsonObject {
+                    putJsonObject("usage") { put("prompt_tokens", 100); put("completion_tokens", 20) }
                     putJsonArray("choices") { add(buildJsonObject {
                         put("finish_reason", finish); putJsonObject("message") { put("content", content) }
                     }) }
@@ -60,6 +63,10 @@ class TextTranslatorHttpTest {
                 assertEquals("HTTP_302", redirect.diagnostic?.code)
                 assertFalse("PRIVATE" in redirect.message.orEmpty()); assertFalse("test-secret" in redirect.message.orEmpty())
                 assertEquals(4, server.requestCount)
+                assertEquals(7, usages.size) // four pending requests, three received usage reports
+                assertEquals(3, usages.count { it.final && it.inputTokens == 100L && it.outputTokens == 20L })
+                assertFalse(usages.last().known) // redirected request has no usage, never invent zero
+                assertEquals(4, usages.map { it.id }.distinct().size)
                 assertEquals(setOf(host), requestedHosts.toSet())
             } finally { translator.close(); server.shutdown() }
         }

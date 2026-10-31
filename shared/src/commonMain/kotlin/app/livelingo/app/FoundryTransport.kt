@@ -11,11 +11,14 @@ import io.ktor.websocket.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.channels.Channel
+import kotlin.time.TimeSource
+import kotlinx.serialization.json.*
 
 class TranslationFailure(message: String, val diagnostic: FoundryDiagnostic? = null) : Exception(message)
 data class TranslationNotice(val message: String, val diagnostic: FoundryDiagnostic, val sessionEnded: Boolean = false)
 
 interface TranslationTransport {
+    fun setUsageListener(listener: suspend (UsageSample) -> Unit) {}
     suspend fun run(
         connection: FoundryConnection,
         apiKey: String,
@@ -115,6 +118,8 @@ class KtorFoundryTransport internal constructor(
     private val drainTimeoutMillis: Long = 15_000,
 ) : TranslationTransport {
     constructor(client: HttpClient) : this(KtorFoundrySocketFactory(client))
+    private var usageListener: suspend (UsageSample) -> Unit = {}
+    override fun setUsageListener(listener: suspend (UsageSample) -> Unit) { usageListener = listener }
 
     override suspend fun run(
         connection: FoundryConnection,
@@ -130,6 +135,18 @@ class KtorFoundryTransport internal constructor(
         val key = apiKey.trim()
         if (key.isEmpty() || key.length > 4096 || key.any { it.isWhitespace() || it.code < 33 || it.code > 126 })
             throw TranslationFailure("請輸入有效的 Foundry API key，不可包含空白或控制字元。")
+        val reportUsage = usageListener
+        var usageClock: TimeSource.Monotonic.ValueTimeMark? = null
+        var finalUsage = false
+        var lastUsageSeconds = 0.0
+        var lastCheckpoint = 0.0
+        var backendCount = 0
+        val backendIds = mutableSetOf<String>()
+        suspend fun checkpoint() {
+            val seconds = usageClock?.elapsedNow()?.inWholeMilliseconds?.div(1000.0) ?: return
+            if (!finalUsage) reportUsage(UsageSample("voice", UsageKind.VOICE,
+                seconds = maxOf(seconds, lastUsageSeconds), estimated = true))
+        }
         var socket: FoundrySocket? = null
         var sender: Job? = null
         var drainDeadline: Job? = null
@@ -177,10 +194,16 @@ class KtorFoundryTransport internal constructor(
                 }
             }
             stage = FoundryStages.STREAM
+            usageClock = TimeSource.Monotonic.markNow()
+            reportUsage(UsageSample("voice", UsageKind.VOICE, estimated = true))
             onReady()
             val stopRequested = CompletableDeferred<Unit>()
             sender = launch {
-                for (bytes in audio) active.send(foundryAudioPayload(bytes))
+                for (bytes in audio) {
+                    active.send(foundryAudioPayload(bytes))
+                    val elapsed = usageClock!!.elapsedNow().inWholeMilliseconds / 1000.0
+                    if (elapsed - lastCheckpoint >= 5.0) { lastCheckpoint = elapsed; checkpoint() }
+                }
                 stage = FoundryStages.STOP
                 stopRequested.complete(Unit)
                 active.send(FOUNDRY_CLOSE_PAYLOAD)
@@ -196,6 +219,21 @@ class KtorFoundryTransport internal constructor(
                 catch (_: TimeoutCancellationException) { throw TranslationFailure("Foundry 超過 90 秒沒有回應，已停止收音並保留收到的字幕。", FoundryDiagnostic(stage, "TIMEOUT")) }
                     ?: throw if (pendingFilter != null) disconnectedAfterFilter()
                     else TranslationFailure("Foundry 連線已中斷；已收到的字幕已保留，最後一句可能不完整。", FoundryDiagnostic(stage, "CONNECTION_CLOSED"))
+                liveUsage(payload)?.let { usage ->
+                    lastUsageSeconds = maxOf(lastUsageSeconds, usage.seconds)
+                    finalUsage = usage.final
+                    reportUsage(if (usage.final) usage else usage.copy(seconds = lastUsageSeconds))
+                }
+                // No backend delegation is configured by this app. Surface unexpected billed work as unpriced.
+                runCatching { WireJson.parseToJsonElement(payload).jsonObject }.getOrNull()?.let { root ->
+                    val nested = root["event"] as? JsonObject
+                    if ((root["type"] as? JsonPrimitive)?.content == "response.event" &&
+                        (nested?.get("type") as? JsonPrimitive)?.content in setOf("response.completed", "response.failed", "response.incomplete")) {
+                        val response = nested?.get("response") as? JsonObject
+                        val id = (response?.get("id") as? JsonPrimitive)?.content ?: "unknown-${backendCount++}"
+                        if (backendIds.add(id)) reportUsage(UsageSample("backend-$id", UsageKind.BACKEND, known = false, final = true))
+                    }
+                }
                 when (val event = decode(payload)) {
                     is FoundryEvent.Transcript -> {
                         pendingFilter = null
@@ -240,8 +278,10 @@ class KtorFoundryTransport internal constructor(
             sender?.cancel()
             drainDeadline?.cancel()
             withContext(NonCancellable) {
-                withTimeoutOrNull(2_000) { runCatching { socket?.close() } }
-                runCatching { socket?.cancel() }
+                try { checkpoint() } finally {
+                    withTimeoutOrNull(2_000) { runCatching { socket?.close() } }
+                    runCatching { socket?.cancel() }
+                }
             }
         }
     }

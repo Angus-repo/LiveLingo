@@ -1,6 +1,6 @@
-LiveLingo 0.1.10
+LiveLingo 0.1.11
 
-f2f167430424d13d593e1cd548e281ff3e10e857aff0c68c0fd1fcaa2a53137e  LiveLingo-0.1.10-original-key.apk
+08ec5b2fad9a3687f6e1e060b440e806a31456367aa39c1254c853bb66895bba  LiveLingo-0.1.11-original-key.apk
 
 Signing certificate SHA-256:
 cf232e1f105c3ac5a93ce2449b41678027b4b1ef9a54c3765c85b65a045d4bfb

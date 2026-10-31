@@ -333,7 +333,6 @@ class AppController(
         val queue = Channel<ByteArray>(capacity = 30)
         audio = queue
         sessionFailure = null
-        var savedFragmentCount = 0
         val paragraphModel = snapshot.preferences.paragraphModel().takeIf { snapshot.preferences.aiParagraphs }.orEmpty()
         mutable.value = snapshot.copy(phase = ConnectionPhase.CONNECTING, current = record, transcriptSaved = true,
             history = listOf(record) + snapshot.history, message = null, lastConnectionReport = null, showReportInMessage = false,
@@ -400,7 +399,6 @@ class AppController(
                             mutable.value = mutable.value.copy(transcriptSaved = false)
                             try {
                                 persistCurrentTranscript(record.id)
-                                savedFragmentCount = next.fragments.size
                                 mutable.value = mutable.value.copy(transcriptSaved = true)
                             }
                             catch (cancelled: CancellationException) { throw cancelled }
@@ -447,9 +445,14 @@ class AppController(
                         formatParagraphs(record.id, connection, sessionApiKey, paragraphModel)
                 }
                 val latest = mutable.value.current?.takeIf { it.id == record.id }
-                if (latest != null && (latest.fragments.size != savedFragmentCount || !mutable.value.transcriptSaved)) {
+                // A cancelled periodic formatter can leave a newer in-memory layout after a fragment
+                // write marked the transcript saved. Flush received text after joining it; an empty,
+                // already-saved session needs no extra IO (including denied or cancelled capture).
+                if (latest != null && (latest.fragments.isNotEmpty() || !mutable.value.transcriptSaved)) {
                     var saved = false
-                    withContext(NonCancellable + Dispatchers.Default) {
+                    // persistCurrentTranscript already moves IO to Default. Keep this outer cleanup
+                    // on the same dispatcher so returning to a cancelled session cannot skip phase/release.
+                    withContext(NonCancellable) {
                         try { persistCurrentTranscript(record.id); saved = true }
                         catch (_: Exception) { sessionFailure = "最後收到的字幕無法寫入裝置。請先從逐字稿匯出目前內容，再確認儲存空間。" }
                     }
@@ -478,7 +481,7 @@ class AppController(
     private suspend fun formatParagraphs(id: String, connection: FoundryConnection, key: String, model: String) {
         val snapshot = mutable.value.current?.takeIf { it.id == id } ?: return
         val windows = paragraphWindows(snapshot)
-        if (windows.isEmpty() || windows.all { w -> snapshot.paragraphLayouts.any { it.channel == w.channel && it.source == w.source } }) {
+        if (windows.isEmpty() || windows.all { currentParagraphLayout(snapshot, it) != null }) {
             mutable.value = mutable.value.copy(paragraphStatus = paragraphProgress(snapshot))
             return
         }
@@ -488,9 +491,14 @@ class AppController(
             val layouts = withTimeout(22_000) { formatter.format(connection, key, model, snapshot) }
             val latest = mutable.value.current?.takeIf { it.id == id } ?: return
             val accepted = layouts.filter { layout ->
+                val originalReference = layout.originalReference
+                val validBoundaries = paragraphCandidateEnds(layout.source).toSet()
                 captionSourceText(latest, layout.channel).startsWith(layout.source) &&
                     windows.any { it.channel == layout.channel && it.source == layout.source } &&
-                    layout.breakOffsets.all { it in paragraphCandidateEnds(layout.source) }
+                    layout.breakOffsets.all { it in validBoundaries } &&
+                    (layout.channel != TranscriptChannel.OUTPUT ||
+                        (originalReference == windows.find { it.channel == TranscriptChannel.INPUT }?.source &&
+                            (originalReference == null || captionSourceText(latest, TranscriptChannel.INPUT).startsWith(originalReference))))
             }
             if (accepted.isEmpty()) {
                 mutable.value = mutable.value.copy(paragraphStatus = "字幕已更新，等待下一次 AI 分段。")

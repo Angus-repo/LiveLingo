@@ -12,13 +12,14 @@ import kotlin.test.*
 
 class ParagraphHttpTest {
     private val record = TranscriptRecord("r", "x", 0, SessionSettings(), listOf(
-        TranscriptFragment("f", TranscriptChannel.OUTPUT, 0, 1000, "台湾4.95兆。印度4.92兆。接着分析原因。")
+        TranscriptFragment("in", TranscriptChannel.INPUT, 0, 1000, "Taiwan is 4.95 trillion. India is 4.92 trillion. Then analyze the reasons."),
+        TranscriptFragment("f", TranscriptChannel.OUTPUT, 0, 1000, "台湾4.95兆。\n\n印度4.92兆。\n\n接着分析原因。")
     ))
 
     private fun success(ids: String = "[2]"): String = buildJsonObject {
         putJsonArray("choices") { add(buildJsonObject {
             put("finish_reason", "stop")
-            putJsonObject("message") { put("content", "{\"output\":$ids}") }
+            putJsonObject("message") { put("content", "{\"input\":[2],\"output\":$ids,\"alignment\":[{\"input\":2,\"output\":2}]}") }
         }) }
     }.toString()
 
@@ -42,9 +43,14 @@ class ParagraphHttpTest {
                 else FoundryConnection("https://demo.openai.azure.com")
             try {
                 server.enqueue(MockResponse().setHeader("Content-Type", "application/json").setBody(success()))
-                val layout = formatter.format(connection.copy(textModelKind = TextModel.GPT6_LUNA), "isolated-test-secret", "my-text-model", record).single()
+                val layouts = formatter.format(connection.copy(textModelKind = TextModel.GPT6_LUNA), "isolated-test-secret", "my-text-model", record)
+                assertEquals(2, layouts.size)
+                val layout = layouts.single { it.channel == TranscriptChannel.OUTPUT }
                 assertEquals(1, layout.breakOffsets.size)
                 assertTrue(layout.source.startsWith("台灣4.95兆"))
+                assertTrue(layout.replaceExistingBreaks)
+                assertNotNull(layout.originalReference)
+                assertEquals("台灣4.95兆。 印度4.92兆。\n\n接著分析原因。", liveCaptionText(record.copy(paragraphLayouts = layouts), TranscriptChannel.OUTPUT))
                 val request = assertNotNull(server.takeRequest(2, TimeUnit.SECONDS))
                 val body = request.body.readUtf8()
                 assertFalse("isolated-test-secret" in body)

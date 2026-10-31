@@ -98,7 +98,14 @@ data class TranscriptRecord(
 
 /** Breaks are character offsets into an exact source snapshot. No model-rewritten text is stored. */
 @Serializable
-data class ParagraphLayout(val channel: TranscriptChannel, val source: String, val breakOffsets: List<Int>)
+data class ParagraphLayout(
+    val channel: TranscriptChannel,
+    val source: String,
+    val breakOffsets: List<Int>,
+    val replaceExistingBreaks: Boolean = false,
+    val originalReference: String? = null,
+    val awaitingSourceAlignment: Boolean = false,
+)
 
 internal fun Char.isUnsafeControl(): Boolean =
     (code < 0x20 && this != '\n' && this != '\r' && this != '\t') || code == 0x7f

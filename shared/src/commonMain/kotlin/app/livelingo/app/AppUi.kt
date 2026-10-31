@@ -515,6 +515,9 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
     var paragraphModel by remember(provider, state.preferences.paragraphModel()) { mutableStateOf(state.preferences.paragraphModel()) }
     var speechKind by remember(provider, state.preferences.connection().speechModel) { mutableStateOf(state.preferences.connection().speechModel) }
     var textKind by remember(provider, state.preferences.connection().textModelKind) { mutableStateOf(state.preferences.connection().textModelKind) }
+    var customTextId by remember(provider, state.preferences.paragraphModel(), state.preferences.connection().textModelKind) {
+        mutableStateOf(paragraphModel != textKind.modelId)
+    }
     var sourceTranscript by remember(provider, state.preferences.connection().sourceTranscriptionModel) { mutableStateOf(state.preferences.connection().sourceTranscriptionModel) }
     var apiKey by remember(provider) { mutableStateOf("") }
     var clearConfirm by remember { mutableStateOf(false) }
@@ -569,13 +572,23 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                     val next = TextModel.valueOf(it)
                     if (next != TextModel.CUSTOM && (isOpenAi || paragraphModel.isBlank() || TextModel.infer(paragraphModel) != TextModel.CUSTOM)) paragraphModel = next.modelId
                     textKind = next
+                    if (isOpenAi) customTextId = next == TextModel.CUSTOM
                 }
                 Text(textKind.price(provider).note, style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971))
                 TextButton(onClick = { runCatching { uriHandler.openUri(textKind.price(provider).sourceUrl) }.onFailure { controller.inform("無法開啟定價網頁。") } }) { Text("文字費用來源 ↗") }
-                OutlinedTextField(paragraphModel, { paragraphModel = it }, label = { Text(if (isOpenAi) "文字模型 ID" else "實際文字部署名稱") }, placeholder = { Text("gpt-6-luna") }, singleLine = true, enabled = !state.busy, modifier = Modifier.fillMaxWidth())
-                Text(if (isOpenAi) "預設 GPT-6 Luna；依上方類型使用對應的請求參數。" else "預設 GPT-6 Luna；請先在同一資源部署文字模型，填入實際名稱並選擇對應類型。", style = MaterialTheme.typography.bodySmall)
+                if (!isOpenAi || textKind == TextModel.CUSTOM || customTextId) {
+                    OutlinedTextField(paragraphModel, { paragraphModel = it }, label = { Text(if (isOpenAi) "自訂模型 ID（同一個文字模型）" else "此模型在 Foundry 的部署名稱") }, placeholder = { Text("gpt-6-luna") }, singleLine = true, enabled = !state.busy, modifier = Modifier.fillMaxWidth())
+                }
+                if (isOpenAi && textKind != TextModel.CUSTOM) {
+                    TextButton(onClick = { customTextId = !customTextId; if (!customTextId) paragraphModel = textKind.modelId }, enabled = !state.busy) {
+                        Text(if (customTextId) "使用所選模型的預設 ID" else "進階：指定其他模型 ID")
+                    }
+                }
+                Text(if (!isOpenAi) "上方選擇模型類型，下方填入同一資源中該模型的部署名稱；兩者是同一個模型。"
+                    else if (customTextId || textKind == TextModel.CUSTOM) "此欄指定同一模型的 API ID，不是第二個模型；請確認 ID 與所選類型相符。"
+                    else "選擇上方模型即可，API ID 會自動帶入。只有指定其他模型版本時才需要進階設定。", style = MaterialTheme.typography.bodySmall)
                 if (speechKind.transcribes) Text("每約 3 秒完成一段原文轉錄，再由文字模型翻譯；即使關閉 AI 分段，文字翻譯仍會執行並計費。", style = MaterialTheme.typography.bodySmall)
-                if (state.preferences.aiParagraphs) Text("約每 20 秒與停止時判斷原文、譯文的語意段落，只有逗號的譯文也會處理。AI 只決定換行位置，不改寫內容；失敗時保留基本分段。", style = MaterialTheme.typography.bodySmall)
+                if (state.preferences.aiParagraphs) Text("約每 20 秒與停止時先判斷原文段落，再讓譯文依對應語意換段；沒有原文時才獨立分段。AI 只調整換行，不改寫內容；字幕尚未對應完整時會顯示等待狀態。", style = MaterialTheme.typography.bodySmall)
             }
             Text("費用為美元公開參考價，查核：$PRICE_CHECKED_DATE；非帳單即時報價。實際費用依用量、部署與合約而定。", style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971))
             if (!isOpenAi) TextButton(onClick = { runCatching { uriHandler.openUri(FOUNDRY_PRICING_URL) }.onFailure { controller.inform("無法開啟定價網頁。") } }) { Text("查看 Azure 官方定價 ↗") }

@@ -305,6 +305,27 @@ class AppLogicTest {
         controller.dispose()
     }
 
+    @Test fun stoppingPersistsCachedParagraphsEvenIfLastSavedSnapshotIsOlder() = runTest {
+        val services = configuredServices()
+        val transport = FakeTransport()
+        val formatter = object : ParagraphFormatter {
+            override suspend fun format(connection: FoundryConnection, apiKey: String, model: String, record: TranscriptRecord) =
+                parseParagraphLayouts("""{"output":[2]}""", paragraphWindows(record), record.paragraphLayouts)
+        }
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler), formatter)
+        controller.start(); runCurrent()
+        transport.receiver!!(TranscriptDelta(TranscriptChannel.OUTPUT, "第一句。第二句。第三句。", 0, 1500))
+        val formatted = controller.state.first { it.paragraphStatus == "譯文：已分段" }.current!!
+        // Reproduce an older fragment snapshot winning the previous write before stop cancels formatting.
+        AppRepository(services.memory).saveTranscript(formatted.copy(paragraphLayouts = emptyList()))
+        assertTrue(controller.state.value.transcriptSaved)
+        controller.stop(); controller.state.first { it.phase == ConnectionPhase.IDLE }
+        val restored = AppRepository(services.memory).history().single()
+        assertEquals(formatted.paragraphLayouts, restored.paragraphLayouts)
+        assertEquals(formatted.fragments, restored.fragments)
+        controller.dispose()
+    }
+
     @Test fun paragraphServiceFailureDoesNotLoseTranscriptOrFailTranslation() = runTest {
         val services = configuredServices()
         val transport = FakeTransport()
@@ -790,9 +811,11 @@ class AppLogicTest {
                 // The periodic job may run between the input and output deltas while storage suspends.
                 formattedBothTracks = formattedBothTracks || windows.map { it.channel }.toSet() == TranscriptChannel.entries.toSet()
                 assertEquals("gpt-6-luna", model)
-                val response = windows.joinToString(prefix = "{", postfix = "}") { window ->
+                val tracks = windows.joinToString { window ->
                     "\"${window.key}\":[${if (window.channel == TranscriptChannel.INPUT) 1 else 2}]"
                 }
+                val alignment = if (windows.size == 2) ",\"alignment\":[{\"input\":1,\"output\":2}]" else ""
+                val response = "{$tracks$alignment}"
                 return parseParagraphLayouts(response, windows, record.paragraphLayouts)
             }
         }
@@ -807,7 +830,7 @@ class AppLogicTest {
         assertTrue("第一項，\n\n接著討論" in liveCaptionText(saved, TranscriptChannel.OUTPUT))
         assertEquals(raw, saved.fragments.last().text)
         assertEquals(3000L, saved.fragments.last().endMs)
-        assertEquals("原文：已分段；譯文：已分段", controller.state.value.paragraphStatus)
+        assertEquals("原文：已分段；譯文：依原文分段", controller.state.value.paragraphStatus)
         controller.dispose()
     }
 

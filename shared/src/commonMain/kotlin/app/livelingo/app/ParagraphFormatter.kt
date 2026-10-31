@@ -12,6 +12,7 @@ interface ParagraphFormatter {
     suspend fun format(connection: FoundryConnection, apiKey: String, model: String, record: TranscriptRecord): List<ParagraphLayout>
     suspend fun finish(connection: FoundryConnection, apiKey: String, model: String, record: TranscriptRecord): List<ParagraphLayout> =
         format(connection, apiKey, model, record)
+    fun setUsageListener(listener: suspend (UsageSample) -> Unit) {}
     fun close() {}
 }
 
@@ -195,6 +196,9 @@ internal fun parseParagraphLayouts(content: String, windows: List<ParagraphWindo
 }
 
 class HttpParagraphFormatter(private val original: HttpClient) : ParagraphFormatter {
+    private var usageListener: suspend (UsageSample) -> Unit = {}
+    private var requestNumber = 0L
+    override fun setUsageListener(listener: suspend (UsageSample) -> Unit) { usageListener = listener }
     private val client = original.config {
         followRedirects = false
         install(HttpTimeout) { requestTimeoutMillis = 20_000; socketTimeoutMillis = 20_000 }
@@ -210,6 +214,9 @@ class HttpParagraphFormatter(private val original: HttpClient) : ParagraphFormat
         require(Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}").matches(model))
         val windows = paragraphWindows(record, final)
         if (windows.isEmpty()) return emptyList()
+        val reportUsage = usageListener
+        val usageId = "formatting-${++requestNumber}"
+        reportUsage(UsageSample(usageId, UsageKind.FORMATTING, known = false))
         val response = client.post(connection.chatCompletionsUrl()) {
             contentType(ContentType.Application.Json)
             if (connection.provider == ModelProvider.OPENAI) header(HttpHeaders.Authorization, "Bearer $apiKey")
@@ -220,6 +227,7 @@ class HttpParagraphFormatter(private val original: HttpClient) : ParagraphFormat
         val body = response.bodyAsText()
         require(body.length <= 65_536)
         val result = WireJson.parseToJsonElement(body).jsonObject
+        reportUsage(chatUsage(result, usageId, UsageKind.FORMATTING))
         val choice = result["choices"]?.jsonArray?.firstOrNull()?.jsonObject ?: error("Missing formatting response")
         require(choice["finish_reason"]?.jsonPrimitive?.content == "stop")
         val content = choice["message"]?.jsonObject?.get("content")?.jsonPrimitive?.content ?: error("Missing formatting content")

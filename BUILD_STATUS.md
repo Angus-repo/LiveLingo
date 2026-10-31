@@ -1,3 +1,21 @@
+# LiveLingo 0.1.15 驗證狀態
+
+新增會議用量、美元費用統計與日／週／月折線圖。功能、計價來源及限制見 [docs/USAGE_COSTS.md](docs/USAGE_COSTS.md)。Android／iOS 版號同步為 0.1.15／16。
+
+本機使用 JDK 17、Gradle 8.14.3 與 Android SDK 36／Build Tools 35 執行：
+
+```sh
+./gradlew :core:jvmTest :shared:testDebugUnitTest :androidApp:assembleDebug --offline
+```
+
+**BUILD SUCCESSFUL，219 項測試（core 76、shared 143），0 失敗、0 錯誤、0 略過。** 包含金額與累計去重、快取／推理 token、未結算提示、台灣日／週／月邊界、跨日歸帳、重啟、刪除保留、費率快照與重算、儲存失敗，以及兩個 provider 的實際本機 TLS／HTTP 回應用量解析。格式不合法、length、content_filter 回應仍記錄已回報 token。
+
+交付 `LiveLingo-0.1.15-original-key.apk`，13,323,637 bytes。APK SHA-256：`a8f52716d7b6e958b2dfc7092786408d302dd243004bdd80f00cccec2b3ba08d`。沿用原始開發簽章，憑證 SHA-256：`cf232e1f105c3ac5a93ce2449b41678027b4b1ef9a54c3765c85b65a045d4bfb`。`apksigner verify`、`zipalign -c -P 16 4`、套件 ID／版本檢查均通過；重簽前後所有非簽章檔案內容相同。
+
+尚未以真實雲端帳號對帳、Android 實機檢查排版／覆蓋安裝，或編譯 iOS；本版未執行 Lint。兩處既有 ClipboardManager 棄用與 native strip 警告仍在。遠端 CI 結果請以本次 PR 的 checks 為準；上述 219 項為已完成的本機測試。
+
+---
+
 # LiveLingo 0.1.14 驗證狀態
 
 本版以 GitHub Actions 執行 `:core:jvmTest`、`:shared:testDebugUnitTest`、Android APK 建置與 iOS 模擬器編譯；最終結果見 PR 的 checks 與 Actions 工作紀錄。下列 0.1.13 結果為上一版歷史紀錄，不代表本版測試結果。

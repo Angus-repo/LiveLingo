@@ -10,6 +10,7 @@ import kotlinx.serialization.json.*
 
 internal fun interface TextTranslator {
     suspend fun translate(connection: FoundryConnection, key: String, settings: SessionSettings, text: String, context: String): String
+    fun setUsageListener(listener: suspend (UsageSample) -> Unit) {}
     fun close() {}
 }
 
@@ -31,6 +32,9 @@ internal fun translationTextRequest(connection: FoundryConnection, settings: Ses
 }.toString()
 
 internal class HttpTextTranslator(private val original: HttpClient) : TextTranslator {
+    private var usageListener: suspend (UsageSample) -> Unit = {}
+    private var requestNumber = 0L
+    override fun setUsageListener(listener: suspend (UsageSample) -> Unit) { usageListener = listener }
     private val client = original.config {
         followRedirects = false
         expectSuccess = false
@@ -39,6 +43,9 @@ internal class HttpTextTranslator(private val original: HttpClient) : TextTransl
     override suspend fun translate(connection: FoundryConnection, key: String, settings: SessionSettings, text: String, context: String): String {
         require(connection.validationError() == null)
         require(Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}").matches(connection.textDeployment))
+        val reportUsage = usageListener
+        val usageId = "translation-${++requestNumber}"
+        reportUsage(UsageSample(usageId, UsageKind.TRANSLATION, known = false))
         val response = client.post(connection.chatCompletionsUrl()) {
             contentType(ContentType.Application.Json)
             if (connection.provider == ModelProvider.OPENAI) header(HttpHeaders.Authorization, "Bearer $key") else header("api-key", key)
@@ -48,7 +55,9 @@ internal class HttpTextTranslator(private val original: HttpClient) : TextTransl
             FoundryDiagnostic("文字翻譯", "HTTP_${response.status.value}", response.status.value))
         val body = response.bodyAsText()
         if (body.length > 131_072) throw TranslationFailure("文字翻譯回應超過大小限制。")
-        val choice = WireJson.parseToJsonElement(body).jsonObject["choices"]?.jsonArray?.firstOrNull()?.jsonObject
+        val root = WireJson.parseToJsonElement(body).jsonObject
+        reportUsage(chatUsage(root, usageId, UsageKind.TRANSLATION))
+        val choice = root["choices"]?.jsonArray?.firstOrNull()?.jsonObject
             ?: throw TranslationFailure("文字翻譯未回傳有效結果。")
         val finish = choice["finish_reason"]?.jsonPrimitive?.content
         if (finish == "content_filter") throw TranslationFailure("文字翻譯遭內容安全篩選中止，已保留原文。", FoundryDiagnostic("文字翻譯", "CONTENT_FILTER", providerCode = "content_filter"))

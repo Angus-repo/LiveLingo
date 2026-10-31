@@ -44,7 +44,7 @@ private val Palette = lightColorScheme(primary = Mint, onPrimary = Color.White,
     secondaryContainer = Color(0xFFEDE7FA), surfaceVariant = Color(0xFFE8EEEA))
 
 private enum class Page(val label: String, val glyph: String) {
-    LIVE("即時翻譯", "≋"), KNOWLEDGE("背景知識", "◇"), HISTORY("逐字稿", "▤"), SETTINGS("設定", "⚙")
+    LIVE("即時翻譯", "≋"), KNOWLEDGE("背景知識", "◇"), HISTORY("逐字稿", "▤"), COSTS("費用統計", "$"), SETTINGS("設定", "⚙")
 }
 
 @Composable
@@ -93,6 +93,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                                 Page.LIVE -> LiveScreen(state, controller, onSettings = { page = Page.SETTINGS })
                                 Page.KNOWLEDGE -> KnowledgeScreen(state, controller)
                                 Page.HISTORY -> HistoryScreen(state, controller)
+                                Page.COSTS -> CostScreen(state, controller, services)
                                 Page.SETTINGS -> SettingsScreen(state, controller)
                             }
                         }

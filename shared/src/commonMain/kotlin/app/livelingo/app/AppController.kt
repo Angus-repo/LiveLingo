@@ -18,6 +18,7 @@ data class AppState(
     val preferences: AppPreferences = AppPreferences(),
     val knowledge: List<BackgroundKnowledge> = emptyList(),
     val history: List<TranscriptRecord> = emptyList(),
+    val meetingCosts: List<MeetingUsage> = emptyList(),
     val current: TranscriptRecord? = null,
     val phase: ConnectionPhase = ConnectionPhase.IDLE,
     val speaker: String = "未標記",
@@ -63,6 +64,8 @@ class AppController(
             val preferences = if (sourceRemoved) storedPreferences.copy(audioSource = AudioSource.MICROPHONE) else storedPreferences
             val knowledge = repository.knowledge()
             val history = repository.history()
+            val costs = (repository.meetingUsage() + history.mapNotNull { it.usage?.copy(title = it.title) })
+                .associateBy { it.id }.values.sortedByDescending { it.startedAtMs }
             val connection = preferences.connection()
             var setupMessage: String? = if (sourceRemoved) "Teams 音源已移除，已改選麥克風。請在開始前確認音源；既有逐字稿會保留。" else null
             apiKey = if (connection.validationError() == null) {
@@ -83,6 +86,7 @@ class AppController(
                 preferences = preferences,
                 knowledge = knowledge,
                 history = history,
+                meetingCosts = costs,
                 hasApiKey = apiKey.isNotBlank(),
                 message = setupMessage,
             )
@@ -328,7 +332,11 @@ class AppController(
             inform("此轉錄方案需設定文字翻譯模型；請到設定選擇 GPT-6 Luna 或其他文字模型。"); return
         }
         val now = services.currentTimeMillis()
-        val record = TranscriptRecord(services.uniqueId(), "${settings.sourceLanguage.label} → ${settings.targetLanguage.label}", now, settings)
+        val id = services.uniqueId()
+        val title = "${settings.sourceLanguage.label} → ${settings.targetLanguage.label}"
+        val rates = snapshot.preferences.costRateOverrides[connection.costRateKey()] ?: connection.defaultCostRates()
+        val record = TranscriptRecord(id, title, now, settings, usage = MeetingUsage(id, title, now,
+            connection.provider, connection.deployment, connection.textDeployment, rates))
         try { repository.saveTranscript(record) }
         catch (_: Exception) { inform("無法建立逐字稿，尚未開始收音。請確認儲存空間。"); return }
         val queue = Channel<ByteArray>(capacity = 30)
@@ -336,7 +344,7 @@ class AppController(
         sessionFailure = null
         val paragraphModel = snapshot.preferences.paragraphModel().takeIf { snapshot.preferences.aiParagraphs }.orEmpty()
         mutable.value = snapshot.copy(phase = ConnectionPhase.CONNECTING, current = record, transcriptSaved = true,
-            history = listOf(record) + snapshot.history, message = null, lastConnectionReport = null, showReportInMessage = false,
+            history = listOf(record) + snapshot.history, meetingCosts = listOf(record.usage!!) + snapshot.meetingCosts, message = null, lastConnectionReport = null, showReportInMessage = false,
             paragraphStatus = if (paragraphModel.isBlank()) "基本分段；AI 語意分段可至設定指定文字模型。" else "AI 語意分段：等待可分段內容",
             audioInputStatus = AudioInputStatus(), streamNotice = null, sessionIssue = null)
         sessionJob = scope.launch {
@@ -355,6 +363,7 @@ class AppController(
                 } catch (failure: Exception) {
                     throw TranslationFailure((failure as? AudioCaptureFailure)?.message ?: "無法準備背景翻譯音源。請在 App 前景開始，並允許所需的錄音或音訊擷取授權。")
                 }
+                transport.setUsageListener { sample -> recordUsage(record.id, sample) }
                 transport.run(connection, sessionApiKey, settings, queue,
                     onReady = {
                         ensureActive()
@@ -445,6 +454,12 @@ class AppController(
                     if (sessionFailure == null && paragraphModel.isNotBlank())
                         formatParagraphs(record.id, connection, sessionApiKey, paragraphModel, final = true)
                 }
+                transport.setUsageListener {}
+                paragraphFormatter?.setUsageListener {}
+                mutable.value.current?.takeIf { it.id == record.id }?.let { current ->
+                    replaceRecord(current.copy(usage = current.usage?.copy(endedAtMs = services.currentTimeMillis())))
+                    if (current.usage?.samples?.isNotEmpty() == true) mutable.value = mutable.value.copy(transcriptSaved = false)
+                }
                 val latest = mutable.value.current?.takeIf { it.id == record.id }
                 // A cancelled periodic formatter can leave a newer in-memory layout after a fragment
                 // write marked the transcript saved. Flush received text after joining it; an empty,
@@ -474,6 +489,52 @@ class AppController(
         }
     }
 
+    private suspend fun recordUsage(id: String, sample: UsageSample) {
+        val current = mutable.value.current?.takeIf { it.id == id } ?: return
+        val usage = current.usage ?: return
+        replaceRecord(current.copy(usage = usage.update(sample)))
+        mutable.value = mutable.value.copy(transcriptSaved = false)
+        try {
+            persistCurrentTranscript(id)
+            mutable.value = mutable.value.copy(transcriptSaved = true)
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { throw TranslationFailure("用量無法儲存，請確認裝置儲存空間。") }
+    }
+
+    fun costRates(): CostRates {
+        val connection = mutable.value.preferences.connection()
+        return if (connection.validationError() == null)
+            mutable.value.preferences.costRateOverrides[connection.costRateKey()] ?: connection.defaultCostRates()
+        else connection.defaultCostRates()
+    }
+
+    fun saveCostRates(rates: CostRates, meetingId: String? = null): Boolean {
+        if (mutable.value.busy || !mutable.value.storageAvailable || !rates.valid()) return false
+        val edited = rates.copy(note = "使用者設定費率", checkedDate = taipeiDate(services.currentTimeMillis()))
+        return try {
+            if (meetingId == null) {
+                val connection = mutable.value.preferences.connection()
+                connection.validationError()?.let { inform("請先完成連線設定。$it"); return false }
+                val preferences = mutable.value.preferences.copy(costRateOverrides =
+                    mutable.value.preferences.costRateOverrides + (connection.costRateKey() to edited))
+                repository.savePreferences(preferences)
+                mutable.value = mutable.value.copy(preferences = preferences)
+            } else {
+                val meeting = mutable.value.meetingCosts.find { it.id == meetingId } ?: return false
+                val updated = meeting.copy(rates = edited)
+                val transcript = mutable.value.history.find { it.id == meetingId }
+                if (transcript != null) {
+                    val next = transcript.copy(usage = updated)
+                    repository.saveTranscript(next); replaceRecord(next)
+                } else {
+                    repository.saveMeetingUsage(updated)
+                    mutable.value = mutable.value.copy(meetingCosts = mutable.value.meetingCosts.map { if (it.id == meetingId) updated else it })
+                }
+            }
+            true
+        } catch (_: Exception) { inform("費率無法儲存，請確認裝置儲存空間。"); false }
+    }
+
     private suspend fun persistCurrentTranscript(id: String) = transcriptWrites.withLock {
         val latest = mutable.value.current?.takeIf { it.id == id } ?: return@withLock
         withContext(Dispatchers.Default) { repository.saveTranscript(latest) }
@@ -489,6 +550,7 @@ class AppController(
         try {
             mutable.value = mutable.value.copy(paragraphStatus = "AI 正在整理標點與段落…")
             val formatter = paragraphFormatter ?: HttpParagraphFormatter(services.createHttpClient()).also { paragraphFormatter = it }
+            formatter.setUsageListener { sample -> recordUsage(id, sample) }
             val layouts = withTimeout(22_000) {
                 if (final) formatter.finish(connection, key, model, snapshot) else formatter.format(connection, key, model, snapshot)
             }
@@ -553,6 +615,9 @@ class AppController(
     private fun replaceRecord(record: TranscriptRecord) {
         mutable.value = mutable.value.copy(
             current = if (mutable.value.current?.id == record.id) record else mutable.value.current,
+            meetingCosts = record.usage?.let { usage ->
+                (mutable.value.meetingCosts.filterNot { it.id == record.id } + usage.copy(title = record.title)).sortedByDescending { it.startedAtMs }
+            } ?: mutable.value.meetingCosts,
             history = mutable.value.history.map { if (it.id == record.id) record else it },
         )
     }

@@ -34,6 +34,10 @@ object SubtitleExporter {
             val full = record.fragments.filter { it.channel == channel }.sortedBy { it.startMs }.joinToString("") { it.text }
             appendLine(if (channel == TranscriptChannel.INPUT) "【原文・閱讀段落】" else "【譯文・閱讀段落】")
             appendLine(paragraphText(record.localizedText(full, channel), record.paragraphLayouts.find { it.channel == channel }))
+            if (channel == TranscriptChannel.OUTPUT) {
+                val supplement = record.translationSupplementText()
+                if (supplement.isNotBlank()) { appendLine(); appendLine(supplementReadingText(supplement)) }
+            }
             appendLine()
         }
         appendLine("【時間戳明細】")
@@ -50,6 +54,9 @@ object SubtitleExporter {
             append("[${timestamp(fragment.startMs, '.')} → ${timestamp(fragment.endMs, '.')}] [$channel]")
             speaker?.let { append(" [手動：$it]") }
             appendLine(" ${cleanText(localizedFragments.getValue(fragment.id))}")
+        }
+        record.translationSupplements().forEach { fragment ->
+            appendLine("[${timestamp(fragment.startMs, '.')} → ${timestamp(fragment.endMs, '.')}] [$TRANSLATION_SUPPLEMENT_LABEL・原文時間] ${cleanText(fragment.text)}")
         }
     }.trimEnd() + "\n"
 
@@ -79,7 +86,18 @@ object SubtitleExporter {
         }
         // Keep whitespace deltas while grouping, but don't export a cue with no content.
         val texts = record.localizedChunks(result.map { it.text }, channel)
-        return result.mapIndexed { index, cue -> cue.copy(text = texts[index]) }.filter { cleanText(it.text).isNotBlank() }
+        .map { it.replace("\r\n", "\n").replace('\r', '\n') }
+        val joined = texts.joinToString("")
+        val layout = alignedSourceLayout(joined, record.paragraphLayouts.find { it.channel == channel })
+        var offset = 0
+        val actual = result.mapIndexed { index, cue ->
+            val end = offset + texts[index].length
+            cue.copy(text = formattedSourceSlice(joined, layout, offset, end)).also { offset = end }
+        }.filter { cleanText(it.text).isNotBlank() }
+        val supplements = if (channel == TranscriptChannel.OUTPUT) record.translationSupplements().map {
+            Cue(it.startMs, it.endMs, supplementReadingText(it.text), null)
+        } else emptyList()
+        return (actual + supplements).sortedBy { it.startMs }
     }
 
     private fun cueText(cue: Cue): String {

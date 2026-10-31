@@ -25,6 +25,7 @@ data class AppPreferences(
     val foundrySourceTranscript: String = "",
     val openaiSourceTranscript: String = "gpt-realtime-whisper",
     val modelSettingsVersion: Int = 1,
+    val savedModelChoices: List<SavedModelChoice> = emptyList(),
     val aiParagraphs: Boolean = true,
     val audioSource: AudioSource = AudioSource.MICROPHONE,
 )

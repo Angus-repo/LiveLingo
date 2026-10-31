@@ -162,9 +162,10 @@ class AppController(
             foundryTextKind = connection.textModelKind, foundrySourceTranscript = connection.sourceTranscriptionModel)
         return try {
             repository.saveApiKey(canonicalEndpoint, resolved.apiKey)
-            repository.savePreferences(preferences)
+            val withChoices = preferences.copy(savedModelChoices = current.rememberModelChoices(connection))
+            repository.savePreferences(withChoices)
             apiKey = resolved.apiKey
-            mutable.value = mutable.value.copy(preferences = preferences, hasApiKey = true, message = "${connection.provider.label} 連線設定已儲存。", showReportInMessage = false)
+            mutable.value = mutable.value.copy(preferences = withChoices, hasApiKey = true, message = "${connection.provider.label} 連線設定已儲存。", showReportInMessage = false)
             true
         } catch (_: Exception) {
             // Reconcile with the encrypted destination binding; never send a newly stored key to an old endpoint.
@@ -378,7 +379,7 @@ class AppController(
                         listeningStarted = true
                         if (paragraphModel.isNotBlank()) paragraphJob = scope.launch {
                             while (isActive && mutable.value.current?.id == record.id && mutable.value.active) {
-                                delay(20_000)
+                                delay(8_000)
                                 formatParagraphs(record.id, connection, sessionApiKey, paragraphModel)
                             }
                         }
@@ -442,7 +443,7 @@ class AppController(
                     paragraphJob?.cancelAndJoin()
                     paragraphJob = null
                     if (sessionFailure == null && paragraphModel.isNotBlank())
-                        formatParagraphs(record.id, connection, sessionApiKey, paragraphModel)
+                        formatParagraphs(record.id, connection, sessionApiKey, paragraphModel, final = true)
                 }
                 val latest = mutable.value.current?.takeIf { it.id == record.id }
                 // A cancelled periodic formatter can leave a newer in-memory layout after a fragment
@@ -478,23 +479,28 @@ class AppController(
         withContext(Dispatchers.Default) { repository.saveTranscript(latest) }
     }
 
-    private suspend fun formatParagraphs(id: String, connection: FoundryConnection, key: String, model: String) {
+    private suspend fun formatParagraphs(id: String, connection: FoundryConnection, key: String, model: String, final: Boolean = false) {
         val snapshot = mutable.value.current?.takeIf { it.id == id } ?: return
-        val windows = paragraphWindows(snapshot)
+        val windows = paragraphWindows(snapshot, final)
         if (windows.isEmpty() || windows.all { currentParagraphLayout(snapshot, it) != null }) {
             mutable.value = mutable.value.copy(paragraphStatus = paragraphProgress(snapshot))
             return
         }
         try {
-            mutable.value = mutable.value.copy(paragraphStatus = "AI 正在整理段落…")
+            mutable.value = mutable.value.copy(paragraphStatus = "AI 正在整理標點與段落…")
             val formatter = paragraphFormatter ?: HttpParagraphFormatter(services.createHttpClient()).also { paragraphFormatter = it }
-            val layouts = withTimeout(22_000) { formatter.format(connection, key, model, snapshot) }
+            val layouts = withTimeout(22_000) {
+                if (final) formatter.finish(connection, key, model, snapshot) else formatter.format(connection, key, model, snapshot)
+            }
             val latest = mutable.value.current?.takeIf { it.id == id } ?: return
             val accepted = layouts.filter { layout ->
                 val originalReference = layout.originalReference
-                val validBoundaries = paragraphCandidateEnds(layout.source).toSet()
+                val window = windows.find { it.channel == layout.channel && it.source == layout.source }
+                val validBoundaries = paragraphCandidateEnds(layout.source).toSet() + layout.punctuation.map { it.offset } +
+                    window?.existingBreakIds().orEmpty().mapNotNull { window?.ends?.getOrNull(it - 1) }
                 captionSourceText(latest, layout.channel).startsWith(layout.source) &&
-                    windows.any { it.channel == layout.channel && it.source == layout.source } &&
+                    window != null && validPunctuation(layout.source, layout.punctuation, layout.finalized) &&
+                    (!layout.finalized || final) &&
                     layout.breakOffsets.all { it in validBoundaries } &&
                     (layout.channel != TranscriptChannel.OUTPUT ||
                         (originalReference == windows.find { it.channel == TranscriptChannel.INPUT }?.source &&
@@ -509,10 +515,12 @@ class AppController(
             persistCurrentTranscript(id)
             mutable.value = mutable.value.copy(paragraphStatus = paragraphProgress(mutable.value.current!!), transcriptSaved = true)
         } catch (_: TimeoutCancellationException) {
-            mutable.value = mutable.value.copy(paragraphStatus = "AI 分段逾時，暫以基本分段顯示。")
+            mutable.value = mutable.value.copy(paragraphStatus = "AI 標點與分段逾時，先保留已收到的字幕。")
         } catch (cancelled: CancellationException) { throw cancelled }
-        catch (_: Exception) {
-            mutable.value = mutable.value.copy(paragraphStatus = "AI 分段暫時無法使用，請檢查設定的文字模型與配額；字幕仍持續更新。")
+        catch (failure: Exception) {
+            val reason = (failure as? TranslationFailure)?.message?.let { safeDiagnosticField(it, key) }
+                ?: "請檢查文字模型與配額"
+            mutable.value = mutable.value.copy(paragraphStatus = "AI 標點與分段暫時無法使用：$reason；仍顯示原始字幕。")
         }
     }
 

@@ -22,7 +22,18 @@ internal fun displayCues(record: TranscriptRecord?, channel: TranscriptChannel):
         }
     }
     val texts = record?.localizedChunks(result.map { it.text }, channel).orEmpty()
-    return result.mapIndexed { index, cue -> cue.copy(text = texts[index]) }.filter { it.text.isNotBlank() }
+        .map { it.replace("\r\n", "\n").replace('\r', '\n') }
+    val joined = texts.joinToString("")
+    val layout = alignedSourceLayout(joined, record?.paragraphLayouts?.find { it.channel == channel })
+    var offset = 0
+    val actual = result.mapIndexed { index, cue ->
+        val end = offset + texts[index].length
+        cue.copy(text = formattedSourceSlice(joined, layout, offset, end)).also { offset = end }
+    }.filter { it.text.isNotBlank() }
+    val supplements = if (channel == TranscriptChannel.OUTPUT) record?.translationSupplements().orEmpty().map {
+        DisplayCue(listOf(it.id), it.startMs, it.endMs, supplementReadingText(it.text), null)
+    } else emptyList()
+    return (actual + supplements).sortedBy { it.start }
 }
 
 
@@ -33,7 +44,9 @@ internal fun displayCues(record: TranscriptRecord?, channel: TranscriptChannel):
  */
 internal fun liveCaptionText(record: TranscriptRecord?, channel: TranscriptChannel): String {
     val text = captionSourceText(record, channel)
-    return paragraphText(text, record?.paragraphLayouts?.find { it.channel == channel })
+    val formatted = paragraphText(text, record?.paragraphLayouts?.find { it.channel == channel })
+    val supplement = if (channel == TranscriptChannel.OUTPUT) record?.translationSupplementText().orEmpty() else ""
+    return listOf(formatted, supplementReadingText(supplement)).filter { it.isNotBlank() }.joinToString("\n\n")
 }
 
 internal fun captionSourceText(record: TranscriptRecord?, channel: TranscriptChannel): String {

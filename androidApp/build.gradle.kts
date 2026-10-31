@@ -14,8 +14,8 @@ android {
         applicationId = "app.livelingo.android"
         minSdk = 26
         targetSdk = 36
-        versionCode = 9
-        versionName = "0.1.8"
+        versionCode = 12
+        versionName = "0.1.11"
     }
     buildFeatures { compose = true }
     if (!releaseStore.isNullOrBlank()) {

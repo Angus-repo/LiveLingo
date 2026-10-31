@@ -46,6 +46,7 @@ data class SessionSettings(
     val quality: TranslationQuality = TranslationQuality.FAITHFUL,
     val provider: ModelProvider = ModelProvider.FOUNDRY,
     val audioSource: AudioSource = AudioSource.MICROPHONE,
+    val speechModel: SpeechModel = SpeechModel.GPT_LIVE,
 )
 
 /** Shared by the mobile UI and trusted relay; do not rely on UI-only validation. */
@@ -97,7 +98,14 @@ data class TranscriptRecord(
 
 /** Breaks are character offsets into an exact source snapshot. No model-rewritten text is stored. */
 @Serializable
-data class ParagraphLayout(val channel: TranscriptChannel, val source: String, val breakOffsets: List<Int>)
+data class ParagraphLayout(
+    val channel: TranscriptChannel,
+    val source: String,
+    val breakOffsets: List<Int>,
+    val replaceExistingBreaks: Boolean = false,
+    val originalReference: String? = null,
+    val awaitingSourceAlignment: Boolean = false,
+)
 
 internal fun Char.isUnsafeControl(): Boolean =
     (code < 0x20 && this != '\n' && this != '\r' && this != '\t') || code == 0x7f

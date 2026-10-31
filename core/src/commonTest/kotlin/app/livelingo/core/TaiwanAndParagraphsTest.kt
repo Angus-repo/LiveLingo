@@ -3,6 +3,44 @@ package app.livelingo.core
 import kotlin.test.*
 
 class TaiwanAndParagraphsTest {
+    @Test fun acceptedReflowReplacesOldBreaksButPreservesWordsNumbersAndNewTail() {
+        val source = "金額1,234.56美元。\n\n核對完成。\n接著討論部署。"
+        val end = source.indexOf("核對完成。") + "核對完成。".length
+        val layout = ParagraphLayout(TranscriptChannel.OUTPUT, source, listOf(end), replaceExistingBreaks = true)
+        val tail = "\n\n新抵達的尾段\n保留換行"
+        val formatted = paragraphText(source + tail, layout)
+        assertEquals("金額1,234.56美元。 核對完成。\n\n接著討論部署。" + tail, formatted)
+        assertEquals((source + tail).filterNot(Char::isWhitespace), formatted.filterNot(Char::isWhitespace))
+        assertEquals("金額1,234.56美元。 核對完成。 接著討論部署。", paragraphText(source, layout.copy(breakOffsets = emptyList())))
+    }
+
+    @Test fun legacyLayoutsDoNotRemoveExistingNewlines() {
+        val layout = WireJson.decodeFromString(ParagraphLayout.serializer(), """{"channel":"OUTPUT","source":"第一句。\n\n第二句。","breakOffsets":[]}""")
+        assertTrue('\n' in layout.source)
+        assertFalse(layout.replaceExistingBreaks)
+        assertNull(layout.originalReference)
+        assertEquals(layout.source, paragraphText(layout.source, layout))
+    }
+
+    @Test fun paragraphCandidatesProtectNumbersQuotesAndParentheses() {
+        val text = "營收1,234.56美元，印度1,00,000盧比，舉例“Peter，Peter”，備註（甲，乙）；下一個主題\n再談計畫"
+        val ends = paragraphCandidateEnds(text)
+        assertEquals(listOf("營收1,234.56美元，", "印度1,00,000盧比，", "舉例“Peter，Peter”，", "備註（甲，乙）；", "下一個主題\n"),
+            ends.mapIndexed { i, end -> text.substring(ends.getOrNull(i - 1) ?: 0, end) })
+        assertEquals(emptyList(), paragraphCandidateEnds("1,234.56 1,00,000 4.95 2026.10.31"))
+        assertEquals(listOf(7, 10), paragraphCandidateEnds("\"a, b\", x, y"))
+    }
+
+    @Test fun aiClauseBreakOnlyAddsWhitespaceAndDoesNotForceEveryCommaToNewLine() {
+        val text = "先核對1,234.56美元，這是第一個主題，接著討論部署，最後確認時間"
+        assertEquals(text, paragraphText(text))
+        val boundary = text.indexOf("接著討論")
+        val formatted = paragraphText(text, ParagraphLayout(TranscriptChannel.OUTPUT, text, listOf(boundary)))
+        assertTrue("主題，\n\n接著" in formatted)
+        assertEquals(text, formatted.replace("\n\n", ""))
+        assertTrue("1,234.56" in formatted)
+    }
+
     @Test fun numericCommasSurviveSeparateSubtitleCuesAndTimestampDetails() {
         val record = TranscriptRecord("r", "x", 0, SessionSettings(), listOf(
             TranscriptFragment("a", TranscriptChannel.OUTPUT, 0, 100, "收入1,"),

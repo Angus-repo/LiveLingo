@@ -305,6 +305,27 @@ class AppLogicTest {
         controller.dispose()
     }
 
+    @Test fun stoppingPersistsCachedParagraphsEvenIfLastSavedSnapshotIsOlder() = runTest {
+        val services = configuredServices()
+        val transport = FakeTransport()
+        val formatter = object : ParagraphFormatter {
+            override suspend fun format(connection: FoundryConnection, apiKey: String, model: String, record: TranscriptRecord) =
+                parseParagraphLayouts("""{"output":[2]}""", paragraphWindows(record), record.paragraphLayouts)
+        }
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler), formatter)
+        controller.start(); runCurrent()
+        transport.receiver!!(TranscriptDelta(TranscriptChannel.OUTPUT, "第一句。第二句。第三句。", 0, 1500))
+        val formatted = controller.state.first { it.paragraphStatus == "譯文：已分段" }.current!!
+        // Reproduce an older fragment snapshot winning the previous write before stop cancels formatting.
+        AppRepository(services.memory).saveTranscript(formatted.copy(paragraphLayouts = emptyList()))
+        assertTrue(controller.state.value.transcriptSaved)
+        controller.stop(); controller.state.first { it.phase == ConnectionPhase.IDLE }
+        val restored = AppRepository(services.memory).history().single()
+        assertEquals(formatted.paragraphLayouts, restored.paragraphLayouts)
+        assertEquals(formatted.fragments, restored.fragments)
+        controller.dispose()
+    }
+
     @Test fun paragraphServiceFailureDoesNotLoseTranscriptOrFailTranslation() = runTest {
         val services = configuredServices()
         val transport = FakeTransport()
@@ -746,6 +767,70 @@ class AppLogicTest {
         assertEquals(0, services.mic.starts)
         controller.clearApiKey()
         assertFalse(controller.state.value.showReportInMessage)
+        controller.dispose()
+    }
+
+    @Test fun changingVoiceProtocolKeepsStoredKeyAndProbingDraftDoesNotSaveIt() = runTest {
+        val services = configuredServices(); val transport = FakeTransport()
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
+        controller.testConnection("https://example.openai.azure.com", "my-transcribe", "", SpeechModel.LIVE_TRANSCRIBE, TextModel.GPT6_LUNA, "my-luna")
+        runCurrent()
+        assertEquals(SpeechModel.LIVE_TRANSCRIBE, transport.probeConnections.single().speechModel)
+        assertEquals("my-luna", transport.probeConnections.single().textDeployment)
+        assertEquals("short-key", transport.probeKeys.single())
+        assertEquals(SpeechModel.GPT_LIVE, AppRepository(services.memory).preferences().foundrySpeechKind)
+        assertEquals(0, services.mic.starts)
+        assertTrue(controller.saveConnection("https://example.openai.azure.com", "my-translate", "", "my-luna", SpeechModel.REALTIME_TRANSLATE, TextModel.GPT6_LUNA, "my-whisper"))
+        controller.selectKnowledge("banking")
+        controller.start(); runCurrent()
+        assertEquals("short-key", transport.keys.single())
+        assertEquals(SpeechModel.REALTIME_TRANSLATE, transport.connections.single().speechModel)
+        assertEquals("my-whisper", transport.connections.single().sourceTranscriptionModel)
+        assertNull(transport.sessionSettings.single().knowledge)
+        assertEquals(Language.AUTO, transport.sessionSettings.single().sourceLanguage)
+        controller.stop(); runCurrent(); controller.dispose()
+    }
+
+    @Test fun transcriptionWithoutTextDeploymentDoesNotStartCapture() = runTest {
+        val services = configuredServices(); val transport = FakeTransport()
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
+        assertTrue(controller.saveConnection("https://example.openai.azure.com", "my-transcribe", "", "", SpeechModel.LIVE_TRANSCRIBE, TextModel.GPT6_LUNA))
+        controller.start(); runCurrent()
+        assertEquals(0, transport.starts); assertEquals(0, services.mic.starts)
+        assertTrue("文字翻譯模型" in controller.state.value.message.orEmpty())
+        assertTrue(AppRepository(services.memory).history().isEmpty())
+        controller.dispose()
+    }
+
+    @Test fun finalFormattingAppliesCommaBoundariesToBothTracksAndReportsEachResult() = runTest {
+        val services = configuredServices(); val transport = FakeTransport()
+        var formattedBothTracks = false
+        val formatter = object : ParagraphFormatter {
+            override suspend fun format(connection: FoundryConnection, apiKey: String, model: String, record: TranscriptRecord): List<ParagraphLayout> {
+                val windows = paragraphWindows(record)
+                // The periodic job may run between the input and output deltas while storage suspends.
+                formattedBothTracks = formattedBothTracks || windows.map { it.channel }.toSet() == TranscriptChannel.entries.toSet()
+                assertEquals("gpt-6-luna", model)
+                val tracks = windows.joinToString { window ->
+                    "\"${window.key}\":[${if (window.channel == TranscriptChannel.INPUT) 1 else 2}]"
+                }
+                val alignment = if (windows.size == 2) ",\"alignment\":[{\"input\":1,\"output\":2}]" else ""
+                val response = "{$tracks$alignment}"
+                return parseParagraphLayouts(response, windows, record.paragraphLayouts)
+            }
+        }
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler), formatter)
+        controller.start(); runCurrent()
+        transport.receiver!!(TranscriptDelta(TranscriptChannel.INPUT, "Check 1,234.56 dollars. Then discuss deployment. Final step.", 0, 3000))
+        val raw = "先核對1,234.56美元，完成第一項，接著討論部署，最後確認時間"
+        transport.receiver!!(TranscriptDelta(TranscriptChannel.OUTPUT, raw, 0, 3000))
+        controller.stop(); controller.state.first { it.phase == ConnectionPhase.IDLE }
+        assertTrue(formattedBothTracks, "The final request must include the comma-only translation and original")
+        val saved = AppRepository(services.memory).history().single()
+        assertTrue("第一項，\n\n接著討論" in liveCaptionText(saved, TranscriptChannel.OUTPUT))
+        assertEquals(raw, saved.fragments.last().text)
+        assertEquals(3000L, saved.fragments.last().endMs)
+        assertEquals("原文：已分段；譯文：依原文分段", controller.state.value.paragraphStatus)
         controller.dispose()
     }
 

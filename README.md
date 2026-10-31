@@ -1,6 +1,6 @@
 # 即時譯 LiveLingo
 
-使用 Kotlin Multiplatform + Compose Multiplatform 的 Android／iOS 即時字幕翻譯 App。**0.1.9 加入語音與文字模型下拉選單，依模型使用不同串流協定；AI 分段預設 GPT-6 Luna。可用 Microsoft Foundry 或 OpenAI，由 App 直接連線，不需自架後端。**
+使用 Kotlin Multiplatform + Compose Multiplatform 的 Android／iOS 即時字幕翻譯 App。**0.1.10 修正只有逗號的譯文未進入 AI 分段，模型選單加入費用，右上角顯示版本。語音模型依類型使用不同串流協定，文字模型預設 GPT-6 Luna；可用 Microsoft Foundry 或 OpenAI，由 App 直接連線，不需自架後端。**
 
 API key 由使用者自行輸入，Android 以 Keystore 保護加密金鑰並加密保存，iOS 以 Keychain 保存。原始碼、APK、逐字稿匯出及一般設定均不內建或保存明文 API key。
 
@@ -28,6 +28,37 @@ API key 由使用者自行輸入，Android 以 Keystore 保護加密金鑰並加
 「自動」是來源語言偵測，目標語言需明確選定。印度英文是口音與慣用語提示，並非另一個保證準確的辨識引擎。繁體中文使用台灣用語。
 
 本版顯示字幕，不播放合成譯音。直接口譯模型仍可能在服務端產生語音，App 使用其輸出逐字稿作為譯文，仍會有模型使用量。
+
+## 0.1.10 分段修正、費用與版本
+
+原先只有句號、問號及驚嘆號能進入 AI 分段，因此「英文有句號、中文譯文只有逗號」時會只整理原文，畫面卻顯示全部完成。現在也將引號、括號及數字之外的逗號、分號與既有換行列為候選位置，由 AI 依雙語上下文選擇適合的語意轉折；不會每個逗號都強制換段。末尾尚未完成的文字只作參考，內容變動後重新判斷。
+
+AI 仍只能回傳候選編號，不能改字、改數值或重譯。原文、譯文分別顯示「已分段」、「AI 判斷維持單段」或等待狀態，不把略過的譯文當作成功。分段結果保存在逐字稿並用於歷史閱讀與 TXT；原始片段、時間戳不改動。此修正解決 App 漏送譯文的問題，尚未以真實 Luna／Mini 回應比較語意品質。
+
+右上角在所有分頁顯示 `v0.1.10`，設定頁與診斷共用同一版本文字；Android versionCode 為 `11`，iOS 版號同步。
+
+### 模型費用
+
+下拉選項及選取後的欄位都顯示價格、美元幣別與單位；另有查核日期與官方來源。以下為 **2026-10-31 公開參考價**，不是帳號帳單或即時估價。文字價格採 Standard／Global Standard 短上下文，未套用快取或批次折扣；實際費率受部署區域、方案與合約影響。
+
+| 語音模型 | OpenAI | Microsoft Foundry |
+| --- | --- | --- |
+| GPT-Live 1 | US$0.05／會話分鐘，包含靜音 | Azure 費率待確認；另標 OpenAI 參考價，不能當作 Azure 報價 |
+| GPT Realtime Translate | US$0.034／音訊分鐘 | US$2.04／音訊小時 |
+| GPT Live Transcribe | US$0.017／音訊分鐘 | US$1.02／音訊小時 |
+| MAI Transcribe 2 Streaming | 不提供 | US$0.54／音訊小時，公開優惠價 |
+
+| 文字模型 | OpenAI 輸入／輸出，每百萬 token | Foundry 輸入／輸出，每百萬 token |
+| --- | --- | --- |
+| GPT-6 Luna | US$0.10／US$0.50 | US$0.10／US$0.50 |
+| GPT-5.4 Mini | US$0.75／US$4.50 | US$0.75／US$4.50 |
+| GPT-6.1 Sol | US$2.00／US$10.00 | US$2.00／US$10.00 |
+| GPT-4.1 Mini | US$0.40／US$1.60 | Azure 費率待確認；另標 OpenAI 參考價 |
+| 自訂 | 依實際模型報價 | 依實際部署報價 |
+
+語音價格不含 AI 分段。轉錄方案另加文字翻譯；Realtime Translate 的額外原文轉錄另計，OpenAI GPT Realtime Whisper 為 US$0.017／音訊分鐘。GPT-Live 的後端模型及工具另計。Azure 未確認的價格不填零元，也不直接沿用 OpenAI 費率。
+
+費用依據：[OpenAI 定價](https://developers.openai.com/api/docs/pricing)、[5.4 Mini](https://developers.openai.com/api/docs/models/gpt-5.4-mini)、[4.1 Mini](https://developers.openai.com/api/docs/models/gpt-4.1-mini)、[Foundry Luna](https://azure.microsoft.com/en-us/blog/gpt-6-astra-sol-and-luna-for-production-agents-in-microsoft-foundry/)、[Foundry 5.4 Mini](https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/introducing-openai%E2%80%99s-gpt-5-4-mini-and-gpt-5-4-nano-for-low-latency-ai/4500569)、[Foundry 6.1 Sol](https://devblogs.microsoft.com/foundry/whats-new-in-microsoft-foundry-september-2026/)、[Foundry Realtime Translate](https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/a-new-chapter-for-realtime-ai-reasoning-translation-and-real-time-transcription/4517124)、[Foundry Live Transcribe](https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/introducing-gpt-transcribe-and-gpt-live-transcribe-in-microsoft-foundry/4541740)、[MAI Streaming](https://microsoft.ai/models/mai-transcribe-2/)。Azure 最新部署價格請核對[官方定價](https://azure.microsoft.com/en-us/pricing/details/azure-openai/)。
 
 ## 0.1.9 模型選擇與請求格式
 
@@ -138,7 +169,7 @@ Android 公開 AudioPlaybackCapture 只允許 `USAGE_MEDIA`、`USAGE_GAME`、`US
 - 設定可選 Microsoft Foundry／OpenAI，兩者模型名稱與加密 API key 獨立保存。切換不會刪除另一服務的設定；舊版 Foundry 設定自動沿用，工作階段中不可切換服務。
 - OpenAI 預設 `gpt-live-1`，使用官方 `wss://api.openai.com/v1/live/sessions` 與 Bearer 認證。Foundry 使用資源 `/openai/v1/live/sessions` 與 `api-key` 標頭。兩者皆為 GPT-Live 協定，不是一般 Realtime 模型。
 
-### AI 分段設定（0.1.9 更新）
+### AI 分段設定（0.1.10 更新）
 
 設定開啟「AI 語意分段」，填入相容 Chat Completions 與 JSON object 的**文字模型**後儲存：
 
@@ -149,7 +180,7 @@ Android 公開 AudioPlaybackCapture 只允許 `USAGE_MEDIA`、`USAGE_GAME`、`US
 
 GPT-Live 是語音模型，不能填在 AI 分段文字模型欄。分段只將字幕送至所選服務，使用該服務金鑰，另計文字模型用量。
 
-約每 20 秒與停止時，將每個軌道最近最多 40 個完整句子、約 6,000 字元送出。AI 只回傳「哪些句子之後換段」的編號；App 驗證編號後插入空白行，不接受模型改寫原文、數字或譯文。尚未完成的句子立即顯示，後續再整理。保留既有模型換行；沒有設定、暫時失敗或尚未完成 AI 判斷時，先以 2–3 句的基本分段顯示，畫面明示狀態。
+約每 20 秒與停止時，將每個軌道最近最多 40 個句子／分句單位、約 6,000 字元送出，另附最多 1,000 字元的未完成尾段作為參考。AI 只回傳「哪些單位之後換段」的編號；App 驗證編號後插入空白行，不接受模型改寫原文、數字或譯文。尚未完成的文字立即顯示，後續再整理。保留既有模型換行；沒有設定、暫時失敗或尚未完成 AI 判斷時，先以 2–3 句的基本分段顯示，畫面明示狀態。
 
 「測試連線」只測所選語音模型。AI 分段於有字幕時使用，分段失敗不停止錄音或丟棄逐字稿。轉錄方案的文字翻譯另有獨立請求，翻譯失敗會停止本次工作階段並保留原文。AI 段落位置與來源快照一起保存，亂序或新增文字造成快照不符時不套用舊位置。
 

@@ -24,6 +24,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
@@ -81,7 +82,10 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                                 Text("即時譯 · 讓對話跨越語言", style = MaterialTheme.typography.labelMedium, color = Mint, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
                         }
-                        StatusPill(state.phase, state.connectionTesting)
+                        Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Text("v$APP_VERSION", style = MaterialTheme.typography.labelSmall, color = Color(0xFF657971))
+                            StatusPill(state.phase, state.connectionTesting)
+                        }
                     }
                     Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
                         Box(Modifier.widthIn(max = 980.dp).fillMaxSize()) {
@@ -156,19 +160,27 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
     }
 }
 
-@Composable private fun Choice(label: String, selected: String, choices: List<Pair<String, String>>, enabled: Boolean = true, wrapSelection: Boolean = false, onSelect: (String) -> Unit) {
+@Composable private fun Choice(label: String, selected: String, choices: List<Pair<String, String>>, enabled: Boolean = true, wrapSelection: Boolean = false,
+    selectedDetail: String? = null, choiceDetails: Map<String, String> = emptyMap(), onSelect: (String) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
     Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
         Text(label, style = MaterialTheme.typography.labelMedium, color = Color(0xFF657971))
         Box {
             OutlinedButton(onClick = { expanded = true }, enabled = enabled, modifier = Modifier.fillMaxWidth().heightIn(min = if (wrapSelection) 64.dp else 48.dp), shape = RoundedCornerShape(12.dp),
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp)) {
-                Text(selected, modifier = Modifier.weight(1f), maxLines = if (wrapSelection) 3 else 1, overflow = TextOverflow.Ellipsis,
-                    style = MaterialTheme.typography.bodyMedium)
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(selected, maxLines = if (wrapSelection) 3 else 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
+                    selectedDetail?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                }
                 Text("⌄")
             }
             DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                choices.forEach { (id, text) -> DropdownMenuItem(text = { Text(text) }, onClick = { expanded = false; onSelect(id) }) }
+                choices.forEach { (id, text) -> DropdownMenuItem(text = {
+                    Column(Modifier.widthIn(max = 300.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(text)
+                        choiceDetails[id]?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971)) }
+                    }
+                }, onClick = { expanded = false; onSelect(id) }) }
             }
         }
     }
@@ -507,6 +519,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
     var apiKey by remember(provider) { mutableStateOf("") }
     var clearConfirm by remember { mutableStateOf(false) }
     val clipboard = LocalClipboardManager.current
+    val uriHandler = LocalUriHandler.current
     var copiedReport by remember(state.lastConnectionReport) { mutableStateOf(false) }
     val previewConnection = FoundryConnection(endpoint.trim(), deployment.trim(), provider, speechKind, textKind, paragraphModel.trim(), sourceTranscript.trim())
     val webSocketPreview = if (previewConnection.validationError() == null) previewConnection.webSocketUrl() else null
@@ -522,12 +535,16 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
             if (!isOpenAi) OutlinedTextField(endpoint, { endpoint = it }, label = { Text("Azure OpenAI／Foundry 資源端點") }, placeholder = { Text("https://your-resource.openai.azure.com") }, singleLine = true, enabled = !state.busy, modifier = Modifier.fillMaxWidth())
             else Text("OpenAI 官方端點：api.openai.com", style = MaterialTheme.typography.bodySmall, color = Mint)
             Choice("即時語音模型", speechKind.label,
-                SpeechModel.entries.filter { it.supportedBy(provider) }.map { it.name to it.label }, !state.busy, wrapSelection = true) {
+                SpeechModel.entries.filter { it.supportedBy(provider) }.map { it.name to it.label }, !state.busy, wrapSelection = true,
+                selectedDetail = speechKind.price(provider).label,
+                choiceDetails = SpeechModel.entries.filter { it.supportedBy(provider) }.associate { it.name to it.price(provider).label }) {
                 val next = SpeechModel.valueOf(it)
                 if (isOpenAi || deployment.isBlank() || SpeechModel.entries.any { model -> model.modelId == deployment }) deployment = next.modelId
                 speechKind = next
             }
             Text(speechKind.description, style = MaterialTheme.typography.bodySmall)
+            Text(speechKind.price(provider).note, style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971))
+            TextButton(onClick = { runCatching { uriHandler.openUri(speechKind.price(provider).sourceUrl) }.onFailure { controller.inform("無法開啟定價網頁。") } }) { Text("語音費用來源 ↗") }
             OutlinedTextField(deployment, { deployment = it }, label = { Text(if (isOpenAi) "模型 ID" else "實際語音部署名稱") }, placeholder = { Text(speechKind.modelId) }, singleLine = true, enabled = !state.busy, modifier = Modifier.fillMaxWidth())
             Text(if (isOpenAi) "模型 ID 須對應上方模型類型，並可由此 API key 使用。" else "上方選擇部署的基礎模型類型；此欄填入 Foundry 實際部署名稱，可保留自訂名稱。", style = MaterialTheme.typography.bodySmall)
             if (speechKind == SpeechModel.REALTIME_TRANSLATE) {
@@ -546,16 +563,22 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
             }
             if (state.preferences.aiParagraphs || speechKind.transcribes) {
                 Choice(if (speechKind.transcribes) "文字模型（翻譯與 AI 分段）" else "AI 分段文字模型", textKind.label,
-                    TextModel.entries.map { it.name to it.label }, !state.busy, wrapSelection = true) {
+                    TextModel.entries.map { it.name to it.label }, !state.busy, wrapSelection = true,
+                    selectedDetail = textKind.price(provider).label,
+                    choiceDetails = TextModel.entries.associate { it.name to it.price(provider).label }) {
                     val next = TextModel.valueOf(it)
                     if (next != TextModel.CUSTOM && (isOpenAi || paragraphModel.isBlank() || TextModel.infer(paragraphModel) != TextModel.CUSTOM)) paragraphModel = next.modelId
                     textKind = next
                 }
+                Text(textKind.price(provider).note, style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971))
+                TextButton(onClick = { runCatching { uriHandler.openUri(textKind.price(provider).sourceUrl) }.onFailure { controller.inform("無法開啟定價網頁。") } }) { Text("文字費用來源 ↗") }
                 OutlinedTextField(paragraphModel, { paragraphModel = it }, label = { Text(if (isOpenAi) "文字模型 ID" else "實際文字部署名稱") }, placeholder = { Text("gpt-6-luna") }, singleLine = true, enabled = !state.busy, modifier = Modifier.fillMaxWidth())
                 Text(if (isOpenAi) "預設 GPT-6 Luna；依上方類型使用對應的請求參數。" else "預設 GPT-6 Luna；請先在同一資源部署文字模型，填入實際名稱並選擇對應類型。", style = MaterialTheme.typography.bodySmall)
                 if (speechKind.transcribes) Text("每約 3 秒完成一段原文轉錄，再由文字模型翻譯；即使關閉 AI 分段，文字翻譯仍會執行並計費。", style = MaterialTheme.typography.bodySmall)
-                if (state.preferences.aiParagraphs) Text("約每 20 秒與停止時整理原文、譯文的完整句子。AI 只決定段落位置，不改寫內容；失敗時保留基本分段。", style = MaterialTheme.typography.bodySmall)
+                if (state.preferences.aiParagraphs) Text("約每 20 秒與停止時判斷原文、譯文的語意段落，只有逗號的譯文也會處理。AI 只決定換行位置，不改寫內容；失敗時保留基本分段。", style = MaterialTheme.typography.bodySmall)
             }
+            Text("費用為美元公開參考價，查核：$PRICE_CHECKED_DATE；非帳單即時報價。實際費用依用量、部署與合約而定。", style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971))
+            if (!isOpenAi) TextButton(onClick = { runCatching { uriHandler.openUri(FOUNDRY_PRICING_URL) }.onFailure { controller.inform("無法開啟定價網頁。") } }) { Text("查看 Azure 官方定價 ↗") }
             webSocketPreview?.let { preview ->
                 SelectionContainer { Text("實際連線網址：\n$preview", style = MaterialTheme.typography.labelSmall, color = Mint) }
             }
@@ -598,7 +621,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
             Text("Android 開始翻譯後可切換至背景或鎖定螢幕，系統會顯示麥克風前景服務通知及停止操作。來電、音訊中斷、系統強制停止或網路錯誤仍可能中止；iOS 目前需維持前景。", style = MaterialTheme.typography.bodySmall)
             Text("目前提供手動發言者標記，不自動推測多人身分。轉錄模式的字幕時間由音訊區段估算；口譯模式使用串流時間，均非逐字對齊。", style = MaterialTheme.typography.bodySmall)
         } }
-        item { Text("LiveLingo 0.1.9 · Kotlin Multiplatform\nAndroid / iOS · Microsoft Foundry / OpenAI", style = MaterialTheme.typography.labelSmall, color = Color(0xFF657971), modifier = Modifier.padding(6.dp)) }
+        item { Text("LiveLingo $APP_VERSION · Kotlin Multiplatform\nAndroid / iOS · Microsoft Foundry / OpenAI", style = MaterialTheme.typography.labelSmall, color = Color(0xFF657971), modifier = Modifier.padding(6.dp)) }
     }
     if (clearConfirm) ConfirmDelete("移除 ${provider.label} API key？", "只移除目前所選服務的金鑰。", { clearConfirm = false }) { controller.clearApiKey(); clearConfirm = false }
 }

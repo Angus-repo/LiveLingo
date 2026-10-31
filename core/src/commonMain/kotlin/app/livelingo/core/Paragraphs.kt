@@ -14,6 +14,27 @@ fun sentenceEnds(text: String): List<Int> = buildList {
     }
 }
 
+/** Optional AI break positions, not automatic wraps or claims that each clause is a sentence. */
+fun paragraphCandidateEnds(text: String): List<Int> {
+    val candidates = sentenceEnds(text).toMutableSet()
+    val closing = ArrayDeque<Char>()
+    val pairs = mapOf('“' to '”', '‘' to '’', '「' to '」', '『' to '』', '(' to ')', '（' to '）', '[' to ']', '【' to '】', '{' to '}')
+    text.forEachIndexed { i, ch ->
+        when {
+            ch == closing.lastOrNull() -> closing.removeLast()
+            ch == '"' -> closing.addLast('"')
+            ch in pairs -> closing.addLast(pairs.getValue(ch))
+        }
+        val numericComma = ch in ",，" && text.getOrNull(i - 1)?.isDigit() == true && text.getOrNull(i + 1)?.isDigit() == true
+        if (closing.isEmpty() && ((ch in ",，;；" && !numericComma) || ch == '\n')) candidates += i + 1
+    }
+    // Adjacent punctuation/newlines must not become empty reference units.
+    var previous = 0
+    return candidates.sorted().filter { end ->
+        text.substring(previous, end).isNotBlank().also { if (it) previous = end }
+    }
+}
+
 fun paragraphText(text: String, layout: ParagraphLayout? = null): String {
     if (text.isBlank()) return ""
     val normalized = text.replace("\r\n", "\n").replace('\r', '\n')

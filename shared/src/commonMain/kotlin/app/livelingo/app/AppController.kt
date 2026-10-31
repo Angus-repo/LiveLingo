@@ -93,7 +93,7 @@ class AppController(
     }
 
     fun dismissMessage() { mutable.value = mutable.value.copy(message = null, showReportInMessage = false) }
-    private fun inform(message: String) { mutable.value = mutable.value.copy(message = message, showReportInMessage = false) }
+    internal fun inform(message: String) { mutable.value = mutable.value.copy(message = message, showReportInMessage = false) }
 
     fun setLanguages(source: Language, target: Language) {
         if (mutable.value.active || target == Language.AUTO) return
@@ -337,7 +337,7 @@ class AppController(
         val paragraphModel = snapshot.preferences.paragraphModel().takeIf { snapshot.preferences.aiParagraphs }.orEmpty()
         mutable.value = snapshot.copy(phase = ConnectionPhase.CONNECTING, current = record, transcriptSaved = true,
             history = listOf(record) + snapshot.history, message = null, lastConnectionReport = null, showReportInMessage = false,
-            paragraphStatus = if (paragraphModel.isBlank()) "基本分段；AI 語意分段可至設定指定文字模型。" else "AI 語意分段：等待完整句子",
+            paragraphStatus = if (paragraphModel.isBlank()) "基本分段；AI 語意分段可至設定指定文字模型。" else "AI 語意分段：等待可分段內容",
             audioInputStatus = AudioInputStatus(), streamNotice = null, sessionIssue = null)
         sessionJob = scope.launch {
             var listeningStarted = false
@@ -478,7 +478,10 @@ class AppController(
     private suspend fun formatParagraphs(id: String, connection: FoundryConnection, key: String, model: String) {
         val snapshot = mutable.value.current?.takeIf { it.id == id } ?: return
         val windows = paragraphWindows(snapshot)
-        if (windows.isEmpty() || windows.all { w -> snapshot.paragraphLayouts.any { it.channel == w.channel && it.source == w.source } }) return
+        if (windows.isEmpty() || windows.all { w -> snapshot.paragraphLayouts.any { it.channel == w.channel && it.source == w.source } }) {
+            mutable.value = mutable.value.copy(paragraphStatus = paragraphProgress(snapshot))
+            return
+        }
         try {
             mutable.value = mutable.value.copy(paragraphStatus = "AI 正在整理段落…")
             val formatter = paragraphFormatter ?: HttpParagraphFormatter(services.createHttpClient()).also { paragraphFormatter = it }
@@ -486,7 +489,8 @@ class AppController(
             val latest = mutable.value.current?.takeIf { it.id == id } ?: return
             val accepted = layouts.filter { layout ->
                 captionSourceText(latest, layout.channel).startsWith(layout.source) &&
-                    layout.breakOffsets.all { it in sentenceEnds(layout.source) }
+                    windows.any { it.channel == layout.channel && it.source == layout.source } &&
+                    layout.breakOffsets.all { it in paragraphCandidateEnds(layout.source) }
             }
             if (accepted.isEmpty()) {
                 mutable.value = mutable.value.copy(paragraphStatus = "字幕已更新，等待下一次 AI 分段。")
@@ -495,7 +499,7 @@ class AppController(
             replaceRecord(latest.copy(paragraphLayouts = latest.paragraphLayouts.filter { old -> accepted.none { it.channel == old.channel } } + accepted))
             mutable.value = mutable.value.copy(transcriptSaved = false)
             persistCurrentTranscript(id)
-            mutable.value = mutable.value.copy(paragraphStatus = "AI 語意分段已更新", transcriptSaved = true)
+            mutable.value = mutable.value.copy(paragraphStatus = paragraphProgress(mutable.value.current!!), transcriptSaved = true)
         } catch (_: TimeoutCancellationException) {
             mutable.value = mutable.value.copy(paragraphStatus = "AI 分段逾時，暫以基本分段顯示。")
         } catch (cancelled: CancellationException) { throw cancelled }
@@ -615,7 +619,7 @@ private fun connectionReport(connection: FoundryConnection, diagnostic: FoundryD
     val originalTime = Instant.fromEpochMilliseconds(timestamp).toString()
     val taiwanTime = Instant.fromEpochMilliseconds(timestamp + 8 * 60 * 60 * 1000).toString().removeSuffix("Z")
     return buildString {
-        appendLine("LiveLingo 0.1.9 · ${connection.provider.label} 連線診斷")
+        appendLine("LiveLingo $APP_VERSION · ${connection.provider.label} 連線診斷")
         appendLine("時間：$originalTime（台灣時間：$taiwanTime +08:00）")
         appendLine("結果：${if (warning) "通知（尚未收到工作階段結束事件）" else if (success) "成功" else "失敗"}")
         appendLine("階段：${safeDiagnosticField(diagnostic.stage, secret)}")

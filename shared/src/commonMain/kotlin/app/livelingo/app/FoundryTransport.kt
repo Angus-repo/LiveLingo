@@ -170,8 +170,13 @@ class KtorFoundryTransport internal constructor(
         fun decode(payload: String): FoundryEvent = try { parseFoundryEvent(payload) }
         catch (failure: FoundryProtocolException) {
             val fields = safeJsonErrorFields(payload, key)
-            throw TranslationFailure(failure.message ?: "Foundry 回應格式不正確。", FoundryDiagnostic(
-                stage, if (fields.providerCode != null) "PROVIDER_ERROR" else "PROTOCOL", requestId = fields.requestId, providerCode = fields.providerCode,
+            val message = if (failure.isProviderError) foundryProviderError(fields.providerCode ?: fields.providerType)
+                else failure.message ?: "Foundry 回應格式不正確。"
+            val guidance = if (stage == FoundryStages.START) " 尚未開始收音；請先到設定執行「測試連線」，此錯誤不能判定麥克風是否正常。" else ""
+            throw TranslationFailure(message + guidance, FoundryDiagnostic(
+                stage, if (failure.isProviderError) "PROVIDER_ERROR" else "PROTOCOL", httpStatus = 101,
+                requestId = fields.requestId, providerCode = fields.providerCode,
+                providerType = fields.providerType, providerParam = fields.providerParam,
             ))
         }
         try {

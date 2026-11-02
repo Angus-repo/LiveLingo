@@ -722,6 +722,8 @@ private fun connectionReport(connection: FoundryConnection, diagnostic: FoundryD
         appendLine("語音模型類型：${connection.speechModel.label}")
         appendLine("${if (connection.provider == ModelProvider.OPENAI) "模型" else "部署"}名稱：已遮蔽（${connection.deployment.length} 個字元）")
         diagnostic.providerCode?.let { appendLine("服務錯誤碼：${safeDiagnosticField(it, secret)}") }
+        diagnostic.providerType?.let { appendLine("服務錯誤類型：${safeDiagnosticField(it, secret)}") }
+        diagnostic.providerParam?.let { appendLine("相關參數：${safeDiagnosticField(it, secret)}") }
         diagnostic.requestId?.let { appendLine("Request ID：${safeDiagnosticField(it, secret)}") }
         appendLine("說明：${safeDiagnosticField(message, secret)}")
         appendLine("此報告不含 API key、授權標頭、背景知識、音訊或逐字稿。")

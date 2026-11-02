@@ -54,6 +54,49 @@ private class Harness(scope: CoroutineScope, val socket: FakeFoundrySocket = Fak
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class FoundryTransportTest {
+    @Test fun startupServiceErrorsWithoutKnownCodeRemainProviderErrorsAndNeverStartAudio() = runTest {
+        for (provider in ModelProvider.entries) {
+            for (code in listOf("null", "\"private-test-key\"", "\"unknown_parameter\"")) {
+                val socket = FakeFoundrySocket()
+                val transport = KtorFoundryTransport(FoundrySocketFactory { _, _ -> socket })
+                val audio = Channel<ByteArray>(1)
+                var readyCount = 0
+                val result = async {
+                    runCatching {
+                        val endpoint = if (provider == ModelProvider.OPENAI) "https://api.openai.com" else "https://sample.openai.azure.com"
+                        transport.run(FoundryConnection(endpoint, provider = provider), "private-test-key",
+                            SessionSettings(), audio, { readyCount++ }, {})
+                    }
+                }
+                socket.sent.receive()
+                socket.incoming.send("""{"type":"error","error":{"type":"invalid_request_error","code":$code,"param":"session.model","message":"private-test-key private transcript"}}""")
+                val failure = assertIs<TranslationFailure>(result.await().exceptionOrNull())
+                assertEquals("PROVIDER_ERROR", failure.diagnostic?.code)
+                assertEquals(FoundryStages.START, failure.diagnostic?.stage)
+                assertEquals(101, failure.diagnostic?.httpStatus)
+                assertEquals("invalid_request_error", failure.diagnostic?.providerType)
+                assertEquals("session.model", failure.diagnostic?.providerParam)
+                assertEquals(0, readyCount)
+                assertTrue("尚未開始收音" in failure.message.orEmpty())
+                assertTrue("參數" in failure.message.orEmpty())
+                assertFalse("private" in failure.toString() + failure.diagnostic.toString())
+                if (provider == ModelProvider.OPENAI) assertTrue("OpenAI" in failure.message.orEmpty())
+                assertTrue(socket.closed && socket.cancelled)
+                audio.cancel()
+            }
+        }
+    }
+
+    @Test fun malformedStartupResponseIsStillAProtocolError() = runTest {
+        val h = Harness(this)
+        h.socket.sent.receive()
+        h.socket.incoming.send("not JSON private-test-key")
+        val failure = assertIs<TranslationFailure>(h.result.await().exceptionOrNull())
+        assertEquals("PROTOCOL", failure.diagnostic?.code)
+        assertEquals(0, h.readyCount)
+        assertFalse("private-test-key" in failure.toString())
+    }
+
     @Test fun finalUsageOnContentClosureIsCapturedBeforeErrorAndCumulativeEventsReplace() = runTest {
         val h = Harness(this)
         h.socket.sent.receive(); h.socket.incoming.send(STARTED); runCurrent()

@@ -1,3 +1,13 @@
+# LiveLingo 0.1.16 驗證狀態
+
+本版以 0.1.15 為基底，修正 Teams 使用情境的音源提示、Android 系統靜音偵測，以及 GPT-Live 服務錯誤誤列為 PROTOCOL。Android／iOS 版號同步為 0.1.16／17；既有會議費用統計保留。
+
+自動化驗證交由 GitHub Actions 的核心測試、shared 測試與 Android 建置；實際結果以本版 PR checks 與測試報告為準。新增回歸測試涵蓋雙 provider 的啟動錯誤不啟動收音、null／未知服務碼、可辨識錯誤類型與參數、敏感文字不外洩、真正無法解析的資料仍列 PROTOCOL，以及靜音提示與訊號恢復。
+
+尚未使用實機或真實 API key 驗證；本版不能解除 Android 對通話音訊擷取與並行麥克風使用的限制。圖 2 的舊診斷不足以確認服務端根因。完整說明與實機驗收見 [TEAMS_AUDIO.md](docs/TEAMS_AUDIO.md)。以下為上一版歷史紀錄。
+
+---
+
 # LiveLingo 0.1.15 驗證狀態
 
 新增會議用量、美元費用統計與日／週／月折線圖。功能、計價來源及限制見 [docs/USAGE_COSTS.md](docs/USAGE_COSTS.md)。Android／iOS 版號同步為 0.1.15／16。

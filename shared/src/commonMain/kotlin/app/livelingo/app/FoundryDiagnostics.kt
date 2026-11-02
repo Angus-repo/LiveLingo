@@ -13,6 +13,8 @@ data class FoundryDiagnostic(
     val providerCode: String? = null,
     val webSocketCloseCode: Int? = null,
     val sessionCloseReason: String? = null,
+    val providerType: String? = null,
+    val providerParam: String? = null,
 )
 
 /** Never include provider close text; it can contain speech, resource names or secrets. */
@@ -31,7 +33,12 @@ interface FoundryHttpFailure {
     val requestId: String?
 }
 
-data class SafeFoundryErrorFields(val providerCode: String? = null, val requestId: String? = null)
+data class SafeFoundryErrorFields(
+    val providerCode: String? = null,
+    val requestId: String? = null,
+    val providerType: String? = null,
+    val providerParam: String? = null,
+)
 
 private val knownProviderCodes = setOf(
     "invalid_api_key", "authentication_error", "unauthorized", "Unauthorized",
@@ -40,6 +47,16 @@ private val knownProviderCodes = setOf(
     "TooManyRequests", "invalid_request_error", "invalid_request", "BadRequest", "unsupported_model",
     "model_not_supported", "OperationNotSupported", "content_filter", "ResponsibleAIPolicyViolation", "server_error", "internal_error",
     "service_unavailable", "invalid_audio", "context_length_exceeded",
+    "unknown_parameter", "missing_required_parameter", "invalid_value", "invalid_parameter", "invalid_event",
+)
+
+// Only schema names and documented categories; never echo arbitrary server text.
+private val knownProviderTypes = setOf("invalid_request_error", "authentication_error", "permission_error", "rate_limit_error", "server_error")
+private val knownProviderParams = setOf(
+    "model", "session", "session.model", "session.instructions", "session.input", "session.store",
+    "session.audio", "session.audio.format", "session.audio.format.type", "session.audio.format.rate",
+    "session.audio.output", "session.audio.output.voice", "session.voice", "session.delegation", "session.delegation.type",
+    "type", "audio", "event_id",
 )
 
 fun safeProviderCode(raw: String?): String? = raw?.let { value -> knownProviderCodes.firstOrNull { it.equals(value, ignoreCase = true) } }
@@ -61,6 +78,8 @@ fun safeJsonErrorFields(body: String, secret: String? = null): SafeFoundryErrorF
     return SafeFoundryErrorFields(
         providerCode = if (isContentFilterCode(innerCode)) "content_filter" else safeProviderCode(error.string("code")),
         requestId = safeRequestId(root.string("request_id") ?: error.string("request_id"), secret),
+        providerType = error.string("type")?.takeIf { it in knownProviderTypes && (secret.isNullOrEmpty() || !it.contains(secret, ignoreCase = true)) },
+        providerParam = error.string("param")?.takeIf { it in knownProviderParams && (secret.isNullOrEmpty() || !it.contains(secret, ignoreCase = true)) },
     )
 }
 

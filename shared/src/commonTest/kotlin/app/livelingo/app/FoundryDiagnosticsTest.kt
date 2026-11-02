@@ -14,6 +14,20 @@ private class SocketTimeoutException : Exception("private-key")
 private class ProtocolException(message: String) : Exception(message)
 
 class FoundryDiagnosticsTest {
+    @Test fun keepsErrorTypeAndSchemaParameterWhenProviderCodeIsNullOrUnknown() {
+        for (code in listOf("null", "\"private-key\"")) {
+            val fields = safeJsonErrorFields("""{"type":"error","error":{"type":"invalid_request_error","code":$code,"param":"session.audio.format","message":"private-key private transcript"}}""", "private-key")
+            assertNull(fields.providerCode)
+            assertEquals("invalid_request_error", fields.providerType)
+            assertEquals("session.audio.format", fields.providerParam)
+            assertFalse(fields.toString().contains("private"))
+        }
+        val unknown = safeJsonErrorFields("""{"type":"error","error":{"type":"private-key","param":"session.private-key","message":"private-key"}}""", "private-key")
+        assertEquals(SafeFoundryErrorFields(), unknown)
+        assertNull(safeJsonErrorFields("""{"error":{"type":"server_error","param":"model"}}""", "model").providerParam)
+        assertEquals("unknown_parameter", safeJsonErrorFields("""{"error":{"code":"unknown_parameter"}}""").providerCode)
+    }
+
     @Test fun httpContentFilterIsNotMisclassifiedAsAuthenticationOrEndpointFailure() {
         val fields = safeJsonErrorFields("""{"error":{"code":"BadRequest","message":"private transcript","innererror":{"code":"ResponsibleAIPolicyViolation"}}}""")
         assertEquals("content_filter", fields.providerCode)

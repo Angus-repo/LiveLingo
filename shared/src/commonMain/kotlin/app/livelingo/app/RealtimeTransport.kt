@@ -138,7 +138,8 @@ internal class RealtimeTransport(
                 val code = fields.providerCode
                 if (isContentFilterCode(code) && !transcribes && stage != FoundryStages.START) return event
                 throw TranslationFailure(if (isContentFilterCode(code)) "服務因內容安全篩選中止處理，已保留收到的字幕。" else "語音服務拒絕請求，請檢查模型類型、部署、權限與配額。",
-                    FoundryDiagnostic(stage, if (isContentFilterCode(code)) "CONTENT_FILTER" else "PROVIDER_ERROR", providerCode = code, requestId = fields.requestId))
+                    FoundryDiagnostic(stage, if (isContentFilterCode(code)) "CONTENT_FILTER" else "PROVIDER_ERROR", httpStatus = 101,
+                        providerCode = code, requestId = fields.requestId, providerType = fields.providerType, providerParam = fields.providerParam))
             }
             return event
         }

@@ -17,6 +17,7 @@ class ParagraphHttpTest {
     ))
 
     private fun success(ids: String = "[2]"): String = buildJsonObject {
+        putJsonObject("usage") { put("prompt_tokens", 1000); put("completion_tokens", 200) }
         putJsonArray("choices") { add(buildJsonObject {
             put("finish_reason", "stop")
             putJsonObject("message") { put("content", "{\"input\":[2],\"output\":$ids,\"alignment\":[{\"input\":2,\"output\":2}]}") }
@@ -39,12 +40,16 @@ class ParagraphHttpTest {
                 }
             }
             val formatter = HttpParagraphFormatter(client)
+            val usages = mutableListOf<UsageSample>()
+            formatter.setUsageListener { usages += it }
             val connection = if (provider == ModelProvider.OPENAI) FoundryConnection("https://api.openai.com", provider = provider)
                 else FoundryConnection("https://demo.openai.azure.com")
             try {
                 server.enqueue(MockResponse().setHeader("Content-Type", "application/json").setBody(success()))
                 val layouts = formatter.format(connection.copy(textModelKind = TextModel.GPT6_LUNA), "isolated-test-secret", "my-text-model", record)
                 assertEquals(2, layouts.size)
+                assertEquals(1000L, usages.last().inputTokens)
+                assertEquals(UsageKind.FORMATTING, usages.last().kind)
                 val layout = layouts.single { it.channel == TranscriptChannel.OUTPUT }
                 assertEquals(1, layout.breakOffsets.size)
                 assertTrue(layout.source.startsWith("台灣4.95兆"))
@@ -93,6 +98,8 @@ class ParagraphHttpTest {
                 assertEquals(3, server.requestCount) // No redirect to the other destination.
                 server.enqueue(MockResponse().setHeader("Content-Type", "application/json").setBody(success("[999]")))
                 assertFails { formatter.format(connection.copy(textModelKind = TextModel.GPT6_LUNA), "isolated-test-secret", "my-text-model", record) }
+                assertEquals(1000L, usages.last().inputTokens) // invalid formatting still costs tokens
+                assertTrue(usages.last().final)
             } finally { formatter.close(); server.shutdown() }
         }
     }

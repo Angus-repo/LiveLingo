@@ -94,6 +94,7 @@ data class TranscriptRecord(
     val fragments: List<TranscriptFragment> = emptyList(),
     val paragraphLayouts: List<ParagraphLayout> = emptyList(),
     val contentFilterCount: Int = 0,
+    val usage: MeetingUsage? = null,
 )
 
 /** Breaks are character offsets into an exact source snapshot. No model-rewritten text is stored. */

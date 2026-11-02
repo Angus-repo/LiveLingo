@@ -18,6 +18,7 @@ data class AppState(
     val preferences: AppPreferences = AppPreferences(),
     val knowledge: List<BackgroundKnowledge> = emptyList(),
     val history: List<TranscriptRecord> = emptyList(),
+    val meetingCosts: List<MeetingUsage> = emptyList(),
     val current: TranscriptRecord? = null,
     val phase: ConnectionPhase = ConnectionPhase.IDLE,
     val speaker: String = "未標記",
@@ -63,6 +64,8 @@ class AppController(
             val preferences = if (sourceRemoved) storedPreferences.copy(audioSource = AudioSource.MICROPHONE) else storedPreferences
             val knowledge = repository.knowledge()
             val history = repository.history()
+            val costs = (repository.meetingUsage() + history.mapNotNull { it.usage?.copy(title = it.title) })
+                .associateBy { it.id }.values.sortedByDescending { it.startedAtMs }
             val connection = preferences.connection()
             var setupMessage: String? = if (sourceRemoved) "Teams 音源已移除，已改選麥克風。請在開始前確認音源；既有逐字稿會保留。" else null
             apiKey = if (connection.validationError() == null) {
@@ -83,6 +86,7 @@ class AppController(
                 preferences = preferences,
                 knowledge = knowledge,
                 history = history,
+                meetingCosts = costs,
                 hasApiKey = apiKey.isNotBlank(),
                 message = setupMessage,
             )
@@ -328,7 +332,11 @@ class AppController(
             inform("此轉錄方案需設定文字翻譯模型；請到設定選擇 GPT-6 Luna 或其他文字模型。"); return
         }
         val now = services.currentTimeMillis()
-        val record = TranscriptRecord(services.uniqueId(), "${settings.sourceLanguage.label} → ${settings.targetLanguage.label}", now, settings)
+        val id = services.uniqueId()
+        val title = "${settings.sourceLanguage.label} → ${settings.targetLanguage.label}"
+        val rates = snapshot.preferences.costRateOverrides[connection.costRateKey()] ?: connection.defaultCostRates()
+        val record = TranscriptRecord(id, title, now, settings, usage = MeetingUsage(id, title, now,
+            connection.provider, connection.deployment, connection.textDeployment, rates))
         try { repository.saveTranscript(record) }
         catch (_: Exception) { inform("無法建立逐字稿，尚未開始收音。請確認儲存空間。"); return }
         val queue = Channel<ByteArray>(capacity = 30)
@@ -336,7 +344,7 @@ class AppController(
         sessionFailure = null
         val paragraphModel = snapshot.preferences.paragraphModel().takeIf { snapshot.preferences.aiParagraphs }.orEmpty()
         mutable.value = snapshot.copy(phase = ConnectionPhase.CONNECTING, current = record, transcriptSaved = true,
-            history = listOf(record) + snapshot.history, message = null, lastConnectionReport = null, showReportInMessage = false,
+            history = listOf(record) + snapshot.history, meetingCosts = listOf(record.usage!!) + snapshot.meetingCosts, message = null, lastConnectionReport = null, showReportInMessage = false,
             paragraphStatus = if (paragraphModel.isBlank()) "基本分段；AI 語意分段可至設定指定文字模型。" else "AI 語意分段：等待可分段內容",
             audioInputStatus = AudioInputStatus(), streamNotice = null, sessionIssue = null)
         sessionJob = scope.launch {
@@ -355,6 +363,7 @@ class AppController(
                 } catch (failure: Exception) {
                     throw TranslationFailure((failure as? AudioCaptureFailure)?.message ?: "無法準備背景翻譯音源。請在 App 前景開始，並允許所需的錄音或音訊擷取授權。")
                 }
+                transport.setUsageListener { sample -> recordUsage(record.id, sample) }
                 transport.run(connection, sessionApiKey, settings, queue,
                     onReady = {
                         ensureActive()
@@ -445,6 +454,12 @@ class AppController(
                     if (sessionFailure == null && paragraphModel.isNotBlank())
                         formatParagraphs(record.id, connection, sessionApiKey, paragraphModel, final = true)
                 }
+                transport.setUsageListener {}
+                paragraphFormatter?.setUsageListener {}
+                mutable.value.current?.takeIf { it.id == record.id }?.let { current ->
+                    replaceRecord(current.copy(usage = current.usage?.copy(endedAtMs = services.currentTimeMillis())))
+                    if (current.usage?.samples?.isNotEmpty() == true) mutable.value = mutable.value.copy(transcriptSaved = false)
+                }
                 val latest = mutable.value.current?.takeIf { it.id == record.id }
                 // A cancelled periodic formatter can leave a newer in-memory layout after a fragment
                 // write marked the transcript saved. Flush received text after joining it; an empty,
@@ -474,6 +489,52 @@ class AppController(
         }
     }
 
+    private suspend fun recordUsage(id: String, sample: UsageSample) {
+        val current = mutable.value.current?.takeIf { it.id == id } ?: return
+        val usage = current.usage ?: return
+        replaceRecord(current.copy(usage = usage.update(sample)))
+        mutable.value = mutable.value.copy(transcriptSaved = false)
+        try {
+            persistCurrentTranscript(id)
+            mutable.value = mutable.value.copy(transcriptSaved = true)
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { throw TranslationFailure("用量無法儲存，請確認裝置儲存空間。") }
+    }
+
+    fun costRates(): CostRates {
+        val connection = mutable.value.preferences.connection()
+        return if (connection.validationError() == null)
+            mutable.value.preferences.costRateOverrides[connection.costRateKey()] ?: connection.defaultCostRates()
+        else connection.defaultCostRates()
+    }
+
+    fun saveCostRates(rates: CostRates, meetingId: String? = null): Boolean {
+        if (mutable.value.busy || !mutable.value.storageAvailable || !rates.valid()) return false
+        val edited = rates.copy(note = "使用者設定費率", checkedDate = taipeiDate(services.currentTimeMillis()))
+        return try {
+            if (meetingId == null) {
+                val connection = mutable.value.preferences.connection()
+                connection.validationError()?.let { inform("請先完成連線設定。$it"); return false }
+                val preferences = mutable.value.preferences.copy(costRateOverrides =
+                    mutable.value.preferences.costRateOverrides + (connection.costRateKey() to edited))
+                repository.savePreferences(preferences)
+                mutable.value = mutable.value.copy(preferences = preferences)
+            } else {
+                val meeting = mutable.value.meetingCosts.find { it.id == meetingId } ?: return false
+                val updated = meeting.copy(rates = edited)
+                val transcript = mutable.value.history.find { it.id == meetingId }
+                if (transcript != null) {
+                    val next = transcript.copy(usage = updated)
+                    repository.saveTranscript(next); replaceRecord(next)
+                } else {
+                    repository.saveMeetingUsage(updated)
+                    mutable.value = mutable.value.copy(meetingCosts = mutable.value.meetingCosts.map { if (it.id == meetingId) updated else it })
+                }
+            }
+            true
+        } catch (_: Exception) { inform("費率無法儲存，請確認裝置儲存空間。"); false }
+    }
+
     private suspend fun persistCurrentTranscript(id: String) = transcriptWrites.withLock {
         val latest = mutable.value.current?.takeIf { it.id == id } ?: return@withLock
         withContext(Dispatchers.Default) { repository.saveTranscript(latest) }
@@ -489,6 +550,7 @@ class AppController(
         try {
             mutable.value = mutable.value.copy(paragraphStatus = "AI 正在整理標點與段落…")
             val formatter = paragraphFormatter ?: HttpParagraphFormatter(services.createHttpClient()).also { paragraphFormatter = it }
+            formatter.setUsageListener { sample -> recordUsage(id, sample) }
             val layouts = withTimeout(22_000) {
                 if (final) formatter.finish(connection, key, model, snapshot) else formatter.format(connection, key, model, snapshot)
             }
@@ -553,6 +615,9 @@ class AppController(
     private fun replaceRecord(record: TranscriptRecord) {
         mutable.value = mutable.value.copy(
             current = if (mutable.value.current?.id == record.id) record else mutable.value.current,
+            meetingCosts = record.usage?.let { usage ->
+                (mutable.value.meetingCosts.filterNot { it.id == record.id } + usage.copy(title = record.title)).sortedByDescending { it.startedAtMs }
+            } ?: mutable.value.meetingCosts,
             history = mutable.value.history.map { if (it.id == record.id) record else it },
         )
     }
@@ -617,10 +682,10 @@ class AppController(
     }
 }
 
-/** Only curated error fields enter this report; headers, provider bodies and exception text are excluded. */
+/** Final defense for report fields; startup server summaries are separately bounded and redacted. */
 internal fun safeDiagnosticField(value: String, secret: String): String {
-    val masked = if (secret.isEmpty()) value else value.replace(secret, "[已遮蔽]")
-    return masked.map { if (it.code < 0x20 || it.code == 0x7f) ' ' else it }.joinToString("").take(400)
+    val masked = if (secret.isEmpty()) value else value.replace(secret, "[已遮蔽]", ignoreCase = true)
+    return masked.map { if (it.isISOControl() || it in '\u202a'..'\u202e' || it in '\u2066'..'\u2069') ' ' else it }.joinToString("").take(600)
 }
 
 @OptIn(ExperimentalTime::class)
@@ -640,6 +705,7 @@ private fun connectionReport(connection: FoundryConnection, diagnostic: FoundryD
         appendLine("結果：${if (warning) "通知（尚未收到工作階段結束事件）" else if (success) "成功" else "失敗"}")
         appendLine("階段：${safeDiagnosticField(diagnostic.stage, secret)}")
         appendLine("分類：${safeDiagnosticField(diagnostic.code, secret)}")
+        diagnostic.minimalProbe?.let { appendLine("啟動設定：${if (it) "最小連線測試（只指定模型）" else "實際翻譯（含翻譯指令與所選背景）"}") }
         appendLine("HTTP 狀態：${diagnostic.httpStatus?.toString() ?: if (diagnostic.stage in setOf(FoundryStages.STREAM, FoundryStages.STOP)) "不適用（WebSocket 事件）" else "未取得"}")
         if (diagnostic.stage in setOf(FoundryStages.START, FoundryStages.STREAM, FoundryStages.STOP)) {
             appendLine("WebSocket 關閉碼：${safeWebSocketCloseCode(diagnostic.webSocketCloseCode)?.toString() ?: "未取得"}")
@@ -655,10 +721,18 @@ private fun connectionReport(connection: FoundryConnection, diagnostic: FoundryD
         val basePath = if (connection.speechModel == SpeechModel.MAI_TRANSCRIBE) "/mai/v1" else if (connection.provider == ModelProvider.OPENAI) "/v1" else "/openai/v1"
         appendLine("資源：wss://${if (connection.provider == ModelProvider.OPENAI) "api.openai.com" else endpointFamily}$basePath$safePath")
         appendLine("語音模型類型：${connection.speechModel.label}")
-        appendLine("${if (connection.provider == ModelProvider.OPENAI) "模型" else "部署"}名稱：已遮蔽（${connection.deployment.length} 個字元）")
+        val knownModel = connection.deployment.trim().takeIf { model ->
+            connection.provider == ModelProvider.OPENAI && SpeechModel.entries.any { it.supportedBy(ModelProvider.OPENAI) && it.modelId == model }
+        }
+        appendLine("${if (connection.provider == ModelProvider.OPENAI) "模型" else "部署"}名稱：${knownModel?.let { safeDiagnosticField(it, secret) } ?: "已遮蔽（${connection.deployment.length} 個字元）"}")
         diagnostic.providerCode?.let { appendLine("服務錯誤碼：${safeDiagnosticField(it, secret)}") }
+        diagnostic.providerType?.let { appendLine("服務錯誤類型：${safeDiagnosticField(it, secret)}") }
+        diagnostic.providerParam?.let { appendLine("相關參數：${safeDiagnosticField(it, secret)}") }
+        diagnostic.startupErrorSummary?.let { appendLine("服務錯誤摘要：${safeDiagnosticField(it, secret)}") }
         diagnostic.requestId?.let { appendLine("Request ID：${safeDiagnosticField(it, secret)}") }
         appendLine("說明：${safeDiagnosticField(message, secret)}")
-        appendLine("此報告不含 API key、授權標頭、背景知識、音訊或逐字稿。")
+        if (diagnostic.startupErrorSummary != null)
+            appendLine("服務錯誤摘要已遮蔽已知敏感內容，分享前請確認。未附上請求標頭、音訊、逐字稿或完整設定。")
+        else appendLine("此報告不含 API key、授權標頭、背景知識、音訊或逐字稿。")
     }
 }

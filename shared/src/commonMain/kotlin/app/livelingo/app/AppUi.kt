@@ -44,7 +44,7 @@ private val Palette = lightColorScheme(primary = Mint, onPrimary = Color.White,
     secondaryContainer = Color(0xFFEDE7FA), surfaceVariant = Color(0xFFE8EEEA))
 
 private enum class Page(val label: String, val glyph: String) {
-    LIVE("即時翻譯", "≋"), KNOWLEDGE("背景知識", "◇"), HISTORY("逐字稿", "▤"), SETTINGS("設定", "⚙")
+    LIVE("即時翻譯", "≋"), KNOWLEDGE("背景知識", "◇"), HISTORY("逐字稿", "▤"), COSTS("費用統計", "$"), SETTINGS("設定", "⚙")
 }
 
 @Composable
@@ -84,7 +84,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                         }
                         Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(3.dp)) {
                             Text("v$APP_VERSION", style = MaterialTheme.typography.labelSmall, color = Color(0xFF657971))
-                            StatusPill(state.phase, state.connectionTesting)
+                            StatusPill(state.phase, state.connectionTesting, state.audioInputStatus.silencedBySystem)
                         }
                     }
                     Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
@@ -93,6 +93,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                                 Page.LIVE -> LiveScreen(state, controller, onSettings = { page = Page.SETTINGS })
                                 Page.KNOWLEDGE -> KnowledgeScreen(state, controller)
                                 Page.HISTORY -> HistoryScreen(state, controller)
+                                Page.COSTS -> CostScreen(state, controller, services)
                                 Page.SETTINGS -> SettingsScreen(state, controller)
                             }
                         }
@@ -136,15 +137,15 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
     }
 }
 
-@Composable private fun StatusPill(phase: ConnectionPhase, testing: Boolean = false) {
+@Composable private fun StatusPill(phase: ConnectionPhase, testing: Boolean = false, silenced: Boolean = false) {
     val text = if (testing) "測試連線" else when (phase) {
         ConnectionPhase.IDLE -> "待命"
         ConnectionPhase.CONNECTING -> "準備中"
-        ConnectionPhase.LISTENING -> "收音中"
+        ConnectionPhase.LISTENING -> if (silenced) "收音受限" else "收音中"
         ConnectionPhase.STOPPING -> "整理字幕"
         ConnectionPhase.ERROR -> "已停止"
     }
-    Surface(shape = CircleShape, color = if (phase == ConnectionPhase.LISTENING) Mint else Color(0xFFE6ECE7)) {
+    Surface(shape = CircleShape, color = if (silenced && phase == ConnectionPhase.LISTENING) Color(0xFF9A473E) else if (phase == ConnectionPhase.LISTENING) Mint else Color(0xFFE6ECE7)) {
         Text("● $text", Modifier.padding(horizontal = 12.dp, vertical = 7.dp), fontSize = 12.sp,
             color = if (phase == ConnectionPhase.LISTENING) Color.White else Ink)
     }
@@ -225,7 +226,8 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                     Choice("音源", audioSource.label, controller.availableAudioSources().map { it.name to it.label }, !state.busy) {
                         controller.selectAudioSource(AudioSource.valueOf(it))
                     }
-                    Text(if (audioSource.isPlayback) "開始後授權音訊擷取，再切到來源 App 播放。" else "收取現場對話或喇叭播放的聲音。",
+                    Text(if (audioSource.isPlayback) "開始後授權擷取允許錄製的媒體音訊。Android 不支援擷取通話音訊，同機 Teams 會議可能收不到聲音。"
+                        else "收取現場或另一台裝置外放的聲音。同機 Teams 可能優先使用麥克風，即使 Teams 靜音也不保證釋放音源。",
                         style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971))
                     audioUnavailable?.let { Text(it, color = Color(0xFF9A473E), style = MaterialTheme.typography.bodySmall) }
                     HorizontalDivider(color = Canvas)
@@ -276,7 +278,11 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                     }
                     if (state.phase == ConnectionPhase.LISTENING && controller.reportsAudioLevel()) {
                         LinearProgressIndicator(progress = { state.audioInputStatus.level }, modifier = Modifier.fillMaxWidth(), color = Mint)
-                        Text(if (state.audioInputStatus.signalPresent) "正在收音" else "等待聲音…", style = MaterialTheme.typography.labelSmall, color = Color(0xFF657971))
+                        Text(when {
+                            state.audioInputStatus.silencedBySystem -> "收音遭系統靜音"
+                            state.audioInputStatus.signalPresent -> "正在收音"
+                            else -> "等待聲音…"
+                        }, style = MaterialTheme.typography.labelSmall, color = Color(0xFF657971))
                         state.audioInputStatus.warning?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = Color(0xFF9A473E)) }
                     }
                 }
@@ -592,9 +598,10 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                 Text(if (state.connectionTesting) "取消連線測試" else "測試連線")
             }
             Text("測試目前欄位中的語音模型連線，不啟用麥克風、不儲存欄位。文字翻譯與 AI 分段需有字幕時才能驗證。", style = MaterialTheme.typography.bodySmall)
+            if (speechKind == SpeechModel.GPT_LIVE) Text("GPT-Live 先以最小設定測試模型能否使用；測試成功後，再回即時翻譯確認翻譯設定與收音。", style = MaterialTheme.typography.bodySmall)
             Text("測試會建立並關閉所選語音模型的工作階段，可能產生服務用量。", style = MaterialTheme.typography.bodySmall)
         } }
-        state.lastConnectionReport?.let { report -> item { SectionCard("最近一次連線診斷", "資源名稱、部署名稱與金鑰已遮蔽，可將報告提供給維護人員。") {
+        state.lastConnectionReport?.let { report -> item { SectionCard("最近一次連線診斷", "自訂名稱與已知敏感內容已遮蔽；服務錯誤摘要請先確認再分享。") {
             Text(report, style = MaterialTheme.typography.bodySmall, maxLines = 7, overflow = TextOverflow.Ellipsis)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 TextButton(onClick = controller::showConnectionReport) { Text("查看完整診斷") }

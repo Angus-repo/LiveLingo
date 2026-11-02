@@ -29,7 +29,40 @@ class AudioSignalMeterTest {
 
     @Test fun microphoneSilenceDoesNotClaimThatAnAppBlockedPlayback() {
         val meter = AudioSignalMeter(AudioSource.MICROPHONE)
-        repeat(65) { assertNull(meter.accept(ByteArray(12_000))!!.warning) }
+        repeat(59) { assertNull(meter.accept(ByteArray(12_000))!!.warning) }
+        val status = meter.accept(ByteArray(12_000))!!
+        assertTrue("麥克風" in status.warning.orEmpty())
+        assertFalse("已將" in status.warning.orEmpty())
+        assertFalse(status.silencedBySystem)
+    }
+
+    @Test fun confirmedSystemSilencingOverridesSignalAndRecoversWithoutStaleWarning() {
+        for (source in listOf(AudioSource.MICROPHONE, AudioSource.DEVICE_PLAYBACK)) {
+            val measured = AudioInputStatus(level = 0.8f, signalPresent = true)
+            val blocked = measured.withCapturePolicy(source, silenced = true, communicationActive = false)
+            assertTrue(blocked.silencedBySystem)
+            assertFalse(blocked.signalPresent)
+            assertEquals(0f, blocked.level)
+            assertTrue("Android 已將" in blocked.warning.orEmpty())
+            val restored = measured.withCapturePolicy(source, silenced = false, communicationActive = true)
+            assertTrue(restored.signalPresent)
+            assertFalse(restored.silencedBySystem)
+            assertNull(restored.warning)
+        }
+    }
+
+    @Test fun communicationModeExplainsQuietAudioWithoutClaimingTeamsWasDetected() {
+        for (source in listOf(AudioSource.MICROPHONE, AudioSource.DEVICE_PLAYBACK)) {
+            val meter = AudioSignalMeter(source)
+            repeat(59) { meter.accept(ByteArray(12_000)) }
+            val quiet = meter.accept(ByteArray(12_000))!!
+            val status = quiet.withCapturePolicy(source, silenced = false, communicationActive = true)
+            assertTrue("通話模式" in status.warning.orEmpty())
+            assertTrue("另一台裝置" in status.warning.orEmpty())
+            assertFalse(status.silencedBySystem)
+            assertFalse("已將" in status.warning.orEmpty())
+            assertEquals(quiet.warning, quiet.withCapturePolicy(source, false, false).warning)
+        }
     }
 
     @Test fun partialBuffersAreThrottledAndUnusedBytesAreIgnored() {

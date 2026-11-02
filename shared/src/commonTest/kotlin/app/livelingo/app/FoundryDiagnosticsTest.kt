@@ -1,6 +1,7 @@
 package app.livelingo.app
 
 import io.ktor.client.plugins.websocket.WebSocketException
+import kotlinx.serialization.json.*
 import kotlin.test.*
 
 private class TestHttpFailure(
@@ -14,6 +15,57 @@ private class SocketTimeoutException : Exception("private-key")
 private class ProtocolException(message: String) : Exception(message)
 
 class FoundryDiagnosticsTest {
+    private fun errorBody(message: String): String = buildJsonObject {
+        put("type", "error")
+        putJsonObject("error") { put("type", "invalid_request_error"); put("message", message) }
+    }.toString()
+
+    @Test fun startupErrorSummaryKeepsActionableSchemaAndAccessReasons() {
+        val schema = "Unknown parameter: 'session.voice'. Use 'session.audio.output.voice'."
+        assertEquals(schema, startupErrorSummary(errorBody(schema), "private-key"))
+        val access = "Your project does not have access to model `gpt-live-1`."
+        assertEquals(access, startupErrorSummary(errorBody(access), "private-key"))
+        assertNull(startupErrorSummary("not JSON", "private-key"))
+        assertNull(startupErrorSummary("{}", "private-key"))
+        assertNull(startupErrorSummary(errorBody("x".repeat(16_385)), "private-key"))
+    }
+
+    @Test fun startupErrorSummaryOmitsEchoedSecretsAndKnownContext() {
+        for (message in listOf("Invalid key PRIVATE-KEY private transcript", "Invalid instructions: confidential line")) {
+            val summary = assertNotNull(startupErrorSummary(errorBody(message), "private-key", listOf("first line\nconfidential line")))
+            assertTrue(summary.contains("已省略"))
+            assertFalse(summary.contains("private", ignoreCase = true))
+            assertFalse(summary.contains("confidential"))
+        }
+        val escaped = JsonPrimitive("line one\nline two").toString().drop(1).dropLast(1)
+        assertTrue(startupErrorSummary(errorBody("Invalid: $escaped"), "key", listOf("line one\nline two")).orEmpty().contains("已省略"))
+    }
+
+    @Test fun startupErrorSummaryMasksQuotedDataIdentifiersAndControls() {
+        val raw = "Unsupported 'private value' for 'session.instructions'; sk-othersecret org-123 proj-456 https://private.test/a someone@example.test Bearer abcdef\n\u202e" + "a".repeat(80)
+        val summary = assertNotNull(startupErrorSummary(errorBody(raw), "different-key"))
+        assertTrue(summary.contains("session.instructions"))
+        for (sensitive in listOf("private value", "othersecret", "org-123", "proj-456", "private.test", "someone@", "abcdef", "a".repeat(80)))
+            assertFalse(summary.contains(sensitive))
+        assertFalse(summary.contains('\n'))
+        assertFalse(summary.contains('\u202e'))
+        assertEquals(600, startupErrorSummary(errorBody("normal reason. ".repeat(100)), "key")?.length)
+    }
+
+    @Test fun keepsErrorTypeAndSchemaParameterWhenProviderCodeIsNullOrUnknown() {
+        for (code in listOf("null", "\"private-key\"")) {
+            val fields = safeJsonErrorFields("""{"type":"error","error":{"type":"invalid_request_error","code":$code,"param":"session.audio.format","message":"private-key private transcript"}}""", "private-key")
+            assertNull(fields.providerCode)
+            assertEquals("invalid_request_error", fields.providerType)
+            assertEquals("session.audio.format", fields.providerParam)
+            assertFalse(fields.toString().contains("private"))
+        }
+        val unknown = safeJsonErrorFields("""{"type":"error","error":{"type":"private-key","param":"session.private-key","message":"private-key"}}""", "private-key")
+        assertEquals(SafeFoundryErrorFields(), unknown)
+        assertNull(safeJsonErrorFields("""{"error":{"type":"server_error","param":"model"}}""", "model").providerParam)
+        assertEquals("unknown_parameter", safeJsonErrorFields("""{"error":{"code":"unknown_parameter"}}""").providerCode)
+    }
+
     @Test fun httpContentFilterIsNotMisclassifiedAsAuthenticationOrEndpointFailure() {
         val fields = safeJsonErrorFields("""{"error":{"code":"BadRequest","message":"private transcript","innererror":{"code":"ResponsibleAIPolicyViolation"}}}""")
         assertEquals("content_filter", fields.providerCode)

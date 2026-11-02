@@ -4,3 +4,7 @@ LiveLingo 0.1.13
 
 Signing certificate SHA-256:
 cf232e1f105c3ac5a93ce2449b41678027b4b1ef9a54c3765c85b65a045d4bfb
+
+# LiveLingo 0.1.15 / versionCode 16
+a8f52716d7b6e958b2dfc7092786408d302dd243004bdd80f00cccec2b3ba08d  LiveLingo-0.1.15-original-key.apk
+# certificate SHA-256: cf232e1f105c3ac5a93ce2449b41678027b4b1ef9a54c3765c85b65a045d4bfb

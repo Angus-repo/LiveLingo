@@ -27,6 +27,7 @@ data class AppPreferences(
     val modelSettingsVersion: Int = 1,
     val savedModelChoices: List<SavedModelChoice> = emptyList(),
     val aiParagraphs: Boolean = true,
+    val costRateOverrides: Map<String, CostRates> = emptyMap(),
     val audioSource: AudioSource = AudioSource.MICROPHONE,
 )
 
@@ -88,8 +89,19 @@ class AppRepository(private val storage: LocalStorage) {
     fun saveTranscript(record: TranscriptRecord) {
         // Write content before publishing the ID: interruption never points to a half-written record.
         storage.write("transcript_${record.id}", WireJson.encodeToString(record))
+        record.usage?.let { saveMeetingUsage(it.copy(title = record.title)) }
         val current = ids()
         if (record.id !in current) storage.write("transcript_index", WireJson.encodeToString(current + record.id))
+    }
+
+    fun meetingUsage(): List<MeetingUsage> = decode<List<String>>("cost_index", emptyList()).mapNotNull { id ->
+        storage.read("cost_$id")?.let { WireJson.decodeFromString<MeetingUsage>(it) }
+    }.sortedByDescending { it.startedAtMs }
+
+    fun saveMeetingUsage(value: MeetingUsage) {
+        storage.write("cost_${value.id}", WireJson.encodeToString(value))
+        val current = decode<List<String>>("cost_index", emptyList())
+        if (value.id !in current) storage.write("cost_index", WireJson.encodeToString(current + value.id))
     }
 
     fun deleteTranscript(id: String) {

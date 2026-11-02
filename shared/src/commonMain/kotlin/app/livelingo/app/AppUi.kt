@@ -598,9 +598,10 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                 Text(if (state.connectionTesting) "取消連線測試" else "測試連線")
             }
             Text("測試目前欄位中的語音模型連線，不啟用麥克風、不儲存欄位。文字翻譯與 AI 分段需有字幕時才能驗證。", style = MaterialTheme.typography.bodySmall)
+            if (speechKind == SpeechModel.GPT_LIVE) Text("GPT-Live 先以最小設定測試模型能否使用；測試成功後，再回即時翻譯確認翻譯設定與收音。", style = MaterialTheme.typography.bodySmall)
             Text("測試會建立並關閉所選語音模型的工作階段，可能產生服務用量。", style = MaterialTheme.typography.bodySmall)
         } }
-        state.lastConnectionReport?.let { report -> item { SectionCard("最近一次連線診斷", "資源名稱、部署名稱與金鑰已遮蔽，可將報告提供給維護人員。") {
+        state.lastConnectionReport?.let { report -> item { SectionCard("最近一次連線診斷", "自訂名稱與已知敏感內容已遮蔽；服務錯誤摘要請先確認再分享。") {
             Text(report, style = MaterialTheme.typography.bodySmall, maxLines = 7, overflow = TextOverflow.Ellipsis)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 TextButton(onClick = controller::showConnectionReport) { Text("查看完整診斷") }

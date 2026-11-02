@@ -76,6 +76,8 @@ class FoundryTransportTest {
                 assertEquals(101, failure.diagnostic?.httpStatus)
                 assertEquals("invalid_request_error", failure.diagnostic?.providerType)
                 assertEquals("session.model", failure.diagnostic?.providerParam)
+                assertEquals(false, failure.diagnostic?.minimalProbe)
+                assertTrue(failure.diagnostic?.startupErrorSummary.orEmpty().contains("已省略"))
                 assertEquals(0, readyCount)
                 assertTrue("尚未開始收音" in failure.message.orEmpty())
                 assertTrue("參數" in failure.message.orEmpty())
@@ -351,16 +353,22 @@ class FoundryTransportTest {
     @Test fun probeStartsAndClosesTheActualModelWithoutSendingAudio() = runTest {
         val socket = FakeFoundrySocket()
         val transport = KtorFoundryTransport(FoundrySocketFactory { _, _ -> socket })
+        val usages = mutableListOf<UsageSample>()
+        transport.setUsageListener { usages += it }
         val result = CompletableDeferred<Result<ConnectionProbeResult>>()
         launch { result.complete(runCatching { transport.probe(FoundryConnection("https://sample.openai.azure.com", "live-test"), "private-key") }) }
         val start = WireJson.parseToJsonElement(socket.sent.receive()).jsonObject
         assertEquals("live-test", start.getValue("session").jsonObject.getValue("model").jsonPrimitive.content)
+        assertEquals(setOf("model"), start.getValue("session").jsonObject.keys)
         socket.incoming.send(STARTED)
         assertEquals(FOUNDRY_CLOSE_PAYLOAD, socket.sent.receive())
         socket.incoming.send(CLOSED)
         val success = result.await().getOrThrow()
         assertEquals("OK", success.diagnostic.code)
         assertEquals(101, success.diagnostic.httpStatus)
+        assertEquals(true, success.diagnostic.minimalProbe)
+        assertTrue(success.message.contains("尚未驗證"))
+        assertTrue(usages.isEmpty())
         assertEquals(listOf("session.start", "session.close"), socket.sentTypes)
         assertTrue(socket.closed && socket.cancelled)
     }
@@ -375,8 +383,23 @@ class FoundryTransportTest {
         val failure = assertIs<TranslationFailure>(result.await().exceptionOrNull())
         assertEquals(FoundryStages.START, failure.diagnostic?.stage)
         assertEquals("DeploymentNotFound", failure.diagnostic?.providerCode)
+        assertEquals(true, failure.diagnostic?.minimalProbe)
         assertFalse(failure.message.orEmpty().contains("private-key"))
         assertTrue(socket.cancelled)
+    }
+
+    @Test fun startupSummarySurvivesMissingCodeButRuntimeProseIsExcluded() = runTest {
+        val message = "Unknown parameter: 'session.voice'."
+        for (afterReady in listOf(false, true)) {
+            val h = Harness(this)
+            h.socket.sent.receive()
+            if (afterReady) { h.socket.incoming.send(STARTED); runCurrent() }
+            h.socket.incoming.send("""{"type":"error","error":{"type":"invalid_request_error","code":null,"message":"$message"}}""")
+            val failure = assertIs<TranslationFailure>(h.result.await().exceptionOrNull())
+            assertEquals("PROVIDER_ERROR", failure.diagnostic?.code)
+            assertEquals(if (afterReady) null else message, failure.diagnostic?.startupErrorSummary)
+            assertEquals(if (afterReady) 1 else 0, h.readyCount)
+        }
     }
 
     @Test fun handshakeFailureDoesNotLeakIntoLaterDiagnostic() = runTest {

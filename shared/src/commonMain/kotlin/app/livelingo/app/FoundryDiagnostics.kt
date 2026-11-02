@@ -15,6 +15,8 @@ data class FoundryDiagnostic(
     val sessionCloseReason: String? = null,
     val providerType: String? = null,
     val providerParam: String? = null,
+    val startupErrorSummary: String? = null,
+    val minimalProbe: Boolean? = null,
 )
 
 /** Never include provider close text; it can contain speech, resource names or secrets. */
@@ -81,6 +83,37 @@ fun safeJsonErrorFields(body: String, secret: String? = null): SafeFoundryErrorF
         providerType = error.string("type")?.takeIf { it in knownProviderTypes && (secret.isNullOrEmpty() || !it.contains(secret, ignoreCase = true)) },
         providerParam = error.string("param")?.takeIf { it in knownProviderParams && (secret.isNullOrEmpty() || !it.contains(secret, ignoreCase = true)) },
     )
+}
+
+/** Only used before session.started, when no microphone audio or transcript has been sent.
+ * Bounded and redacted server prose is still untrusted: the report asks users to review before sharing.
+ * Runtime errors and content-filter events continue to exclude all server prose.
+ */
+internal fun startupErrorSummary(body: String, secret: String, sensitiveValues: List<String> = emptyList()): String? {
+    if (body.length > 16_384) return null
+    val root = runCatching { WireJson.parseToJsonElement(body).jsonObject }.getOrNull() ?: return null
+    val error = root["error"] as? JsonObject ?: return null
+    val raw = (error["message"] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
+        ?.takeIf { it.isNotBlank() } ?: return null
+    val omitted = "[服務錯誤文字含敏感內容，已省略]"
+    if (secret.isNotEmpty() && raw.contains(secret, ignoreCase = true)) return omitted
+    // Include complete values, JSON-escaped forms, lines and sentence fragments that a provider may echo.
+    for (value in sensitiveValues.filter { it.isNotBlank() }) {
+        val fragments = listOf(value, JsonPrimitive(value).toString().drop(1).dropLast(1)) +
+            value.split(Regex("[\\r\\n。！？]+"))
+        if (fragments.any { it.length >= 4 && raw.contains(it, ignoreCase = true) }) return omitted
+    }
+    var text = raw.replace(Regex("(?i)(?:https?|wss?)://[^\\s\"'<>]+"), "[網址已遮蔽]")
+        .replace(Regex("[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}"), "[信箱已遮蔽]")
+        .replace(Regex("(?i)\\b(?:sk-|org-|proj-)[A-Za-z0-9_-]+"), "[識別資料已遮蔽]")
+        .replace(Regex("(?i)\\b(?:bearer|api[-_ ]?key|authorization)\\s*[:=]?\\s+[A-Za-z0-9_./+=-]+"), "[授權資料已遮蔽]")
+    // Keep known schema/model values (needed to fix invalid requests), hide arbitrary quoted values.
+    val allowed = knownProviderParams + setOf("gpt-live-1", "audio/pcm", "marin", "client", "session.start", "24000", "16000")
+    text = text.replace(Regex("\"[^\"]*\"|'[^']*'|`[^`]*`")) { match ->
+        if (match.value.drop(1).dropLast(1) in allowed) match.value else "[引述內容已遮蔽]"
+    }.replace(Regex("[A-Za-z0-9_./+=-]{48,}"), "[長識別碼已遮蔽]")
+    return text.map { if (it.isISOControl() || it in '\u202a'..'\u202e' || it in '\u2066'..'\u2069') ' ' else it }
+        .joinToString("").replace(Regex("\\s+"), " ").trim().take(600)
 }
 
 internal object FoundryStages {

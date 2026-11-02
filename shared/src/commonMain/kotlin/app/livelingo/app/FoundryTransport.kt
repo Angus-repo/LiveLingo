@@ -121,6 +121,20 @@ class KtorFoundryTransport internal constructor(
     private var usageListener: suspend (UsageSample) -> Unit = {}
     override fun setUsageListener(listener: suspend (UsageSample) -> Unit) { usageListener = listener }
 
+    override suspend fun probe(connection: FoundryConnection, apiKey: String): ConnectionProbeResult {
+        val emptyAudio = Channel<ByteArray>(0)
+        emptyAudio.close()
+        try {
+            var notice: TranslationNotice? = null
+            runSession(connection, apiKey, SessionSettings(), emptyAudio, {}, {}, { notice = it }, minimalProbe = true)
+            notice?.let { throw TranslationFailure(it.message, it.diagnostic) }
+            return ConnectionProbeResult(
+                "${connection.provider.label} 最小連線測試成功，所選模型已啟動並正常結束；尚未驗證翻譯設定或收音。",
+                FoundryDiagnostic(FoundryStages.COMPLETE, "OK", 101, minimalProbe = true),
+            )
+        } finally { emptyAudio.cancel() }
+    }
+
     override suspend fun run(
         connection: FoundryConnection,
         apiKey: String,
@@ -129,13 +143,25 @@ class KtorFoundryTransport internal constructor(
         onReady: suspend () -> Unit,
         onTranscript: suspend (TranscriptDelta) -> Unit,
         onNotice: suspend (TranslationNotice) -> Unit,
+    ) = runSession(connection, apiKey, settings, audio, onReady, onTranscript, onNotice, minimalProbe = false)
+
+    private suspend fun runSession(
+        connection: FoundryConnection,
+        apiKey: String,
+        settings: SessionSettings,
+        audio: ReceiveChannel<ByteArray>,
+        onReady: suspend () -> Unit,
+        onTranscript: suspend (TranscriptDelta) -> Unit,
+        onNotice: suspend (TranslationNotice) -> Unit,
+        minimalProbe: Boolean,
     ) {
         connection.validationError()?.let { throw TranslationFailure(it) }
         settings.validationError()?.let { throw TranslationFailure(it) }
         val key = apiKey.trim()
         if (key.isEmpty() || key.length > 4096 || key.any { it.isWhitespace() || it.code < 33 || it.code > 126 })
             throw TranslationFailure("請輸入有效的 Foundry API key，不可包含空白或控制字元。")
-        val reportUsage = usageListener
+        // A previous meeting's listener may still be installed. A probe must never alter its costs.
+        val reportUsage: suspend (UsageSample) -> Unit = if (minimalProbe) ({ _ -> }) else usageListener
         var usageClock: TimeSource.Monotonic.ValueTimeMark? = null
         var finalUsage = false
         var lastUsageSeconds = 0.0
@@ -156,7 +182,8 @@ class KtorFoundryTransport internal constructor(
             if (connection.provider == ModelProvider.OPENAI) value.replace("Foundry", "OpenAI").replace("部署", "模型") else value
         fun redacted(failure: TranslationFailure): TranslationFailure {
             val diagnostic = failure.diagnostic
-            return TranslationFailure(providerMessage(failure.message ?: "服務工作階段失敗。"), diagnostic?.copy(requestId = safeRequestId(diagnostic.requestId, key)))
+            return TranslationFailure(providerMessage(failure.message ?: "服務工作階段失敗。"), diagnostic?.copy(
+                requestId = safeRequestId(diagnostic.requestId, key), minimalProbe = minimalProbe))
         }
         fun disconnectedAfterFilter(): TranslationFailure = TranslationFailure(
             "Foundry 在內容篩選通知後斷線，但未回報工作階段結束原因。已收到的字幕已保留；可開始下一段收取新的音訊。若持續發生，請將診斷交給資源管理者確認。",
@@ -172,11 +199,22 @@ class KtorFoundryTransport internal constructor(
             val fields = safeJsonErrorFields(payload, key)
             val message = if (failure.isProviderError) foundryProviderError(fields.providerCode ?: fields.providerType)
                 else failure.message ?: "Foundry 回應格式不正確。"
-            val guidance = if (stage == FoundryStages.START) " 尚未開始收音；請先到設定執行「測試連線」，此錯誤不能判定麥克風是否正常。" else ""
+            val guidance = if (stage != FoundryStages.START) "" else if (minimalProbe)
+                " 最小連線測試未送出翻譯指令、背景知識或音訊；請複製診斷中的服務錯誤摘要。"
+                else " 尚未開始收音；請先到設定執行「測試連線」，此錯誤不能判定麥克風是否正常。"
             throw TranslationFailure(message + guidance, FoundryDiagnostic(
                 stage, if (failure.isProviderError) "PROVIDER_ERROR" else "PROTOCOL", httpStatus = 101,
                 requestId = fields.requestId, providerCode = fields.providerCode,
                 providerType = fields.providerType, providerParam = fields.providerParam,
+                startupErrorSummary = if (stage == FoundryStages.START && failure.isProviderError)
+                    startupErrorSummary(payload, key, buildList {
+                        if (connection.provider != ModelProvider.OPENAI || connection.deployment.trim() != "gpt-live-1") add(connection.deployment.trim())
+                        add(connection.endpoint)
+                        if (!minimalProbe) {
+                            add(translationInstructions(settings))
+                            settings.knowledge?.let { add(it.id); add(it.name); add(it.content) }
+                        }
+                    }) else null,
             ))
         }
         try {
@@ -186,7 +224,7 @@ class KtorFoundryTransport internal constructor(
             }
             stage = FoundryStages.START
             withTimeout(startupTimeoutMillis) {
-                active.send(foundryStartPayload(connection, settings))
+                active.send(if (minimalProbe) foundryProbePayload(connection) else foundryStartPayload(connection, settings))
                 while (true) {
                     val event = decode(active.receive() ?: throw TranslationFailure("Foundry 在準備完成前已中斷連線。", FoundryDiagnostic(stage, "CONNECTION_CLOSED")))
                     when (event) {

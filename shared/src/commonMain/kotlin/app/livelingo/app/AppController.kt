@@ -682,10 +682,10 @@ class AppController(
     }
 }
 
-/** Only curated error fields enter this report; headers, provider bodies and exception text are excluded. */
+/** Final defense for report fields; startup server summaries are separately bounded and redacted. */
 internal fun safeDiagnosticField(value: String, secret: String): String {
-    val masked = if (secret.isEmpty()) value else value.replace(secret, "[已遮蔽]")
-    return masked.map { if (it.code < 0x20 || it.code == 0x7f) ' ' else it }.joinToString("").take(400)
+    val masked = if (secret.isEmpty()) value else value.replace(secret, "[已遮蔽]", ignoreCase = true)
+    return masked.map { if (it.isISOControl() || it in '\u202a'..'\u202e' || it in '\u2066'..'\u2069') ' ' else it }.joinToString("").take(600)
 }
 
 @OptIn(ExperimentalTime::class)
@@ -705,6 +705,7 @@ private fun connectionReport(connection: FoundryConnection, diagnostic: FoundryD
         appendLine("結果：${if (warning) "通知（尚未收到工作階段結束事件）" else if (success) "成功" else "失敗"}")
         appendLine("階段：${safeDiagnosticField(diagnostic.stage, secret)}")
         appendLine("分類：${safeDiagnosticField(diagnostic.code, secret)}")
+        diagnostic.minimalProbe?.let { appendLine("啟動設定：${if (it) "最小連線測試（只指定模型）" else "實際翻譯（含翻譯指令與所選背景）"}") }
         appendLine("HTTP 狀態：${diagnostic.httpStatus?.toString() ?: if (diagnostic.stage in setOf(FoundryStages.STREAM, FoundryStages.STOP)) "不適用（WebSocket 事件）" else "未取得"}")
         if (diagnostic.stage in setOf(FoundryStages.START, FoundryStages.STREAM, FoundryStages.STOP)) {
             appendLine("WebSocket 關閉碼：${safeWebSocketCloseCode(diagnostic.webSocketCloseCode)?.toString() ?: "未取得"}")
@@ -720,12 +721,18 @@ private fun connectionReport(connection: FoundryConnection, diagnostic: FoundryD
         val basePath = if (connection.speechModel == SpeechModel.MAI_TRANSCRIBE) "/mai/v1" else if (connection.provider == ModelProvider.OPENAI) "/v1" else "/openai/v1"
         appendLine("資源：wss://${if (connection.provider == ModelProvider.OPENAI) "api.openai.com" else endpointFamily}$basePath$safePath")
         appendLine("語音模型類型：${connection.speechModel.label}")
-        appendLine("${if (connection.provider == ModelProvider.OPENAI) "模型" else "部署"}名稱：已遮蔽（${connection.deployment.length} 個字元）")
+        val knownModel = connection.deployment.trim().takeIf { model ->
+            connection.provider == ModelProvider.OPENAI && SpeechModel.entries.any { it.supportedBy(ModelProvider.OPENAI) && it.modelId == model }
+        }
+        appendLine("${if (connection.provider == ModelProvider.OPENAI) "模型" else "部署"}名稱：${knownModel?.let { safeDiagnosticField(it, secret) } ?: "已遮蔽（${connection.deployment.length} 個字元）"}")
         diagnostic.providerCode?.let { appendLine("服務錯誤碼：${safeDiagnosticField(it, secret)}") }
         diagnostic.providerType?.let { appendLine("服務錯誤類型：${safeDiagnosticField(it, secret)}") }
         diagnostic.providerParam?.let { appendLine("相關參數：${safeDiagnosticField(it, secret)}") }
+        diagnostic.startupErrorSummary?.let { appendLine("服務錯誤摘要：${safeDiagnosticField(it, secret)}") }
         diagnostic.requestId?.let { appendLine("Request ID：${safeDiagnosticField(it, secret)}") }
         appendLine("說明：${safeDiagnosticField(message, secret)}")
-        appendLine("此報告不含 API key、授權標頭、背景知識、音訊或逐字稿。")
+        if (diagnostic.startupErrorSummary != null)
+            appendLine("服務錯誤摘要已遮蔽已知敏感內容，分享前請確認。未附上請求標頭、音訊、逐字稿或完整設定。")
+        else appendLine("此報告不含 API key、授權標頭、背景知識、音訊或逐字稿。")
     }
 }

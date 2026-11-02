@@ -875,6 +875,26 @@ class AppLogicTest {
         controller.dispose()
     }
 
+    @Test fun startupDiagnosticShowsProbeScopeAndRedactedServiceSummary() = runTest {
+        val services = configuredServices()
+        val transport = FakeTransport().apply {
+            probeFailure = TranslationFailure("服務拒絕請求", FoundryDiagnostic(FoundryStages.START, "PROVIDER_ERROR", 101,
+                providerType = "invalid_request_error", startupErrorSummary = "Unknown parameter: 'session.voice'. SHORT-KEY",
+                minimalProbe = true))
+        }
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
+        controller.testConnection("https://example.openai.azure.com", "gpt-live-1", "")
+        runCurrent()
+        val report = assertNotNull(controller.state.value.lastConnectionReport)
+        assertTrue(report.contains("最小連線測試（只指定模型）"))
+        assertTrue(report.contains("服務錯誤摘要：Unknown parameter: 'session.voice'. [已遮蔽]"))
+        assertTrue(report.contains("分享前請確認"))
+        assertFalse(report.contains("short-key", ignoreCase = true))
+        assertFalse(report.contains("gpt-live-1")) // Foundry deployment names stay private.
+        assertEquals(0, services.mic.starts)
+        controller.dispose()
+    }
+
     @Test fun cancelledProbeRemainsBusyUntilSocketCleanupAndCannotOverlapRecording() = runTest {
         val services = configuredServices()
         val cleanup = CompletableDeferred<Unit>()

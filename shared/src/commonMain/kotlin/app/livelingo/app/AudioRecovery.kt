@@ -141,10 +141,12 @@ internal class RecoveringTranslationSession(
         val revision = MutableStateFlow(0L)
         var replaying = journal.state.next > journal.state.committed
         var captureDone = false
-        val writer = launch {
+        // A cancelled receive can discard a frame already handed directly to a suspended receiver.
+        // Keep the entire receive/write loop alive until stopCapture closes the input, then join it.
+        val writer = launch(start = CoroutineStart.UNDISPATCHED) { withContext(NonCancellable) {
             try {
                 for (bytes in audio) {
-                    try { withContext(NonCancellable) { journal.append(bytes) } }
+                    try { journal.append(bytes) }
                     catch (cancelled: CancellationException) { throw cancelled }
                     catch (_: Exception) { throw TranslationFailure("錄音無法寫入裝置，已停止收音。已保存的錄音與文字仍保留，請確認儲存空間。") }
                     revision.value++
@@ -153,7 +155,7 @@ internal class RecoveringTranslationSession(
                 captureDone = true
                 revision.value++
             }
-        }
+        } }
         var initial = true
         var retries = 0
         var attempt = 0
@@ -240,7 +242,7 @@ internal class RecoveringTranslationSession(
             // Caller stops capture before closing audio. Preserve frames already delivered by the mic,
             // including a final frame emitted by stop(). Never cancel the capture channel here.
             withContext(NonCancellable) {
-                writer.cancelAndJoin()
+                writer.join()
                 while (true) {
                     val bytes = audio.tryReceive().getOrNull() ?: break
                     journal.append(bytes)

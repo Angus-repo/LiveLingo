@@ -479,7 +479,7 @@ class AppController(
                             .takeLast(40).joinToString("\n") { "${it.channel}: ${it.text}" }.takeLast(2_000)
                     },
                     attemptId = services::uniqueId,
-                    stopCapture = { services.microphone.stop(); queue.close() },
+                    stopCapture = { try { services.microphone.stop() } finally { queue.close() } },
                     onNotice = { notice ->
                         val current = mutable.value.current?.takeIf { it.id == record.id }
                         if (current != null && notice.diagnostic.code == "CONTENT_FILTER") {

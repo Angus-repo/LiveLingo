@@ -432,21 +432,25 @@ class AppController(
                         }
                     },
                     onSnapshot = { segment, attempt, events, complete, publish ->
-                        if (publish && events.isNotEmpty()) {
+                        if (events.isNotEmpty()) {
                             val current = mutable.value.current ?: throw TranslationFailure("逐字稿狀態已遺失。")
                             val existing = current.fragments.filter { it.recoverySegment == segment }
                             val label = mutable.value.speaker.takeUnless { it == "未標記" }
                             val fragments = events.mapIndexed { index, event ->
                                 val id = "$transcriptAttemptId-$segment-$attempt-$index"
-                                existing.find { it.id == id } ?: TranscriptFragment(id, event.channel, event.startMs, event.endMs,
+                                (existing + current.recoveredText).find { it.id == id } ?: TranscriptFragment(id, event.channel, event.startMs, event.endMs,
                                     event.text, if (event.channel == TranscriptChannel.INPUT) label else null, recoverySegment = segment)
                             }
                             // A replay may return an empty channel. Never remove text already received there.
                             val preserved = if (complete) existing.filter { old -> fragments.none { it.channel == old.channel } } else emptyList()
                             val changed = complete && existing.isNotEmpty() && existing.map { it.text } != fragments.map { it.text }
-                            val next = current.copy(
+                            val snapshotIds = fragments.map { it.id }.toSet()
+                            val next = if (!publish) current.copy(recoveredText =
+                                current.recoveredText.filterNot { it.id in snapshotIds } + fragments)
+                            else current.copy(
                                 fragments = current.fragments.filterNot { it.recoverySegment == segment } + fragments + preserved,
-                                recoveredText = if (changed) current.recoveredText + existing.filterNot { it in current.recoveredText } else current.recoveredText,
+                                recoveredText = current.recoveredText.filterNot { it.id in snapshotIds } +
+                                    if (changed) existing.filterNot { it in current.recoveredText } else emptyList(),
                                 paragraphLayouts = if (changed) emptyList() else current.paragraphLayouts)
                             replaceRecord(next)
                             mutable.value = mutable.value.copy(transcriptSaved = false)
@@ -505,7 +509,7 @@ class AppController(
                 withContext(NonCancellable) {
                     paragraphJob?.cancelAndJoin()
                     paragraphJob = null
-                    if (sessionFailure == null && paragraphModel.isNotBlank())
+                    if (sessionFailure == null && paragraphModel.isNotBlank() && !runCatching { hasPendingAudio(record.id) }.getOrDefault(true))
                         formatParagraphs(record.id, connection, sessionApiKey, paragraphModel, final = true)
                 }
                 transport.setUsageListener {}

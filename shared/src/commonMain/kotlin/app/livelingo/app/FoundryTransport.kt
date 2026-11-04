@@ -51,6 +51,14 @@ internal interface FoundrySocket {
     fun cancel()
 }
 
+/** A stalled sender must fail its parent session, not silently cancel only the sender coroutine. */
+internal suspend fun FoundrySocket.sendBounded(payload: String, stage: String) {
+    try { withTimeout(15_000) { send(payload) } }
+    catch (_: TimeoutCancellationException) {
+        throw TranslationFailure("音訊傳送逾時，等待連線恢復。", FoundryDiagnostic(stage, "TIMEOUT"))
+    }
+}
+
 internal fun interface FoundrySocketFactory {
     suspend fun open(url: String, apiKey: String): FoundrySocket
     fun close() {}
@@ -244,13 +252,13 @@ class KtorFoundryTransport internal constructor(
             val stopRequested = CompletableDeferred<Unit>()
             sender = launch {
                 for (bytes in audio) {
-                    active.send(foundryAudioPayload(bytes))
+                    active.sendBounded(foundryAudioPayload(bytes), stage)
                     val elapsed = usageClock!!.elapsedNow().inWholeMilliseconds / 1000.0
                     if (elapsed - lastCheckpoint >= 5.0) { lastCheckpoint = elapsed; checkpoint() }
                 }
                 stage = FoundryStages.STOP
                 stopRequested.complete(Unit)
-                active.send(FOUNDRY_CLOSE_PAYLOAD)
+                active.sendBounded(FOUNDRY_CLOSE_PAYLOAD, stage)
             }
             drainDeadline = launch {
                 stopRequested.await()

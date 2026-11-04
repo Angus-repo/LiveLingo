@@ -143,6 +143,16 @@ class AudioRecoveryTest {
         assertEquals(0L, journal.state.committed)
     }
 
+    @Test fun recoversPcmWrittenJustBeforeAnInterruptedIndexUpdate() = runTest {
+        val storage = RecoveryStorage()
+        AudioJournal(storage, "orphan", connection, StandardTestDispatcher(testScheduler))
+        storage.write("pcm_orphan_0", kotlin.io.encoding.Base64.encode(byteArrayOf(9, 10)))
+        val restored = AudioJournal(storage, "orphan", connection, StandardTestDispatcher(testScheduler))
+        assertEquals(1L, restored.state.next)
+        assertContentEquals(byteArrayOf(9, 10), restored.read(0))
+        assertEquals(2L, AudioJournal.readState(storage, "orphan")!!.bytes)
+    }
+
     @Test fun retryPolicySeparatesTemporaryFailuresFromCredentialsQuotaAndProtocolErrors() {
         for (code in listOf("TIMEOUT", "DNS", "CONNECT", "CONNECTION_CLOSED", "SESSION_EXPIRED"))
             assertTrue(retryableTranslationFailure(TranslationFailure("test", FoundryDiagnostic(FoundryStages.STREAM, code))))
@@ -163,7 +173,7 @@ private class RecoveryStorage : LocalStorage {
     override fun writeSecret(key: String, value: String) {}
 }
 
-private class ScriptTransport(private val script: suspend (ReceiveChannel<ByteArray>, suspend () -> Unit,
+internal class ScriptTransport(private val script: suspend (ReceiveChannel<ByteArray>, suspend () -> Unit,
     suspend (TranscriptDelta) -> Unit, suspend (TranslationNotice) -> Unit) -> Unit) : TranslationTransport {
     private var usage: suspend (UsageSample) -> Unit = {}
     override fun setUsageListener(listener: suspend (UsageSample) -> Unit) { usage = listener }

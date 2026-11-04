@@ -32,6 +32,9 @@ internal class AudioJournal(
     private val current = MutableStateFlow(readState(storage, id) ?: AudioRecoveryState(connection))
     val state: AudioRecoveryState get() = current.value
     private fun chunkKey(index: Long) = "pcm_${id}_$index"
+    init {
+        if (storage.read(manifestKey) == null) storage.write(manifestKey, WireJson.encodeToString(state))
+    }
 
     suspend fun append(bytes: ByteArray) = lock.withLock {
         require(bytes.isNotEmpty() && bytes.size % 2 == 0 && bytes.size <= 48_000)
@@ -73,8 +76,19 @@ internal class AudioJournal(
     }
 
     companion object {
-        fun readState(storage: LocalStorage, id: String): AudioRecoveryState? =
-            storage.read("audio_$id")?.let { WireJson.decodeFromString(it) }
+        fun readState(storage: LocalStorage, id: String): AudioRecoveryState? {
+            var saved = storage.read("audio_$id")?.let { WireJson.decodeFromString<AudioRecoveryState>(it) } ?: return null
+            // Recover a frame if the process stopped between publishing its PCM and updating the index.
+            val original = saved
+            while (true) {
+                val orphan = storage.read("pcm_${id}_${saved.next}") ?: break
+                val size = Base64.decode(orphan).size
+                require(size in 2..48_000 && size % 2 == 0)
+                saved = saved.copy(next = saved.next + 1, bytes = saved.bytes + size)
+            }
+            if (saved != original) storage.write("audio_$id", WireJson.encodeToString(saved))
+            return saved
+        }
 
         fun delete(storage: LocalStorage, id: String) {
             val state = readState(storage, id)
@@ -147,6 +161,8 @@ internal class RecoveringTranslationSession(
                 currentCoroutineContext().ensureActive()
                 val start = journal.state.committed
                 val offset = journal.state.committedBytes
+                // Drain an existing backlog promptly, rather than waiting for another full live window.
+                val replayEnd = if (replaying && journal.state.next > start) journal.state.next else Long.MAX_VALUE
                 val queue = Channel<ByteArray>(1)
                 val events = mutableListOf<TranscriptDelta>()
                 val currentAttempt = attempt++
@@ -158,7 +174,7 @@ internal class RecoveringTranslationSession(
                 try {
                     coroutineScope {
                         val feeder = launch {
-                            while (endBytes - offset < windowBytes) {
+                            while (end < replayEnd && endBytes - offset < windowBytes) {
                                 val observed = revision.value
                                 if (end < journal.state.next) {
                                     val bytes = journal.read(end)
@@ -178,9 +194,11 @@ internal class RecoveringTranslationSession(
                                         throw TranslationFailure("服務回傳了無效的字幕時間或內容。")
                                     if (event.text.isNotEmpty()) {
                                         events += event.copy(startMs = event.startMs + offset / 48, endMs = event.endMs + offset / 48)
-                                        journal.saveDraft(events)
-                                        // Keep the previous received text visible while replay is incomplete.
-                                        onSnapshot(start, currentAttempt, events.toList(), false, !replaying)
+                                        withContext(NonCancellable) {
+                                            journal.saveDraft(events)
+                                            // Keep the previous received text visible while replay is incomplete.
+                                            onSnapshot(start, currentAttempt, events.toList(), false, !replaying)
+                                        }
                                     }
                                 }, onNotice = { notice ->
                                     if (notice.diagnostic.code == "CONTENT_FILTER") {
@@ -215,10 +233,10 @@ internal class RecoveringTranslationSession(
             }
         } finally {
             stopCapture()
-            writer.cancelAndJoin()
             // Caller stops capture before closing audio. Preserve frames already delivered by the mic,
             // including a final frame emitted by stop(). Never cancel the capture channel here.
             withContext(NonCancellable) {
+                writer.cancelAndJoin()
                 while (true) {
                     val bytes = audio.tryReceive().getOrNull() ?: break
                     journal.append(bytes)

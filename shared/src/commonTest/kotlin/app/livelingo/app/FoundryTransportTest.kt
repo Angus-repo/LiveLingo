@@ -33,7 +33,7 @@ private class FakeFoundrySocket : FoundrySocket {
     override fun cancel() { cancelled = true }
 }
 
-private class Harness(scope: CoroutineScope, val socket: FakeFoundrySocket = FakeFoundrySocket()) {
+private class Harness(scope: CoroutineScope, val socket: FakeFoundrySocket = FakeFoundrySocket(), inactivity: Long = 0) {
     val audio = Channel<ByteArray>(10)
     val result = CompletableDeferred<Result<Unit>>()
     val transcripts = mutableListOf<TranscriptDelta>()
@@ -42,7 +42,7 @@ private class Harness(scope: CoroutineScope, val socket: FakeFoundrySocket = Fak
     var readyCount = 0
     var url: String? = null
     var apiKey: String? = null
-    val transport = KtorFoundryTransport(FoundrySocketFactory { target, key -> url = target; apiKey = key; socket })
+    val transport = KtorFoundryTransport(FoundrySocketFactory { target, key -> url = target; apiKey = key; socket }, inactivityTimeoutMillis = inactivity)
     val job = scope.launch {
         transport.setUsageListener { usages += it }
         result.complete(runCatching {
@@ -283,8 +283,8 @@ class FoundryTransportTest {
         assertTrue(h.socket.cancelled)
     }
 
-    @Test fun providerUsageRefreshesInactivityDeadlineWithoutSendingFakePing() = runTest {
-        val h = Harness(this)
+    @Test fun providerUsageRefreshesOptionalInactivityDeadlineWithoutSendingFakePing() = runTest {
+        val h = Harness(this, inactivity = 90_000)
         h.socket.sent.receive()
         h.socket.incoming.send(STARTED)
         runCurrent()
@@ -299,6 +299,39 @@ class FoundryTransportTest {
         assertTrue(error.message.orEmpty().contains("90 秒"))
         assertEquals(listOf("session.start"), h.socket.sentTypes)
         assertTrue(h.socket.cancelled)
+    }
+
+    @Test fun healthySilenceLongerThanNinetySecondsDoesNotStopDefaultSession() = runTest {
+        val h = Harness(this)
+        h.socket.sent.receive()
+        h.socket.incoming.send(STARTED)
+        runCurrent()
+        advanceTimeBy(180_000); runCurrent()
+        assertFalse(h.result.isCompleted)
+        h.audio.send(byteArrayOf(0, 0))
+        h.audio.close()
+        h.socket.incoming.send(CLOSED)
+        assertTrue(h.result.await().isSuccess)
+    }
+
+    @Test fun stalledAudioSendFailsTheWholeSessionWithRetryableTimeout() = runTest {
+        val incoming = Channel<String>(Channel.UNLIMITED).also { it.trySend(STARTED) }
+        var cancelled = false
+        val socket = object : FoundrySocket {
+            override suspend fun send(payload: String) {
+                if ("session.input_audio.append" in payload) awaitCancellation()
+            }
+            override suspend fun receive(): String? = incoming.receive()
+            override suspend fun close() {}
+            override fun cancel() { cancelled = true }
+        }
+        val transport = KtorFoundryTransport(FoundrySocketFactory { _, _ -> socket })
+        val audio = Channel<ByteArray>(1).also { it.trySend(byteArrayOf(0, 0)) }
+        val result = async { runCatching { transport.run(FoundryConnection("https://sample.openai.azure.com"), "key", SessionSettings(), audio, {}, {}) } }
+        advanceTimeBy(15_001); runCurrent()
+        val failure = assertIs<TranslationFailure>(result.await().exceptionOrNull())
+        assertEquals("TIMEOUT", failure.diagnostic?.code)
+        assertTrue(cancelled)
     }
 
     @Test fun stopTimeoutPreservesFailureAndClosesSocket() = runTest {

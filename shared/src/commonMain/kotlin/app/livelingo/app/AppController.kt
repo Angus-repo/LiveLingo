@@ -397,7 +397,8 @@ class AppController(
                 } catch (failure: Exception) {
                     throw TranslationFailure((failure as? AudioCaptureFailure)?.message ?: "無法準備背景翻譯音源。請在 App 前景開始，並允許所需的錄音或音訊擷取授權。")
                 }
-                val journal = AudioJournal(services.storage, record.id, connection)
+                val journal = try { AudioJournal(services.storage, record.id, connection) }
+                catch (_: Exception) { throw TranslationFailure("無法建立或讀取錄音保存檔，尚未開始收音。請確認裝置儲存空間。") }
                 RecoveringTranslationSession(journal, transport).run(sessionApiKey, settings, queue,
                     onReady = {
                         ensureActive()
@@ -471,6 +472,10 @@ class AppController(
                     },
                     onUsage = { sample -> recordUsage(record.id, sample) },
                     allowRetry = { mutable.value.phase != ConnectionPhase.STOPPING },
+                    contextForSegment = { segment ->
+                        mutable.value.current?.fragments.orEmpty().filter { (it.recoverySegment ?: Long.MAX_VALUE) < segment }
+                            .takeLast(40).joinToString("\n") { "${it.channel}: ${it.text}" }.takeLast(2_000)
+                    },
                     attemptId = services::uniqueId,
                     stopCapture = { services.microphone.stop(); queue.close() },
                     onNotice = { notice ->

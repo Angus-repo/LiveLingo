@@ -47,3 +47,9 @@ android {
     defaultConfig { minSdk = 26 }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
 }
+
+// Keep recovery regressions diagnosable in CI instead of leaving a silent hung coroutine test.
+tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
+    systemProperty("kotlinx.coroutines.test.default_timeout", "30s")
+    testLogging { events("started", "failed", "skipped") }
+}

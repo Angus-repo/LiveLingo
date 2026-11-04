@@ -175,6 +175,7 @@ class KtorFoundryTransport internal constructor(
         var finalUsage = false
         var lastUsageSeconds = 0.0
         var lastCheckpoint = 0.0
+        var sentAudioBytes = 0L
         var backendCount = 0
         val backendIds = mutableSetOf<String>()
         suspend fun checkpoint() {
@@ -253,6 +254,7 @@ class KtorFoundryTransport internal constructor(
             sender = launch {
                 for (bytes in audio) {
                     active.sendBounded(foundryAudioPayload(bytes), stage)
+                    sentAudioBytes += bytes.size
                     val elapsed = usageClock!!.elapsedNow().inWholeMilliseconds / 1000.0
                     if (elapsed - lastCheckpoint >= 5.0) { lastCheckpoint = elapsed; checkpoint() }
                 }
@@ -262,7 +264,8 @@ class KtorFoundryTransport internal constructor(
             }
             drainDeadline = launch {
                 stopRequested.await()
-                delay(drainTimeoutMillis)
+                val ahead = (sentAudioBytes / 48 - (usageClock?.elapsedNow()?.inWholeMilliseconds ?: 0)).coerceIn(0, 120_000)
+                delay(drainTimeoutMillis + if (ahead > 5_000) ahead else 0)
                 throw TranslationFailure("結束等待逾時；已收到的字幕已保留，最後一句可能不完整。", FoundryDiagnostic(FoundryStages.STOP, "TIMEOUT"))
             }
             while (true) {

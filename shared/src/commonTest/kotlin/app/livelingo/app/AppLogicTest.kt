@@ -1028,7 +1028,8 @@ class AppLogicTest {
         }
         val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
         controller.setAiParagraphs(false)
-        controller.start(); runCurrent()
+        controller.start()
+        controller.state.first { it.phase == ConnectionPhase.LISTENING }
         val id = controller.state.value.current!!.id
         services.mic.emit(byteArrayOf(1, 2))
         controller.state.first { it.phase == ConnectionPhase.RECONNECTING }

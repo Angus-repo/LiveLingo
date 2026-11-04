@@ -83,7 +83,16 @@ class AppRepository(private val storage: LocalStorage) {
     }
 
     fun history(): List<TranscriptRecord> = ids().mapNotNull { id ->
-        storage.read("transcript_$id")?.let { WireJson.decodeFromString<TranscriptRecord>(it) }
+        storage.read("transcript_$id")?.let { raw ->
+            val record = WireJson.decodeFromString<TranscriptRecord>(raw)
+            val draft = storage.read("audio_draft_$id")?.let { WireJson.decodeFromString<List<TranscriptDelta>>(it) }.orEmpty()
+            val known = record.fragments + record.recoveredText
+            val retained = draft.mapIndexedNotNull { index, event ->
+                if (event.text.isEmpty() || known.any { it.channel == event.channel && it.startMs == event.startMs && it.endMs == event.endMs && it.text == event.text }) null
+                else TranscriptFragment("draft-$id-$index", event.channel, event.startMs, event.endMs, event.text)
+            }
+            record.copy(recoveredText = record.recoveredText + retained)
+        }
     }.sortedByDescending { it.createdAtMs }
 
     fun saveTranscript(record: TranscriptRecord) {

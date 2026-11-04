@@ -153,6 +153,47 @@ class AudioRecoveryTest {
         assertEquals(2L, AudioJournal.readState(storage, "orphan")!!.bytes)
     }
 
+    @Test fun resumedLongBacklogUsesBoundedWindows() = runTest {
+        val storage = RecoveryStorage()
+        val journal = AudioJournal(storage, "backlog", connection, StandardTestDispatcher(testScheduler))
+        repeat(65) { journal.append(ByteArray(48_000)) }
+        val capture = Channel<ByteArray>(0).also { it.close() }
+        val durations = mutableListOf<Int>()
+        val transport = ScriptTransport { audio, ready, _, _ ->
+            ready()
+            var bytes = 0
+            for (chunk in audio) bytes += chunk.size
+            durations += bytes / 48_000
+        }
+        RecoveringTranslationSession(journal, transport).run("key", settings, capture, {}, { _, _, _, _, _ -> }, {},
+            { _, _ -> fail("No retry") }, {}, { true }, { "a" }, {})
+        assertEquals(listOf(30, 30, 5), durations)
+    }
+
+    @Test fun confirmedContextKeepsOriginalKnowledgeAndOnlyAppliesToSupportedModel() {
+        val original = BackgroundKnowledge("bank", "Banking", "x".repeat(11_900))
+        val settings = SessionSettings(knowledge = original)
+        val updated = settings.withRecoveryContext("previous conversation".repeat(500))
+        assertTrue(updated.knowledge!!.content.startsWith(original.content))
+        assertTrue(updated.knowledge!!.content.length <= 12_000)
+        assertNull(updated.validationError())
+        assertEquals(settings.copy(speechModel = SpeechModel.REALTIME_TRANSLATE),
+            settings.copy(speechModel = SpeechModel.REALTIME_TRANSLATE).withRecoveryContext("private reference"))
+    }
+
+    @Test fun receivedReplayDraftIsReadableAfterRestartEvenBeforeTranscriptReplacement() {
+        val storage = RecoveryStorage()
+        val repository = AppRepository(storage)
+        repository.saveTranscript(TranscriptRecord("draft", "Meeting", 1, settings,
+            fragments = listOf(TranscriptFragment("old", TranscriptChannel.INPUT, 0, 100, "old text"))))
+        storage.write("audio_draft_draft", WireJson.encodeToString(listOf(TranscriptDelta(TranscriptChannel.INPUT, "new text", 0, 200))))
+        val record = repository.history().single()
+        assertEquals("old text", record.fragments.single().text)
+        assertEquals("new text", record.recoveredText.single().text)
+        repository.saveTranscript(record)
+        assertEquals(1, repository.history().single().recoveredText.size)
+    }
+
     @Test fun retryPolicySeparatesTemporaryFailuresFromCredentialsQuotaAndProtocolErrors() {
         for (code in listOf("TIMEOUT", "DNS", "CONNECT", "CONNECTION_CLOSED", "SESSION_EXPIRED"))
             assertTrue(retryableTranslationFailure(TranslationFailure("test", FoundryDiagnostic(FoundryStages.STREAM, code))))

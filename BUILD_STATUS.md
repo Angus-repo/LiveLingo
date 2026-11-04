@@ -1,3 +1,11 @@
+# LiveLingo 0.1.18 驗證狀態
+
+加入逾時自動重連、先保存錄音再傳送、同一逐字稿補處理、離線停止後恢復，以及重連前文字備份。詳細行為、儲存與費用邊界見 [AUDIO_RECOVERY.md](docs/AUDIO_RECOVERY.md)。Android／iOS 版號為 0.1.18／19，沿用既有套件 ID。
+
+本版測試與 Android APK／iOS 編譯以 PR #9 最新提交的 Actions checks 為準。沒有真實 API key 或 Android 實機，尚未實測 vivo X100 Pro 的斷網／鎖螢幕恢復；不宣稱辨識品質或所有裝置故障下的零遺失。以下為歷史版本驗證。
+
+---
+
 # LiveLingo 0.1.17 驗證狀態
 
 0.1.16 的服務錯誤摘要不足以找出 `invalid_request_error` 根因。本版加入僅在啟動前顯示的限長、遮蔽服務摘要；已知標準 OpenAI 模型 ID 可見，自訂部署仍遮蔽。泛用錯誤類型不再直接判定為參數錯誤。

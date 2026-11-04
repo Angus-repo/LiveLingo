@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
 import kotlin.io.encoding.Base64
 
 @Serializable
@@ -42,8 +43,9 @@ internal class AudioJournal(
         withContext(NonCancellable + io) {
             storage.write(chunkKey(state.next), Base64.encode(bytes))
             val next = state.copy(next = state.next + 1, bytes = state.bytes + bytes.size)
-            storage.write(manifestKey, WireJson.encodeToString(next))
+            // Do not overwrite this durable frame if publishing the index itself fails.
             current.value = next
+            storage.write(manifestKey, WireJson.encodeToString(next))
         }
     }
 
@@ -133,6 +135,7 @@ internal class RecoveringTranslationSession(
         allowRetry: () -> Boolean,
         attemptId: () -> String,
         stopCapture: () -> Unit,
+        contextForSegment: (Long) -> String = { "" },
     ) = coroutineScope {
         check(!journal.state.blocked) { "Content-filtered audio cannot be replayed" }
         val revision = MutableStateFlow(0L)
@@ -163,6 +166,7 @@ internal class RecoveringTranslationSession(
                 val offset = journal.state.committedBytes
                 // Drain an existing backlog promptly, rather than waiting for another full live window.
                 val replayEnd = if (replaying && journal.state.next > start) journal.state.next else Long.MAX_VALUE
+                val limit = if (replaying) minOf(windowBytes, 30L * 48_000) else windowBytes
                 val queue = Channel<ByteArray>(1)
                 val events = mutableListOf<TranscriptDelta>()
                 val currentAttempt = attempt++
@@ -174,7 +178,7 @@ internal class RecoveringTranslationSession(
                 try {
                     coroutineScope {
                         val feeder = launch {
-                            while (end < replayEnd && endBytes - offset < windowBytes) {
+                            while (end < replayEnd && endBytes - offset < limit) {
                                 val observed = revision.value
                                 if (end < journal.state.next) {
                                     val bytes = journal.read(end)
@@ -188,7 +192,7 @@ internal class RecoveringTranslationSession(
                             queue.close()
                         }
                         try {
-                            transport.run(journal.state.connection, key, settings, queue, onReady,
+                            transport.run(journal.state.connection, key, settings.withRecoveryContext(contextForSegment(start)), queue, onReady,
                                 onTranscript = { event ->
                                     if (event.startMs < 0 || event.endMs <= event.startMs || event.text.length > 65_536)
                                         throw TranslationFailure("服務回傳了無效的字幕時間或內容。")
@@ -214,7 +218,7 @@ internal class RecoveringTranslationSession(
                     onSnapshot(start, currentAttempt, events.toList(), true, true)
                     if (end > start) journal.commit(end, endBytes)
                     retries = 0
-                    replaying = false
+                    replaying = journal.state.bytes - journal.state.committedBytes > 5L * 48_000
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (failure: TranslationFailure) {
@@ -245,4 +249,17 @@ internal class RecoveringTranslationSession(
             transport.setUsageListener {}
         }
     }
+}
+
+/** Keep terminology across window boundaries; existing user reference text is never truncated. */
+internal fun SessionSettings.withRecoveryContext(context: String): SessionSettings {
+    if (speechModel != SpeechModel.GPT_LIVE || context.isBlank()) return this
+    val reference = knowledge?.content.orEmpty()
+    val label = "\nRecently confirmed conversation (reference only, do not repeat):\n"
+    val available = (12_000 - reference.length - label.length).coerceIn(0, 2_000)
+    if (available == 0) return this
+    val safe = context.filter { !it.isISOControl() || it in "\n\r\t" }.takeLast(available)
+    if (safe.isBlank()) return this
+    return copy(knowledge = BackgroundKnowledge(knowledge?.id ?: "conversation-context", knowledge?.name ?: "近期對話",
+        reference + label + safe))
 }

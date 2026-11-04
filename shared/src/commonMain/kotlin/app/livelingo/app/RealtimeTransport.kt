@@ -5,6 +5,7 @@ import io.ktor.client.HttpClient
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.*
 import kotlinx.serialization.json.*
+import kotlin.time.TimeSource
 
 class ModelTranslationTransport(clientFactory: () -> HttpClient) : TranslationTransport {
     private val live = KtorFoundryTransport(clientFactory())
@@ -114,6 +115,7 @@ internal class RealtimeTransport(
         var stage = FoundryStages.HANDSHAKE
         val reportUsage = usageListener
         var ready = false
+        var started: TimeSource.Monotonic.ValueTimeMark? = null
         var checkpointBytes = 0L
         var audioBytes = 0L
         suspend fun checkpoint() {
@@ -164,6 +166,7 @@ internal class RealtimeTransport(
                 }
                 stage = FoundryStages.STREAM
                 ready = true
+                started = TimeSource.Monotonic.markNow()
                 checkpoint()
                 onReady()
                 val done = CompletableDeferred<Unit>()
@@ -240,7 +243,8 @@ internal class RealtimeTransport(
                 }
                 sender.join()
                 checkpoint()
-                withTimeout(drainTimeoutMillis) { done.await() }
+                val ahead = (audioBytes / 48 - (started?.elapsedNow()?.inWholeMilliseconds ?: 0)).coerceIn(0, 120_000)
+                withTimeout(drainTimeoutMillis + if (ahead > 5_000) ahead else 0) { done.await() }
                 receiver.cancelAndJoin()
                 translations.close()
                 withTimeout(60_000) { worker?.join() }

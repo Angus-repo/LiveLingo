@@ -114,7 +114,8 @@ internal class KtorFoundrySocketFactory(private val originalClient: HttpClient) 
 class KtorFoundryTransport internal constructor(
     private val sockets: FoundrySocketFactory,
     private val startupTimeoutMillis: Long = 30_000,
-    private val inactivityTimeoutMillis: Long = 90_000,
+    // Silence is valid. Native heartbeats detect broken sockets; window draining has its own deadline.
+    private val inactivityTimeoutMillis: Long = 0,
     private val drainTimeoutMillis: Long = 15_000,
 ) : TranslationTransport {
     constructor(client: HttpClient) : this(KtorFoundrySocketFactory(client))
@@ -258,7 +259,10 @@ class KtorFoundryTransport internal constructor(
             }
             while (true) {
                 // Usage/audio events count as activity; GPT-Live has no relay Ping/Pong event.
-                val payload = try { withTimeout(inactivityTimeoutMillis) { active.receive() } }
+                val payload = try {
+                    if (inactivityTimeoutMillis > 0) withTimeout(inactivityTimeoutMillis) { active.receive() }
+                    else active.receive()
+                }
                 catch (_: TimeoutCancellationException) { throw TranslationFailure("Foundry 超過 90 秒沒有回應，已停止收音並保留收到的字幕。", FoundryDiagnostic(stage, "TIMEOUT")) }
                     ?: throw if (pendingFilter != null) disconnectedAfterFilter()
                     else TranslationFailure("Foundry 連線已中斷；已收到的字幕已保留，最後一句可能不完整。", FoundryDiagnostic(stage, "CONNECTION_CLOSED"))

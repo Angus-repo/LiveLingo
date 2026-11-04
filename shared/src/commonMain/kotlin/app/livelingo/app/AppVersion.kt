@@ -1,3 +1,3 @@
 package app.livelingo.app
 
-internal const val APP_VERSION = "0.1.17"
+internal const val APP_VERSION = "0.1.18"

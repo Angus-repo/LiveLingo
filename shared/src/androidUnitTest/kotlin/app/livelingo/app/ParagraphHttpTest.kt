@@ -11,6 +11,8 @@ import kotlinx.serialization.json.*
 import kotlin.test.*
 
 class ParagraphHttpTest {
+    @get:org.junit.Rule val timeout: org.junit.rules.Timeout = org.junit.rules.Timeout.seconds(20)
+
     private val record = TranscriptRecord("r", "x", 0, SessionSettings(), listOf(
         TranscriptFragment("in", TranscriptChannel.INPUT, 0, 1000, "Taiwan is 4.95 trillion. India is 4.92 trillion. Then analyze the reasons."),
         TranscriptFragment("f", TranscriptChannel.OUTPUT, 0, 1000, "台湾4.95兆。\n\n印度4.92兆。\n\n接着分析原因。")

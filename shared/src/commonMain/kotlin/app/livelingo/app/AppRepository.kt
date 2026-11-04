@@ -27,6 +27,7 @@ data class AppPreferences(
     val modelSettingsVersion: Int = 1,
     val savedModelChoices: List<SavedModelChoice> = emptyList(),
     val aiParagraphs: Boolean = true,
+    val costRateOverrides: Map<String, CostRates> = emptyMap(),
     val audioSource: AudioSource = AudioSource.MICROPHONE,
 )
 
@@ -82,14 +83,34 @@ class AppRepository(private val storage: LocalStorage) {
     }
 
     fun history(): List<TranscriptRecord> = ids().mapNotNull { id ->
-        storage.read("transcript_$id")?.let { WireJson.decodeFromString<TranscriptRecord>(it) }
+        storage.read("transcript_$id")?.let { raw ->
+            val record = WireJson.decodeFromString<TranscriptRecord>(raw)
+            val draft = storage.read("audio_draft_$id")?.let { WireJson.decodeFromString<List<TranscriptDelta>>(it) }.orEmpty()
+            val known = record.fragments + record.recoveredText
+            val retained = draft.mapIndexedNotNull { index, event ->
+                if (event.text.isEmpty() || known.any { it.channel == event.channel && it.startMs == event.startMs && it.endMs == event.endMs && it.text == event.text }) null
+                else TranscriptFragment("draft-$id-$index", event.channel, event.startMs, event.endMs, event.text)
+            }
+            record.copy(recoveredText = record.recoveredText + retained)
+        }
     }.sortedByDescending { it.createdAtMs }
 
     fun saveTranscript(record: TranscriptRecord) {
         // Write content before publishing the ID: interruption never points to a half-written record.
         storage.write("transcript_${record.id}", WireJson.encodeToString(record))
+        record.usage?.let { saveMeetingUsage(it.copy(title = record.title)) }
         val current = ids()
         if (record.id !in current) storage.write("transcript_index", WireJson.encodeToString(current + record.id))
+    }
+
+    fun meetingUsage(): List<MeetingUsage> = decode<List<String>>("cost_index", emptyList()).mapNotNull { id ->
+        storage.read("cost_$id")?.let { WireJson.decodeFromString<MeetingUsage>(it) }
+    }.sortedByDescending { it.startedAtMs }
+
+    fun saveMeetingUsage(value: MeetingUsage) {
+        storage.write("cost_${value.id}", WireJson.encodeToString(value))
+        val current = decode<List<String>>("cost_index", emptyList())
+        if (value.id !in current) storage.write("cost_index", WireJson.encodeToString(current + value.id))
     }
 
     fun deleteTranscript(id: String) {

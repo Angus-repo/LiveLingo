@@ -11,11 +11,14 @@ import io.ktor.websocket.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.channels.Channel
+import kotlin.time.TimeSource
+import kotlinx.serialization.json.*
 
 class TranslationFailure(message: String, val diagnostic: FoundryDiagnostic? = null) : Exception(message)
 data class TranslationNotice(val message: String, val diagnostic: FoundryDiagnostic, val sessionEnded: Boolean = false)
 
 interface TranslationTransport {
+    fun setUsageListener(listener: suspend (UsageSample) -> Unit) {}
     suspend fun run(
         connection: FoundryConnection,
         apiKey: String,
@@ -46,6 +49,14 @@ internal interface FoundrySocket {
     suspend fun peerCloseCode(): Int? = null
     suspend fun close()
     fun cancel()
+}
+
+/** A stalled sender must fail its parent session, not silently cancel only the sender coroutine. */
+internal suspend fun FoundrySocket.sendBounded(payload: String, stage: String) {
+    try { withTimeout(15_000) { send(payload) } }
+    catch (_: TimeoutCancellationException) {
+        throw TranslationFailure("音訊傳送逾時，等待連線恢復。", FoundryDiagnostic(stage, "TIMEOUT"))
+    }
 }
 
 internal fun interface FoundrySocketFactory {
@@ -111,10 +122,27 @@ internal class KtorFoundrySocketFactory(private val originalClient: HttpClient) 
 class KtorFoundryTransport internal constructor(
     private val sockets: FoundrySocketFactory,
     private val startupTimeoutMillis: Long = 30_000,
-    private val inactivityTimeoutMillis: Long = 90_000,
+    // Silence is valid. Native heartbeats detect broken sockets; window draining has its own deadline.
+    private val inactivityTimeoutMillis: Long = 0,
     private val drainTimeoutMillis: Long = 15_000,
 ) : TranslationTransport {
     constructor(client: HttpClient) : this(KtorFoundrySocketFactory(client))
+    private var usageListener: suspend (UsageSample) -> Unit = {}
+    override fun setUsageListener(listener: suspend (UsageSample) -> Unit) { usageListener = listener }
+
+    override suspend fun probe(connection: FoundryConnection, apiKey: String): ConnectionProbeResult {
+        val emptyAudio = Channel<ByteArray>(0)
+        emptyAudio.close()
+        try {
+            var notice: TranslationNotice? = null
+            runSession(connection, apiKey, SessionSettings(), emptyAudio, {}, {}, { notice = it }, minimalProbe = true)
+            notice?.let { throw TranslationFailure(it.message, it.diagnostic) }
+            return ConnectionProbeResult(
+                "${connection.provider.label} 最小連線測試成功，所選模型已啟動並正常結束；尚未驗證翻譯設定或收音。",
+                FoundryDiagnostic(FoundryStages.COMPLETE, "OK", 101, minimalProbe = true),
+            )
+        } finally { emptyAudio.cancel() }
+    }
 
     override suspend fun run(
         connection: FoundryConnection,
@@ -124,12 +152,37 @@ class KtorFoundryTransport internal constructor(
         onReady: suspend () -> Unit,
         onTranscript: suspend (TranscriptDelta) -> Unit,
         onNotice: suspend (TranslationNotice) -> Unit,
+    ) = runSession(connection, apiKey, settings, audio, onReady, onTranscript, onNotice, minimalProbe = false)
+
+    private suspend fun runSession(
+        connection: FoundryConnection,
+        apiKey: String,
+        settings: SessionSettings,
+        audio: ReceiveChannel<ByteArray>,
+        onReady: suspend () -> Unit,
+        onTranscript: suspend (TranscriptDelta) -> Unit,
+        onNotice: suspend (TranslationNotice) -> Unit,
+        minimalProbe: Boolean,
     ) {
         connection.validationError()?.let { throw TranslationFailure(it) }
         settings.validationError()?.let { throw TranslationFailure(it) }
         val key = apiKey.trim()
         if (key.isEmpty() || key.length > 4096 || key.any { it.isWhitespace() || it.code < 33 || it.code > 126 })
             throw TranslationFailure("請輸入有效的 Foundry API key，不可包含空白或控制字元。")
+        // A previous meeting's listener may still be installed. A probe must never alter its costs.
+        val reportUsage: suspend (UsageSample) -> Unit = if (minimalProbe) ({ _ -> }) else usageListener
+        var usageClock: TimeSource.Monotonic.ValueTimeMark? = null
+        var finalUsage = false
+        var lastUsageSeconds = 0.0
+        var lastCheckpoint = 0.0
+        var sentAudioBytes = 0L
+        var backendCount = 0
+        val backendIds = mutableSetOf<String>()
+        suspend fun checkpoint() {
+            val seconds = usageClock?.elapsedNow()?.inWholeMilliseconds?.div(1000.0) ?: return
+            if (!finalUsage) reportUsage(UsageSample("voice", UsageKind.VOICE,
+                seconds = maxOf(seconds, lastUsageSeconds), estimated = true))
+        }
         var socket: FoundrySocket? = null
         var sender: Job? = null
         var drainDeadline: Job? = null
@@ -139,7 +192,8 @@ class KtorFoundryTransport internal constructor(
             if (connection.provider == ModelProvider.OPENAI) value.replace("Foundry", "OpenAI").replace("部署", "模型") else value
         fun redacted(failure: TranslationFailure): TranslationFailure {
             val diagnostic = failure.diagnostic
-            return TranslationFailure(providerMessage(failure.message ?: "服務工作階段失敗。"), diagnostic?.copy(requestId = safeRequestId(diagnostic.requestId, key)))
+            return TranslationFailure(providerMessage(failure.message ?: "服務工作階段失敗。"), diagnostic?.copy(
+                requestId = safeRequestId(diagnostic.requestId, key), minimalProbe = minimalProbe))
         }
         fun disconnectedAfterFilter(): TranslationFailure = TranslationFailure(
             "Foundry 在內容篩選通知後斷線，但未回報工作階段結束原因。已收到的字幕已保留；可開始下一段收取新的音訊。若持續發生，請將診斷交給資源管理者確認。",
@@ -153,8 +207,24 @@ class KtorFoundryTransport internal constructor(
         fun decode(payload: String): FoundryEvent = try { parseFoundryEvent(payload) }
         catch (failure: FoundryProtocolException) {
             val fields = safeJsonErrorFields(payload, key)
-            throw TranslationFailure(failure.message ?: "Foundry 回應格式不正確。", FoundryDiagnostic(
-                stage, if (fields.providerCode != null) "PROVIDER_ERROR" else "PROTOCOL", requestId = fields.requestId, providerCode = fields.providerCode,
+            val message = if (failure.isProviderError) foundryProviderError(fields.providerCode ?: fields.providerType)
+                else failure.message ?: "Foundry 回應格式不正確。"
+            val guidance = if (stage != FoundryStages.START) "" else if (minimalProbe)
+                " 最小連線測試未送出翻譯指令、背景知識或音訊；請複製診斷中的服務錯誤摘要。"
+                else " 尚未開始收音；請先到設定執行「測試連線」，此錯誤不能判定麥克風是否正常。"
+            throw TranslationFailure(message + guidance, FoundryDiagnostic(
+                stage, if (failure.isProviderError) "PROVIDER_ERROR" else "PROTOCOL", httpStatus = 101,
+                requestId = fields.requestId, providerCode = fields.providerCode,
+                providerType = fields.providerType, providerParam = fields.providerParam,
+                startupErrorSummary = if (stage == FoundryStages.START && failure.isProviderError)
+                    startupErrorSummary(payload, key, buildList {
+                        if (connection.provider != ModelProvider.OPENAI || connection.deployment.trim() != "gpt-live-1") add(connection.deployment.trim())
+                        add(connection.endpoint)
+                        if (!minimalProbe) {
+                            add(translationInstructions(settings))
+                            settings.knowledge?.let { add(it.id); add(it.name); add(it.content) }
+                        }
+                    }) else null,
             ))
         }
         try {
@@ -164,7 +234,7 @@ class KtorFoundryTransport internal constructor(
             }
             stage = FoundryStages.START
             withTimeout(startupTimeoutMillis) {
-                active.send(foundryStartPayload(connection, settings))
+                active.send(if (minimalProbe) foundryProbePayload(connection) else foundryStartPayload(connection, settings))
                 while (true) {
                     val event = decode(active.receive() ?: throw TranslationFailure("Foundry 在準備完成前已中斷連線。", FoundryDiagnostic(stage, "CONNECTION_CLOSED")))
                     when (event) {
@@ -177,25 +247,51 @@ class KtorFoundryTransport internal constructor(
                 }
             }
             stage = FoundryStages.STREAM
+            usageClock = TimeSource.Monotonic.markNow()
+            reportUsage(UsageSample("voice", UsageKind.VOICE, estimated = true))
             onReady()
             val stopRequested = CompletableDeferred<Unit>()
             sender = launch {
-                for (bytes in audio) active.send(foundryAudioPayload(bytes))
+                for (bytes in audio) {
+                    active.sendBounded(foundryAudioPayload(bytes), stage)
+                    sentAudioBytes += bytes.size
+                    val elapsed = usageClock!!.elapsedNow().inWholeMilliseconds / 1000.0
+                    if (elapsed - lastCheckpoint >= 5.0) { lastCheckpoint = elapsed; checkpoint() }
+                }
                 stage = FoundryStages.STOP
                 stopRequested.complete(Unit)
-                active.send(FOUNDRY_CLOSE_PAYLOAD)
+                active.sendBounded(FOUNDRY_CLOSE_PAYLOAD, stage)
             }
             drainDeadline = launch {
                 stopRequested.await()
-                delay(drainTimeoutMillis)
+                val ahead = (sentAudioBytes / 48 - (usageClock?.elapsedNow()?.inWholeMilliseconds ?: 0)).coerceIn(0, 120_000)
+                delay(drainTimeoutMillis + if (ahead > 5_000) ahead else 0)
                 throw TranslationFailure("結束等待逾時；已收到的字幕已保留，最後一句可能不完整。", FoundryDiagnostic(FoundryStages.STOP, "TIMEOUT"))
             }
             while (true) {
                 // Usage/audio events count as activity; GPT-Live has no relay Ping/Pong event.
-                val payload = try { withTimeout(inactivityTimeoutMillis) { active.receive() } }
+                val payload = try {
+                    if (inactivityTimeoutMillis > 0) withTimeout(inactivityTimeoutMillis) { active.receive() }
+                    else active.receive()
+                }
                 catch (_: TimeoutCancellationException) { throw TranslationFailure("Foundry 超過 90 秒沒有回應，已停止收音並保留收到的字幕。", FoundryDiagnostic(stage, "TIMEOUT")) }
                     ?: throw if (pendingFilter != null) disconnectedAfterFilter()
                     else TranslationFailure("Foundry 連線已中斷；已收到的字幕已保留，最後一句可能不完整。", FoundryDiagnostic(stage, "CONNECTION_CLOSED"))
+                liveUsage(payload)?.let { usage ->
+                    lastUsageSeconds = maxOf(lastUsageSeconds, usage.seconds)
+                    finalUsage = usage.final
+                    reportUsage(if (usage.final) usage else usage.copy(seconds = lastUsageSeconds))
+                }
+                // No backend delegation is configured by this app. Surface unexpected billed work as unpriced.
+                runCatching { WireJson.parseToJsonElement(payload).jsonObject }.getOrNull()?.let { root ->
+                    val nested = root["event"] as? JsonObject
+                    if ((root["type"] as? JsonPrimitive)?.content == "response.event" &&
+                        (nested?.get("type") as? JsonPrimitive)?.content in setOf("response.completed", "response.failed", "response.incomplete")) {
+                        val response = nested?.get("response") as? JsonObject
+                        val id = (response?.get("id") as? JsonPrimitive)?.content ?: "unknown-${backendCount++}"
+                        if (backendIds.add(id)) reportUsage(UsageSample("backend-$id", UsageKind.BACKEND, known = false, final = true))
+                    }
+                }
                 when (val event = decode(payload)) {
                     is FoundryEvent.Transcript -> {
                         pendingFilter = null
@@ -240,8 +336,10 @@ class KtorFoundryTransport internal constructor(
             sender?.cancel()
             drainDeadline?.cancel()
             withContext(NonCancellable) {
-                withTimeoutOrNull(2_000) { runCatching { socket?.close() } }
-                runCatching { socket?.cancel() }
+                try { checkpoint() } finally {
+                    withTimeoutOrNull(2_000) { runCatching { socket?.close() } }
+                    runCatching { socket?.cancel() }
+                }
             }
         }
     }

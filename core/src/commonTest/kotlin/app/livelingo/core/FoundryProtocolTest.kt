@@ -57,8 +57,23 @@ class FoundryProtocolTest {
         assertEquals(setOf("model", "instructions", "audio", "delegation"), session.keys)
         assertEquals("live-prod", session.getValue("model").jsonPrimitive.content)
         assertTrue(session.getValue("instructions").jsonPrimitive.content.contains("OTP"))
+        val audio = session.getValue("audio").jsonObject
+        assertEquals("audio/pcm", audio.getValue("format").jsonObject.getValue("type").jsonPrimitive.content)
+        assertEquals(24_000, audio.getValue("format").jsonObject.getValue("rate").jsonPrimitive.int)
+        assertEquals("marin", audio.getValue("output").jsonObject.getValue("voice").jsonPrimitive.content)
         assertFalse(payload.toString().contains("modalities"))
         assertFalse(payload.toString().contains("api-key"))
+    }
+
+    @Test fun minimalProbeOnlyRequestsTheSelectedModel() {
+        for (provider in ModelProvider.entries) {
+            val value = FoundryConnection(if (provider == ModelProvider.OPENAI) "https://api.openai.com" else "https://sample.openai.azure.com",
+                "gpt-live-1", provider = provider)
+            val root = WireJson.parseToJsonElement(foundryProbePayload(value)).jsonObject
+            assertEquals(setOf("type", "session"), root.keys)
+            assertEquals("session.start", root.getValue("type").jsonPrimitive.content)
+            assertEquals(buildJsonObject { put("model", "gpt-live-1") }, root.getValue("session"))
+        }
     }
 
     @Test fun audioUsesRawPcmAndRejectsWrongLengthsOrContainers() {

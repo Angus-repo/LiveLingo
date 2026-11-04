@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.content.Intent
 import android.media.AudioAttributes
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioPlaybackCaptureConfiguration
 import android.media.AudioRecord
 import android.media.MediaRecorder
@@ -225,6 +226,7 @@ internal class AndroidMicrophone(private val appContext: Context) : Microphone {
         } catch (failure: Exception) { audio.release(); throw failure }
         val session = synchronized(stateLock) { Recording(++generation, audio).also { recording = it } }
         val meter = AudioSignalMeter(source)
+        val audioManager = appContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
         val reportStatus = statusCallback
         session.job = captureScope.launch {
             session.worker = Thread.currentThread()
@@ -238,9 +240,18 @@ internal class AndroidMicrophone(private val appContext: Context) : Microphone {
                         synchronized(session.callbackLock) {
                             if (session.deliveryAllowed.get() && generation == session.generation) onAudio(buffer.copyOf(read))
                         }
-                        meter.accept(buffer, read)?.let { status -> callbackScope.launch {
-                            if (session.active.get() && recording === session) reportStatus?.invoke(status)
-                        } }
+                        meter.accept(buffer, read)?.let { measured ->
+                            // Inspect only our own recording configuration, at most four times/second.
+                            // No audio route, focus, communication mode or capture policy is changed.
+                            val silenced = Build.VERSION.SDK_INT >= 29 &&
+                                runCatching { audio.activeRecordingConfiguration?.isClientSilenced == true }.getOrDefault(false)
+                            val mode = runCatching { audioManager.mode }.getOrNull()
+                            val status = measured.withCapturePolicy(source, silenced,
+                                mode == AudioManager.MODE_IN_CALL || mode == AudioManager.MODE_IN_COMMUNICATION)
+                            callbackScope.launch {
+                                if (session.active.get() && recording === session) reportStatus?.invoke(status)
+                            }
+                        }
                     } else if (session.active.get()) error("capture interrupted")
                 }
             } catch (_: Exception) {

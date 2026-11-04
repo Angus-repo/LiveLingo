@@ -78,6 +78,7 @@ data class TranscriptFragment(
     val endMs: Long,
     val text: String,
     val speakerLabel: String? = null,
+    val recoverySegment: Long? = null,
 ) {
     init {
         require(startMs >= 0) { "字幕開始時間不可為負數。" }
@@ -94,6 +95,9 @@ data class TranscriptRecord(
     val fragments: List<TranscriptFragment> = emptyList(),
     val paragraphLayouts: List<ParagraphLayout> = emptyList(),
     val contentFilterCount: Int = 0,
+    val usage: MeetingUsage? = null,
+    /** Previous partial text retained when a replay supplies a complete replacement (JSON export). */
+    val recoveredText: List<TranscriptFragment> = emptyList(),
 )
 
 /** Breaks are character offsets into an exact source snapshot. No model-rewritten text is stored. */

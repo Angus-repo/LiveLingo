@@ -84,7 +84,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                         }
                         Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(3.dp)) {
                             Text("v$APP_VERSION", style = MaterialTheme.typography.labelSmall, color = Color(0xFF657971))
-                            StatusPill(state.phase, state.connectionTesting, state.audioInputStatus.silencedBySystem)
+                            StatusPill(state.phase, state.connectionTesting, state.audioInputStatus.silencedBySystem, state.replayingSavedAudio)
                         }
                     }
                     Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
@@ -137,12 +137,12 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
     }
 }
 
-@Composable private fun StatusPill(phase: ConnectionPhase, testing: Boolean = false, silenced: Boolean = false) {
+@Composable private fun StatusPill(phase: ConnectionPhase, testing: Boolean = false, silenced: Boolean = false, replaying: Boolean = false) {
     val text = if (testing) "測試連線" else when (phase) {
         ConnectionPhase.IDLE -> "待命"
         ConnectionPhase.CONNECTING -> "準備中"
         ConnectionPhase.RECONNECTING -> "自動重連"
-        ConnectionPhase.LISTENING -> if (silenced) "收音受限" else "收音中"
+        ConnectionPhase.LISTENING -> if (replaying) "補處理中" else if (silenced) "收音受限" else "收音中"
         ConnectionPhase.STOPPING -> "整理字幕"
         ConnectionPhase.ERROR -> "已停止"
     }

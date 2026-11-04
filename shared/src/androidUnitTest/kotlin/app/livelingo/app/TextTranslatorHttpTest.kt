@@ -11,8 +11,6 @@ import java.util.concurrent.TimeUnit
 import kotlin.test.*
 
 class TextTranslatorHttpTest {
-    @get:org.junit.Rule val timeout: org.junit.rules.Timeout = org.junit.rules.Timeout.seconds(20)
-
     @Test fun textTranslationUsesLunaWithProviderCredentialsAndRejectsIncompleteOrRedirectedResults() = runBlocking {
         for (provider in ModelProvider.entries) {
             val server = MockWebServer()

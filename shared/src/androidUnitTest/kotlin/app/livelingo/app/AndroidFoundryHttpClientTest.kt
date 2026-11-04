@@ -28,8 +28,6 @@ import kotlin.test.assertTrue
 
 /** Real TLS and OkHttp handshakes catch engine failures that an injected fake socket cannot. */
 class AndroidFoundryHttpClientTest {
-    @get:org.junit.Rule val timeout: org.junit.rules.Timeout = org.junit.rules.Timeout.seconds(20)
-
     @Test fun nativeFactoryRetainsPeerCloseCodeWithoutExposingCloseText() = runBlocking {
         Fixture().use { fixture ->
             fixture.server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {

@@ -53,12 +53,3 @@ tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
     systemProperty("kotlinx.coroutines.test.default_timeout", "30s")
     testLogging { events("started", "failed", "skipped") }
 }
-
-// Host unit tests have Android stubs, not an Android runtime. Use OkHttp's JVM platform there;
-// the shipped Android variant continues to use OkHttp's Android implementation.
-configurations.matching { it.name.contains("UnitTest") }.configureEach {
-    resolutionStrategy.dependencySubstitution {
-        substitute(module("com.squareup.okhttp3:okhttp"))
-            .using(module("com.squareup.okhttp3:okhttp-jvm:5.1.0"))
-    }
-}

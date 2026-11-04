@@ -454,6 +454,8 @@ class AppController(
                                     if (changed) existing.filterNot { it in current.recoveredText } else emptyList(),
                                 paragraphLayouts = if (changed) emptyList() else current.paragraphLayouts)
                             replaceRecord(next)
+                            if (publish && next.contentFilterCount > 0) mutable.value = mutable.value.copy(
+                                streamNotice = "後續字幕已繼續更新。本次收到 ${next.contentFilterCount} 次內容安全篩選通知，被阻擋的片段可能不完整。")
                             mutable.value = mutable.value.copy(transcriptSaved = false)
                             try {
                                 persistCurrentTranscript(record.id)

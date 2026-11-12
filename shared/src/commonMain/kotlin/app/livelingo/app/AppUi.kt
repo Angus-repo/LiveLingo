@@ -84,7 +84,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                         }
                         Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(3.dp)) {
                             Text("v$APP_VERSION", style = MaterialTheme.typography.labelSmall, color = Color(0xFF657971))
-                            StatusPill(state.phase, state.connectionTesting, state.audioInputStatus.silencedBySystem)
+                            StatusPill(state.phase, state.connectionTesting, state.audioInputStatus.silencedBySystem, state.replayingSavedAudio)
                         }
                     }
                     Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
@@ -137,11 +137,12 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
     }
 }
 
-@Composable private fun StatusPill(phase: ConnectionPhase, testing: Boolean = false, silenced: Boolean = false) {
+@Composable private fun StatusPill(phase: ConnectionPhase, testing: Boolean = false, silenced: Boolean = false, replaying: Boolean = false) {
     val text = if (testing) "測試連線" else when (phase) {
         ConnectionPhase.IDLE -> "待命"
         ConnectionPhase.CONNECTING -> "準備中"
-        ConnectionPhase.LISTENING -> if (silenced) "收音受限" else "收音中"
+        ConnectionPhase.RECONNECTING -> "自動重連"
+        ConnectionPhase.LISTENING -> if (replaying) "補處理中" else if (silenced) "收音受限" else "收音中"
         ConnectionPhase.STOPPING -> "整理字幕"
         ConnectionPhase.ERROR -> "已停止"
     }
@@ -276,7 +277,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                         }
                         if (!state.active) TextButton(onClick = { editSetup = true }, enabled = !state.busy) { Text("調整設定") }
                     }
-                    if (state.phase == ConnectionPhase.LISTENING && controller.reportsAudioLevel()) {
+                    if (!state.replayingSavedAudio && state.phase in setOf(ConnectionPhase.LISTENING, ConnectionPhase.RECONNECTING) && controller.reportsAudioLevel()) {
                         LinearProgressIndicator(progress = { state.audioInputStatus.level }, modifier = Modifier.fillMaxWidth(), color = Mint)
                         Text(when {
                             state.audioInputStatus.silencedBySystem -> "收音遭系統靜音"
@@ -285,6 +286,17 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                         }, style = MaterialTheme.typography.labelSmall, color = Color(0xFF657971))
                         state.audioInputStatus.warning?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = Color(0xFF9A473E)) }
                     }
+                }
+            }
+            state.recoveryStatus?.let { status -> item {
+                SectionCard(if (state.phase == ConnectionPhase.RECONNECTING) "正在恢復連線" else "錄音補處理") {
+                    Text(status, style = MaterialTheme.typography.bodySmall, color = Ink)
+                }
+            } }
+            if (state.current?.id in state.pendingAudioIds && !state.active) item {
+                SectionCard("還有錄音待補回文字") {
+                    Text("錄音已保留在這台裝置，連上網路後可繼續補處理到同一份逐字稿。", style = MaterialTheme.typography.bodySmall)
+                    Button(onClick = { state.current?.id?.let(controller::resumePendingAudio) }, enabled = !state.busy) { Text("補回待處理錄音") }
                 }
             }
             if (state.sessionIssue != null || (state.current?.contentFilterCount ?: 0) > 0) item {
@@ -342,7 +354,8 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                     }
                     Text(if (state.connectionTesting) "連線測試進行中…" else when (state.phase) {
                         ConnectionPhase.CONNECTING -> "取消連線／音源授權"
-                        ConnectionPhase.LISTENING -> "■  停止並儲存"
+                        ConnectionPhase.RECONNECTING -> "■  停止並保留待處理錄音"
+                        ConnectionPhase.LISTENING -> if (state.replayingSavedAudio) "■  暫停補處理" else "■  停止並儲存"
                         ConnectionPhase.STOPPING -> "接收最後的字幕…"
                         else -> if (needsConnection) "先設定翻譯服務 →" else if (state.current == null) "開始即時翻譯" else "開始下一段"
                     }, fontWeight = FontWeight.SemiBold)
@@ -425,7 +438,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
     var deleting by remember { mutableStateOf<TranscriptRecord?>(null) }
     val record = state.history.find { it.id == selectedId }
     if (record != null) {
-        TranscriptDetail(record, state.active, controller, onBack = { selectedId = null })
+        TranscriptDetail(record, state.active, record.id in state.pendingAudioIds, controller, onBack = { selectedId = null })
     } else {
         LazyColumn(contentPadding = PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             item { PageIntro("對話留下來", "每一段翻譯都自動儲存在這台裝置；可回看、修正手動發言者標記，或匯出字幕。") }
@@ -435,6 +448,10 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                     Text(formatDate(item.createdAtMs), style = MaterialTheme.typography.labelMedium, color = Mint)
                     Text("${item.fragments.size} 個串流片段 · ${formatTime(item.fragments.maxOfOrNull { it.endMs } ?: 0)}", style = MaterialTheme.typography.bodySmall)
                     if (item.contentFilterCount > 0) Text("有內容篩選記錄，部分片段可能不完整", style = MaterialTheme.typography.bodySmall, color = Color(0xFF9A473E))
+                    if (item.id in state.pendingAudioIds) {
+                        Text("有已保存的錄音待補回文字", style = MaterialTheme.typography.bodySmall, color = Mint)
+                        TextButton(onClick = { controller.resumePendingAudio(item.id) }, enabled = !state.busy) { Text("補回待處理錄音") }
+                    }
                     item.settings.knowledge?.let { Text("背景：${it.name}", style = MaterialTheme.typography.bodySmall) }
                     Text(liveCaptionText(item, TranscriptChannel.OUTPUT).ifBlank { "尚未收到字幕" }, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     Row {
@@ -449,7 +466,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
     deleting?.let { item -> ConfirmDelete("刪除這份逐字稿？", "此動作會刪除裝置上的記錄，無法復原；已匯出的檔案不受影響。", { deleting = null }) { controller.deleteTranscript(item.id); deleting = null } }
 }
 
-@Composable private fun TranscriptDetail(record: TranscriptRecord, active: Boolean, controller: AppController, onBack: () -> Unit) {
+@Composable private fun TranscriptDetail(record: TranscriptRecord, active: Boolean, pendingAudio: Boolean, controller: AppController, onBack: () -> Unit) {
     var channel by remember(record.id) { mutableStateOf(TranscriptChannel.OUTPUT) }
     var exportOpen by remember { mutableStateOf(false) }
     var labeling by remember { mutableStateOf<DisplayCue?>(null) }
@@ -457,10 +474,25 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
     var rename by remember { mutableStateOf(false) }
     var title by remember(record.id) { mutableStateOf(record.title) }
     var showTimestamps by remember(record.id) { mutableStateOf(false) }
+    var showRecoveredText by remember(record.id) { mutableStateOf(false) }
     val cues = displayCues(record, channel)
     LazyColumn(contentPadding = PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item { TextButton(onClick = onBack) { Text("← 所有逐字稿") } }
         item { PageIntro(record.title, formatDate(record.createdAtMs)) }
+        if (pendingAudio && !active) item {
+            Button(onClick = { controller.resumePendingAudio(record.id) }) { Text("補回待處理錄音") }
+        }
+        if (record.recoveredText.isNotEmpty()) item {
+            SectionCard {
+                TextButton(onClick = { showRecoveredText = !showRecoveredText }) { Text(if (showRecoveredText) "收起重連前文字" else "查看重連前文字備份") }
+                if (showRecoveredText) {
+                    Text("重連前已收到的片段保留於此；上方逐字稿使用補處理後的內容。JSON 匯出也會保留這些片段。", style = MaterialTheme.typography.bodySmall)
+                    for (track in TranscriptChannel.entries) SelectionContainer {
+                        Text((if (track == TranscriptChannel.INPUT) "原文：" else "譯文：") + record.recoveredText.filter { it.channel == track }.joinToString("") { it.text })
+                    }
+                }
+            }
+        }
         item { Text("音源：${record.settings.audioSource.label}", style = MaterialTheme.typography.bodySmall) }
         if (record.contentFilterCount > 0) item {
             Text("本次收到 ${record.contentFilterCount} 次內容安全篩選通知，部分片段可能不完整。", style = MaterialTheme.typography.bodySmall, color = Color(0xFF9A473E))

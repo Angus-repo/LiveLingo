@@ -5,6 +5,7 @@ import io.ktor.client.HttpClient
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.*
 import kotlinx.serialization.json.*
+import kotlin.time.TimeSource
 
 class ModelTranslationTransport(clientFactory: () -> HttpClient) : TranslationTransport {
     private val live = KtorFoundryTransport(clientFactory())
@@ -114,6 +115,7 @@ internal class RealtimeTransport(
         var stage = FoundryStages.HANDSHAKE
         val reportUsage = usageListener
         var ready = false
+        var started: TimeSource.Monotonic.ValueTimeMark? = null
         var checkpointBytes = 0L
         var audioBytes = 0L
         suspend fun checkpoint() {
@@ -164,6 +166,7 @@ internal class RealtimeTransport(
                 }
                 stage = FoundryStages.STREAM
                 ready = true
+                started = TimeSource.Monotonic.markNow()
                 checkpoint()
                 onReady()
                 val done = CompletableDeferred<Unit>()
@@ -219,14 +222,14 @@ internal class RealtimeTransport(
                         // Avoid committing less than 100 ms at shutdown.
                         if (uncommittedBytes < 4800) {
                             val padding = ByteArray((4800 - uncommittedBytes).toInt())
-                            active.send(realtimeAudioPayload(connection.speechModel, padding)); audioBytes += padding.size
+                            active.sendBounded(realtimeAudioPayload(connection.speechModel, padding), stage); audioBytes += padding.size
                         }
                         pending.commit(audioBytes / 48)
-                        active.send(TRANSCRIPTION_COMMIT_PAYLOAD)
+                        active.sendBounded(TRANSCRIPTION_COMMIT_PAYLOAD, stage)
                         uncommittedBytes = 0
                     }
                     for (bytes in audio) {
-                        active.send(realtimeAudioPayload(connection.speechModel, bytes))
+                        active.sendBounded(realtimeAudioPayload(connection.speechModel, bytes), stage)
                         audioBytes += bytes.size; uncommittedBytes += bytes.size
                         if (audioBytes - checkpointBytes >= 240_000) { checkpointBytes = audioBytes; checkpoint() }
                         // Bounded three-second commits, including silence. No server VAD is assumed.
@@ -236,11 +239,12 @@ internal class RealtimeTransport(
                     if (transcribes) {
                         commit(); stopping = true
                         if (pending.empty) done.complete(Unit)
-                    } else { stopping = true; active.send(FOUNDRY_CLOSE_PAYLOAD) }
+                    } else { stopping = true; active.sendBounded(FOUNDRY_CLOSE_PAYLOAD, stage) }
                 }
                 sender.join()
                 checkpoint()
-                withTimeout(drainTimeoutMillis) { done.await() }
+                val ahead = (audioBytes / 48 - (started?.elapsedNow()?.inWholeMilliseconds ?: 0)).coerceIn(0, 120_000)
+                withTimeout(drainTimeoutMillis + if (ahead > 5_000) ahead else 0) { done.await() }
                 receiver.cancelAndJoin()
                 translations.close()
                 withTimeout(60_000) { worker?.join() }

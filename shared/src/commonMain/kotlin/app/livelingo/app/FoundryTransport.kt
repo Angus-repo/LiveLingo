@@ -51,6 +51,14 @@ internal interface FoundrySocket {
     fun cancel()
 }
 
+/** A stalled sender must fail its parent session, not silently cancel only the sender coroutine. */
+internal suspend fun FoundrySocket.sendBounded(payload: String, stage: String) {
+    try { withTimeout(15_000) { send(payload) } }
+    catch (_: TimeoutCancellationException) {
+        throw TranslationFailure("音訊傳送逾時，等待連線恢復。", FoundryDiagnostic(stage, "TIMEOUT"))
+    }
+}
+
 internal fun interface FoundrySocketFactory {
     suspend fun open(url: String, apiKey: String): FoundrySocket
     fun close() {}
@@ -114,7 +122,8 @@ internal class KtorFoundrySocketFactory(private val originalClient: HttpClient) 
 class KtorFoundryTransport internal constructor(
     private val sockets: FoundrySocketFactory,
     private val startupTimeoutMillis: Long = 30_000,
-    private val inactivityTimeoutMillis: Long = 90_000,
+    // Silence is valid. Native heartbeats detect broken sockets; window draining has its own deadline.
+    private val inactivityTimeoutMillis: Long = 0,
     private val drainTimeoutMillis: Long = 15_000,
 ) : TranslationTransport {
     constructor(client: HttpClient) : this(KtorFoundrySocketFactory(client))
@@ -166,6 +175,7 @@ class KtorFoundryTransport internal constructor(
         var finalUsage = false
         var lastUsageSeconds = 0.0
         var lastCheckpoint = 0.0
+        var sentAudioBytes = 0L
         var backendCount = 0
         val backendIds = mutableSetOf<String>()
         suspend fun checkpoint() {
@@ -243,22 +253,27 @@ class KtorFoundryTransport internal constructor(
             val stopRequested = CompletableDeferred<Unit>()
             sender = launch {
                 for (bytes in audio) {
-                    active.send(foundryAudioPayload(bytes))
+                    active.sendBounded(foundryAudioPayload(bytes), stage)
+                    sentAudioBytes += bytes.size
                     val elapsed = usageClock!!.elapsedNow().inWholeMilliseconds / 1000.0
                     if (elapsed - lastCheckpoint >= 5.0) { lastCheckpoint = elapsed; checkpoint() }
                 }
                 stage = FoundryStages.STOP
                 stopRequested.complete(Unit)
-                active.send(FOUNDRY_CLOSE_PAYLOAD)
+                active.sendBounded(FOUNDRY_CLOSE_PAYLOAD, stage)
             }
             drainDeadline = launch {
                 stopRequested.await()
-                delay(drainTimeoutMillis)
+                val ahead = (sentAudioBytes / 48 - (usageClock?.elapsedNow()?.inWholeMilliseconds ?: 0)).coerceIn(0, 120_000)
+                delay(drainTimeoutMillis + if (ahead > 5_000) ahead else 0)
                 throw TranslationFailure("結束等待逾時；已收到的字幕已保留，最後一句可能不完整。", FoundryDiagnostic(FoundryStages.STOP, "TIMEOUT"))
             }
             while (true) {
                 // Usage/audio events count as activity; GPT-Live has no relay Ping/Pong event.
-                val payload = try { withTimeout(inactivityTimeoutMillis) { active.receive() } }
+                val payload = try {
+                    if (inactivityTimeoutMillis > 0) withTimeout(inactivityTimeoutMillis) { active.receive() }
+                    else active.receive()
+                }
                 catch (_: TimeoutCancellationException) { throw TranslationFailure("Foundry 超過 90 秒沒有回應，已停止收音並保留收到的字幕。", FoundryDiagnostic(stage, "TIMEOUT")) }
                     ?: throw if (pendingFilter != null) disconnectedAfterFilter()
                     else TranslationFailure("Foundry 連線已中斷；已收到的字幕已保留，最後一句可能不完整。", FoundryDiagnostic(stage, "CONNECTION_CLOSED"))

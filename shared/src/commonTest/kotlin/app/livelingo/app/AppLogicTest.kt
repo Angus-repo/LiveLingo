@@ -17,6 +17,49 @@ import kotlinx.serialization.encodeToString
 import kotlin.test.*
 
 class AppLogicTest {
+    @Test fun meetingCostsSurviveRestartDeletionAndChangingDefaultRates() = runTest {
+        val services = configuredServices()
+        val transport = FakeTransport()
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
+        assertTrue(controller.saveCostRates(CostRates(voicePerMinute = 0.05)))
+        controller.start(); runCurrent()
+        val id = controller.state.value.current!!.id
+        transport.usageReceiver(UsageSample("voice", UsageKind.VOICE, seconds = 60.0))
+        transport.usageReceiver(UsageSample("voice", UsageKind.VOICE, seconds = 120.0, final = true))
+        assertEquals(0.1, controller.state.value.meetingCosts.single().total().usd, 1e-12)
+        assertFalse(controller.saveCostRates(CostRates(voicePerMinute = 99.0)))
+        controller.stop(); controller.state.first { it.phase == ConnectionPhase.IDLE }
+        controller.renameTranscript(id, "部署會議")
+        assertTrue(controller.saveCostRates(CostRates(voicePerMinute = 0.20)))
+        controller.deleteTranscript(id)
+        assertTrue(controller.state.value.history.isEmpty())
+        controller.dispose()
+        val reopened = AppController(services, FakeTransport(), StandardTestDispatcher(testScheduler))
+        val cost = reopened.state.value.meetingCosts.single()
+        assertEquals("部署會議", cost.title)
+        assertEquals(0.1, cost.total().usd, 1e-12)
+        assertNotNull(cost.endedAtMs)
+        assertEquals(0.20, reopened.costRates().voicePerMinute)
+        assertTrue(reopened.saveCostRates(cost.rates.copy(voicePerMinute = 0.10), id))
+        assertEquals(0.2, AppRepository(services.memory).meetingUsage().single().total().usd, 1e-12)
+        reopened.dispose()
+    }
+
+    @Test fun usageWriteFailurePreservesInMemoryCostsAndBlocksNewSessionUntilSaved() = runTest {
+        val services = configuredServices()
+        val transport = FakeTransport()
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
+        controller.start(); runCurrent()
+        services.memory.failTranscriptWrite = true
+        assertFailsWith<TranslationFailure> { transport.usageReceiver(UsageSample("voice", UsageKind.VOICE, seconds = 60.0)) }
+        assertFalse(controller.state.value.transcriptSaved)
+        assertEquals(60.0, controller.state.value.current!!.usage!!.samples.single().seconds)
+        controller.stop(); controller.state.first { !it.active }
+        controller.start(); runCurrent()
+        assertEquals(1, transport.starts)
+        controller.dispose()
+    }
+
     @Test fun selectingAnotherModelRetainsPreviousDeploymentAndRestoresTheExactConnection() = runTest {
         val services = configuredServices()
         val controller = AppController(services, FakeTransport(), StandardTestDispatcher(testScheduler))
@@ -832,6 +875,26 @@ class AppLogicTest {
         controller.dispose()
     }
 
+    @Test fun startupDiagnosticShowsProbeScopeAndRedactedServiceSummary() = runTest {
+        val services = configuredServices()
+        val transport = FakeTransport().apply {
+            probeFailure = TranslationFailure("服務拒絕請求", FoundryDiagnostic(FoundryStages.START, "PROVIDER_ERROR", 101,
+                providerType = "invalid_request_error", startupErrorSummary = "Unknown parameter: 'session.voice'. SHORT-KEY",
+                minimalProbe = true))
+        }
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
+        controller.testConnection("https://example.openai.azure.com", "gpt-live-1", "")
+        runCurrent()
+        val report = assertNotNull(controller.state.value.lastConnectionReport)
+        assertTrue(report.contains("最小連線測試（只指定模型）"))
+        assertTrue(report.contains("服務錯誤摘要：Unknown parameter: 'session.voice'. [已遮蔽]"))
+        assertTrue(report.contains("分享前請確認"))
+        assertFalse(report.contains("short-key", ignoreCase = true))
+        assertFalse(report.contains("gpt-live-1")) // Foundry deployment names stay private.
+        assertEquals(0, services.mic.starts)
+        controller.dispose()
+    }
+
     @Test fun cancelledProbeRemainsBusyUntilSocketCleanupAndCannotOverlapRecording() = runTest {
         val services = configuredServices()
         val cleanup = CompletableDeferred<Unit>()
@@ -1032,6 +1095,8 @@ private class FakeServices : PlatformServices {
 }
 
 private class FakeTransport(val ready: CompletableDeferred<Unit> = CompletableDeferred(Unit)) : TranslationTransport {
+    var usageReceiver: suspend (UsageSample) -> Unit = {}
+    override fun setUsageListener(listener: suspend (UsageSample) -> Unit) { usageReceiver = listener }
     var receiver: (suspend (TranscriptDelta) -> Unit)? = null
     var starts = 0
     var closed = false

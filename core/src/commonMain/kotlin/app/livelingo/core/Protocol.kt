@@ -25,7 +25,7 @@ sealed interface FoundryEvent {
 }
 
 /** Messages are curated locally; provider message bodies are never exposed. */
-class FoundryProtocolException(message: String) : Exception(message)
+class FoundryProtocolException(message: String, val isProviderError: Boolean = false) : Exception(message)
 const val MAX_FOUNDRY_FRAME_BYTES = 1_048_576
 const val FOUNDRY_CLOSE_PAYLOAD = "{\"type\":\"session.close\"}"
 
@@ -36,9 +36,21 @@ fun foundryStartPayload(connection: FoundryConnection, settings: SessionSettings
         putJsonObject("session") {
             put("model", connection.deployment.trim())
             put("instructions", translationInstructions(settings))
-            putJsonObject("audio") { putJsonObject("output") { put("voice", "marin") } }
+            putJsonObject("audio") {
+                putJsonObject("format") { put("type", "audio/pcm"); put("rate", 24_000) }
+                putJsonObject("output") { put("voice", "marin") }
+            }
             putJsonObject("delegation") { put("type", "client") }
         }
+    }.toString()
+}
+
+/** Isolate model access from optional interpreter settings; never sends audio or background data. */
+fun foundryProbePayload(connection: FoundryConnection): String {
+    require(connection.validationError() == null) { connection.validationError().orEmpty() }
+    return buildJsonObject {
+        put("type", "session.start")
+        putJsonObject("session") { put("model", connection.deployment.trim()) }
     }.toString()
 }
 
@@ -58,6 +70,13 @@ fun foundryProviderError(code: String?): String = when (code?.lowercase()) {
     "rate_limit_exceeded", "quota_exceeded", "insufficient_quota" -> "Foundry 使用量或速率達上限，請稍後重試並檢查配額。"
     "invalid_api_key", "unauthorized", "authentication_error" -> "Foundry 認證失敗，請檢查 API key 與資源端點。"
     "model_not_found", "deployment_not_found", "deploymentnotfound" -> "找不到 GPT-Live 部署，請檢查部署名稱、資源端點與區域。"
+    "invalid_request_error", "invalid_request", "badrequest" ->
+        "Foundry 拒絕工作階段請求。此類型不足以判定是參數或存取限制，請查看診斷中的服務錯誤摘要。"
+    "unknown_parameter", "missing_required_parameter", "invalid_value", "invalid_parameter" ->
+        "Foundry 拒絕工作階段參數，請查看診斷中的相關參數與服務錯誤摘要。"
+    "permission_denied", "access_denied", "forbidden" -> "Foundry 拒絕存取，請確認 API key 的部署使用權限。"
+    "unsupported_model", "model_not_supported", "operationnotsupported" -> "所選部署不支援此語音介面，請確認語音模型類型與部署名稱。"
+    "server_error", "internal_error", "service_unavailable" -> "Foundry 服務暫時無法使用，請稍後重試。"
     else -> "Foundry 無法完成翻譯，請檢查部署、權限或服務狀態。"
 }
 
@@ -99,7 +118,7 @@ fun parseFoundryEvent(text: String): FoundryEvent {
             val inner = error?.get("innererror") as? JsonObject
             val innerCode = (inner?.get("code") as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
             if (isContentFilterCode(code) || isContentFilterCode(innerCode)) FoundryEvent.ContentFiltered
-            else throw FoundryProtocolException(foundryProviderError(code))
+            else throw FoundryProtocolException(foundryProviderError(code), isProviderError = true)
         }
         // Output audio is generated/billed but this app only displays subtitles.
         else -> FoundryEvent.Ignored

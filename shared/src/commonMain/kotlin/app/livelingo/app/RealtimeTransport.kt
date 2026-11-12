@@ -9,6 +9,9 @@ import kotlinx.serialization.json.*
 class ModelTranslationTransport(clientFactory: () -> HttpClient) : TranslationTransport {
     private val live = KtorFoundryTransport(clientFactory())
     private val realtime = RealtimeTransport(KtorFoundrySocketFactory(clientFactory()), HttpTextTranslator(clientFactory()))
+    override fun setUsageListener(listener: suspend (UsageSample) -> Unit) {
+        live.setUsageListener(listener); realtime.setUsageListener(listener)
+    }
     private fun transport(connection: FoundryConnection): TranslationTransport = if (connection.speechModel == SpeechModel.GPT_LIVE) live else realtime
     override suspend fun run(connection: FoundryConnection, apiKey: String, settings: SessionSettings, audio: ReceiveChannel<ByteArray>,
         onReady: suspend () -> Unit, onTranscript: suspend (TranscriptDelta) -> Unit, onNotice: suspend (TranslationNotice) -> Unit) =
@@ -90,6 +93,10 @@ internal class RealtimeTransport(
     private val startupTimeoutMillis: Long = 30_000,
     private val drainTimeoutMillis: Long = 30_000,
 ) : TranslationTransport {
+    private var usageListener: suspend (UsageSample) -> Unit = {}
+    override fun setUsageListener(listener: suspend (UsageSample) -> Unit) {
+        usageListener = listener; translator.setUsageListener(listener)
+    }
     override suspend fun probe(connection: FoundryConnection, apiKey: String): ConnectionProbeResult {
         val audio = Channel<ByteArray>(0).also { it.close() }
         run(connection, apiKey, SessionSettings(), audio, {}, {}, {})
@@ -105,7 +112,17 @@ internal class RealtimeTransport(
         val transcribes = connection.speechModel.transcribes
         var socket: FoundrySocket? = null
         var stage = FoundryStages.HANDSHAKE
+        val reportUsage = usageListener
+        var ready = false
+        var checkpointBytes = 0L
         var audioBytes = 0L
+        suspend fun checkpoint() {
+            if (!ready) return
+            val seconds = audioBytes / 48_000.0
+            reportUsage(UsageSample("voice", UsageKind.VOICE, seconds = seconds, estimated = true))
+            if (connection.speechModel == SpeechModel.REALTIME_TRANSLATE && connection.sourceTranscriptionModel.isNotBlank())
+                reportUsage(UsageSample("source", UsageKind.SOURCE, seconds = seconds, estimated = true))
+        }
         var stopping = false
         var pendingFilter = false
         var previousInput = ""
@@ -121,7 +138,8 @@ internal class RealtimeTransport(
                 val code = fields.providerCode
                 if (isContentFilterCode(code) && !transcribes && stage != FoundryStages.START) return event
                 throw TranslationFailure(if (isContentFilterCode(code)) "服務因內容安全篩選中止處理，已保留收到的字幕。" else "語音服務拒絕請求，請檢查模型類型、部署、權限與配額。",
-                    FoundryDiagnostic(stage, if (isContentFilterCode(code)) "CONTENT_FILTER" else "PROVIDER_ERROR", providerCode = code, requestId = fields.requestId))
+                    FoundryDiagnostic(stage, if (isContentFilterCode(code)) "CONTENT_FILTER" else "PROVIDER_ERROR", httpStatus = 101,
+                        providerCode = code, requestId = fields.requestId, providerType = fields.providerType, providerParam = fields.providerParam))
             }
             return event
         }
@@ -145,6 +163,8 @@ internal class RealtimeTransport(
                     }
                 }
                 stage = FoundryStages.STREAM
+                ready = true
+                checkpoint()
                 onReady()
                 val done = CompletableDeferred<Unit>()
                 val translations = Channel<TranscriptDelta>(12)
@@ -208,6 +228,7 @@ internal class RealtimeTransport(
                     for (bytes in audio) {
                         active.send(realtimeAudioPayload(connection.speechModel, bytes))
                         audioBytes += bytes.size; uncommittedBytes += bytes.size
+                        if (audioBytes - checkpointBytes >= 240_000) { checkpointBytes = audioBytes; checkpoint() }
                         // Bounded three-second commits, including silence. No server VAD is assumed.
                         if (transcribes && uncommittedBytes >= 144_000) commit()
                     }
@@ -218,6 +239,7 @@ internal class RealtimeTransport(
                     } else { stopping = true; active.send(FOUNDRY_CLOSE_PAYLOAD) }
                 }
                 sender.join()
+                checkpoint()
                 withTimeout(drainTimeoutMillis) { done.await() }
                 receiver.cancelAndJoin()
                 translations.close()
@@ -238,7 +260,9 @@ internal class RealtimeTransport(
             throw TranslationFailure(safeDiagnosticField(safe.message.orEmpty(), key),
                 (safe.diagnostic ?: FoundryDiagnostic(stage, "SESSION_FAILURE")).copy(webSocketCloseCode = safeWebSocketCloseCode(code)))
         } finally {
-            withContext(NonCancellable) { withTimeoutOrNull(2000) { runCatching { socket?.close() } }; socket?.cancel() }
+            withContext(NonCancellable) {
+                try { checkpoint() } finally { withTimeoutOrNull(2000) { runCatching { socket?.close() } }; socket?.cancel() }
+            }
         }
     }
     override fun close() { sockets.close(); translator.close() }

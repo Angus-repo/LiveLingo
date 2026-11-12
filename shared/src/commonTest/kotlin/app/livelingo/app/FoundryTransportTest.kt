@@ -38,11 +38,13 @@ private class Harness(scope: CoroutineScope, val socket: FakeFoundrySocket = Fak
     val result = CompletableDeferred<Result<Unit>>()
     val transcripts = mutableListOf<TranscriptDelta>()
     val notices = mutableListOf<TranslationNotice>()
+    val usages = mutableListOf<UsageSample>()
     var readyCount = 0
     var url: String? = null
     var apiKey: String? = null
     val transport = KtorFoundryTransport(FoundrySocketFactory { target, key -> url = target; apiKey = key; socket })
     val job = scope.launch {
+        transport.setUsageListener { usages += it }
         result.complete(runCatching {
             transport.run(FoundryConnection("https://Sample.openai.azure.com/openai/v1/", "custom-live"), "private-test-key", SessionSettings(), audio,
                 onReady = { readyCount++ }, onTranscript = { transcripts += it }, onNotice = { notices += it })
@@ -52,6 +54,77 @@ private class Harness(scope: CoroutineScope, val socket: FakeFoundrySocket = Fak
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class FoundryTransportTest {
+    @Test fun startupServiceErrorsWithoutKnownCodeRemainProviderErrorsAndNeverStartAudio() = runTest {
+        for (provider in ModelProvider.entries) {
+            for (code in listOf("null", "\"private-test-key\"", "\"unknown_parameter\"")) {
+                val socket = FakeFoundrySocket()
+                val transport = KtorFoundryTransport(FoundrySocketFactory { _, _ -> socket })
+                val audio = Channel<ByteArray>(1)
+                var readyCount = 0
+                val result = async {
+                    runCatching {
+                        val endpoint = if (provider == ModelProvider.OPENAI) "https://api.openai.com" else "https://sample.openai.azure.com"
+                        transport.run(FoundryConnection(endpoint, provider = provider), "private-test-key",
+                            SessionSettings(), audio, { readyCount++ }, {})
+                    }
+                }
+                socket.sent.receive()
+                socket.incoming.send("""{"type":"error","error":{"type":"invalid_request_error","code":$code,"param":"session.model","message":"private-test-key private transcript"}}""")
+                val failure = assertIs<TranslationFailure>(result.await().exceptionOrNull())
+                assertEquals("PROVIDER_ERROR", failure.diagnostic?.code)
+                assertEquals(FoundryStages.START, failure.diagnostic?.stage)
+                assertEquals(101, failure.diagnostic?.httpStatus)
+                assertEquals("invalid_request_error", failure.diagnostic?.providerType)
+                assertEquals("session.model", failure.diagnostic?.providerParam)
+                assertEquals(false, failure.diagnostic?.minimalProbe)
+                assertTrue(failure.diagnostic?.startupErrorSummary.orEmpty().contains("已省略"))
+                assertEquals(0, readyCount)
+                assertTrue("尚未開始收音" in failure.message.orEmpty())
+                assertTrue("參數" in failure.message.orEmpty())
+                assertFalse("private" in failure.toString() + failure.diagnostic.toString())
+                if (provider == ModelProvider.OPENAI) assertTrue("OpenAI" in failure.message.orEmpty())
+                assertTrue(socket.closed && socket.cancelled)
+                audio.cancel()
+            }
+        }
+    }
+
+    @Test fun malformedStartupResponseIsStillAProtocolError() = runTest {
+        val h = Harness(this)
+        h.socket.sent.receive()
+        h.socket.incoming.send("not JSON private-test-key")
+        val failure = assertIs<TranslationFailure>(h.result.await().exceptionOrNull())
+        assertEquals("PROTOCOL", failure.diagnostic?.code)
+        assertEquals(0, h.readyCount)
+        assertFalse("private-test-key" in failure.toString())
+    }
+
+    @Test fun finalUsageOnContentClosureIsCapturedBeforeErrorAndCumulativeEventsReplace() = runTest {
+        val h = Harness(this)
+        h.socket.sent.receive(); h.socket.incoming.send(STARTED); runCurrent()
+        h.socket.incoming.send("""{"type":"session.usage.updated","usage":{"seconds":60}}""")
+        h.socket.incoming.send("""{"type":"session.usage.updated","usage":{"seconds":60}}""")
+        h.socket.incoming.send("""{"type":"session.closed","reason":"content","usage":{"seconds":61.5}}""")
+        assertIs<TranslationFailure>(h.result.await().exceptionOrNull())
+        val last = h.usages.last()
+        assertTrue(last.final)
+        assertFalse(last.estimated)
+        assertEquals(61.5, last.seconds)
+        val result = h.usages.fold(MeetingUsage("m", "m", 0, ModelProvider.OPENAI, "gpt-live-1", "", CostRates(voicePerMinute = 0.05))) { m, u -> m.update(u) }
+        assertEquals(0.05125, result.total().usd, 1e-12)
+        assertTrue(h.socket.closed && h.socket.cancelled)
+    }
+
+    @Test fun transportCloseWithoutFinalUsageKeepsReportedDurationAsLowerBound() = runTest {
+        val h = Harness(this)
+        h.socket.sent.receive(); h.socket.incoming.send(STARTED); runCurrent()
+        h.socket.incoming.send("""{"type":"session.usage.updated","usage":{"seconds":60}}""")
+        h.socket.incoming.close()
+        assertIs<TranslationFailure>(h.result.await().exceptionOrNull())
+        assertTrue(h.usages.last().estimated)
+        assertTrue(h.usages.last().seconds >= 60.0)
+    }
+
     @Test fun contentFilterDuringStreamingDoesNotDisconnectOrReplayAndLaterCaptionsContinue() = runTest {
         val h = Harness(this)
         h.socket.sent.receive()
@@ -280,16 +353,22 @@ class FoundryTransportTest {
     @Test fun probeStartsAndClosesTheActualModelWithoutSendingAudio() = runTest {
         val socket = FakeFoundrySocket()
         val transport = KtorFoundryTransport(FoundrySocketFactory { _, _ -> socket })
+        val usages = mutableListOf<UsageSample>()
+        transport.setUsageListener { usages += it }
         val result = CompletableDeferred<Result<ConnectionProbeResult>>()
         launch { result.complete(runCatching { transport.probe(FoundryConnection("https://sample.openai.azure.com", "live-test"), "private-key") }) }
         val start = WireJson.parseToJsonElement(socket.sent.receive()).jsonObject
         assertEquals("live-test", start.getValue("session").jsonObject.getValue("model").jsonPrimitive.content)
+        assertEquals(setOf("model"), start.getValue("session").jsonObject.keys)
         socket.incoming.send(STARTED)
         assertEquals(FOUNDRY_CLOSE_PAYLOAD, socket.sent.receive())
         socket.incoming.send(CLOSED)
         val success = result.await().getOrThrow()
         assertEquals("OK", success.diagnostic.code)
         assertEquals(101, success.diagnostic.httpStatus)
+        assertEquals(true, success.diagnostic.minimalProbe)
+        assertTrue(success.message.contains("尚未驗證"))
+        assertTrue(usages.isEmpty())
         assertEquals(listOf("session.start", "session.close"), socket.sentTypes)
         assertTrue(socket.closed && socket.cancelled)
     }
@@ -304,8 +383,23 @@ class FoundryTransportTest {
         val failure = assertIs<TranslationFailure>(result.await().exceptionOrNull())
         assertEquals(FoundryStages.START, failure.diagnostic?.stage)
         assertEquals("DeploymentNotFound", failure.diagnostic?.providerCode)
+        assertEquals(true, failure.diagnostic?.minimalProbe)
         assertFalse(failure.message.orEmpty().contains("private-key"))
         assertTrue(socket.cancelled)
+    }
+
+    @Test fun startupSummarySurvivesMissingCodeButRuntimeProseIsExcluded() = runTest {
+        val message = "Unknown parameter: 'session.voice'."
+        for (afterReady in listOf(false, true)) {
+            val h = Harness(this)
+            h.socket.sent.receive()
+            if (afterReady) { h.socket.incoming.send(STARTED); runCurrent() }
+            h.socket.incoming.send("""{"type":"error","error":{"type":"invalid_request_error","code":null,"message":"$message"}}""")
+            val failure = assertIs<TranslationFailure>(h.result.await().exceptionOrNull())
+            assertEquals("PROVIDER_ERROR", failure.diagnostic?.code)
+            assertEquals(if (afterReady) null else message, failure.diagnostic?.startupErrorSummary)
+            assertEquals(if (afterReady) 1 else 0, h.readyCount)
+        }
     }
 
     @Test fun handshakeFailureDoesNotLeakIntoLaterDiagnostic() = runTest {

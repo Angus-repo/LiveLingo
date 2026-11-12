@@ -1,3 +1,43 @@
+# LiveLingo 0.1.17 驗證狀態
+
+0.1.16 的服務錯誤摘要不足以找出 `invalid_request_error` 根因。本版加入僅在啟動前顯示的限長、遮蔽服務摘要；已知標準 OpenAI 模型 ID 可見，自訂部署仍遮蔽。泛用錯誤類型不再直接判定為參數錯誤。
+
+GPT-Live「測試連線」只送出模型名稱，排除翻譯指令、背景知識、音訊與其他可選設定。測試仍等待 session.started 和正常 session.closed，失敗保留階段；成功不代表麥克風或完整翻譯已驗證。測試不寫入上一場會議用量，但供應商可能仍計費。實際翻譯明確指定與錄音一致的 24 kHz PCM。Android／iOS 版號為 0.1.17／18。
+
+驗證以本版 GitHub Actions checks 及 XML 報告為準；新增測試涵蓋模型最小請求、沒有音訊與會議計費副作用、服務錯誤文字在啟動前保留而串流中排除、敏感內容與控制字元遮蔽，以及診斷報告呈現。沒有真實 API key 或 Android 實機，尚未確認使用者雲端啟動失敗的具體原因。不能宣稱本版修復所有連線問題或取得同機 Teams 音訊。
+
+Teams 字幕讀取仍為可行性評估，未加入本 APK。詳見 [TEAMS_AUDIO.md](docs/TEAMS_AUDIO.md)。以下為上一版紀錄。
+
+---
+
+# LiveLingo 0.1.16 驗證狀態
+
+本版以 0.1.15 為基底，修正 Teams 使用情境的音源提示、Android 系統靜音偵測，以及 GPT-Live 服務錯誤誤列為 PROTOCOL。Android／iOS 版號同步為 0.1.16／17；既有會議費用統計保留。
+
+自動化驗證交由 GitHub Actions 的核心測試、shared 測試與 Android 建置；實際結果以本版 PR checks 與測試報告為準。新增回歸測試涵蓋雙 provider 的啟動錯誤不啟動收音、null／未知服務碼、可辨識錯誤類型與參數、敏感文字不外洩、真正無法解析的資料仍列 PROTOCOL，以及靜音提示與訊號恢復。
+
+尚未使用實機或真實 API key 驗證；本版不能解除 Android 對通話音訊擷取與並行麥克風使用的限制。圖 2 的舊診斷不足以確認服務端根因。完整說明與實機驗收見 [TEAMS_AUDIO.md](docs/TEAMS_AUDIO.md)。以下為上一版歷史紀錄。
+
+---
+
+# LiveLingo 0.1.15 驗證狀態
+
+新增會議用量、美元費用統計與日／週／月折線圖。功能、計價來源及限制見 [docs/USAGE_COSTS.md](docs/USAGE_COSTS.md)。Android／iOS 版號同步為 0.1.15／16。
+
+本機使用 JDK 17、Gradle 8.14.3 與 Android SDK 36／Build Tools 35 執行：
+
+```sh
+./gradlew :core:jvmTest :shared:testDebugUnitTest :androidApp:assembleDebug --offline
+```
+
+**BUILD SUCCESSFUL，219 項測試（core 76、shared 143），0 失敗、0 錯誤、0 略過。** 包含金額與累計去重、快取／推理 token、未結算提示、台灣日／週／月邊界、跨日歸帳、重啟、刪除保留、費率快照與重算、儲存失敗，以及兩個 provider 的實際本機 TLS／HTTP 回應用量解析。格式不合法、length、content_filter 回應仍記錄已回報 token。
+
+交付 `LiveLingo-0.1.15-original-key.apk`，13,323,637 bytes。APK SHA-256：`a8f52716d7b6e958b2dfc7092786408d302dd243004bdd80f00cccec2b3ba08d`。沿用原始開發簽章，憑證 SHA-256：`cf232e1f105c3ac5a93ce2449b41678027b4b1ef9a54c3765c85b65a045d4bfb`。`apksigner verify`、`zipalign -c -P 16 4`、套件 ID／版本檢查均通過；重簽前後所有非簽章檔案內容相同。
+
+尚未以真實雲端帳號對帳、Android 實機檢查排版／覆蓋安裝，或編譯 iOS；本版未執行 Lint。兩處既有 ClipboardManager 棄用與 native strip 警告仍在。遠端 CI 結果請以本次 PR 的 checks 為準；上述 219 項為已完成的本機測試。
+
+---
+
 # LiveLingo 0.1.14 驗證狀態
 
 本版以 GitHub Actions 執行 `:core:jvmTest`、`:shared:testDebugUnitTest`、Android APK 建置與 iOS 模擬器編譯；最終結果見 PR 的 checks 與 Actions 工作紀錄。下列 0.1.13 結果為上一版歷史紀錄，不代表本版測試結果。

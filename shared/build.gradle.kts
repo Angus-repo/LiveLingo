@@ -29,6 +29,7 @@ kotlin {
             implementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
         }
         androidMain.dependencies {
+            implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
             implementation("androidx.activity:activity-compose:1.10.1")
             implementation("androidx.core:core-ktx:1.16.0")
             implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.1")

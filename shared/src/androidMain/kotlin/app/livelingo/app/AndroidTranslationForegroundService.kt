@@ -78,7 +78,7 @@ class AndroidTranslationForegroundService : Service() {
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentTitle("LiveLingo 正在進行即時翻譯")
-            .setContentText(if (source.isPlayback) "音源：${source.label}；鎖定螢幕可能停止擷取" else "音源：麥克風；可切換 App 或鎖定螢幕")
+            .setContentText(if (source == AudioSource.TEAMS_CAPTIONS) "正在讀取選取的字幕範圍，可隨時停止" else if (source.isPlayback) "音源：${source.label}；鎖定螢幕可能停止擷取" else "音源：麥克風；可切換 App 或鎖定螢幕")
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
@@ -154,6 +154,10 @@ class AndroidTranslationForegroundService : Service() {
 }
 
 internal fun audioForegroundServiceType(source: AudioSource, sdk: Int): Int = when {
+    source == AudioSource.TEAMS_CAPTIONS -> {
+        require(sdk >= 34)
+        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+    }
     source.isPlayback -> {
         require(sdk >= 29) { "Playback capture requires Android 10" }
         ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION

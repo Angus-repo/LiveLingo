@@ -628,7 +628,8 @@ class AppLogicTest {
         runCurrent()
         assertEquals(ConnectionPhase.LISTENING, controller.state.value.phase)
         controller.stop()
-        runCurrent()
+        // The journal writes on a real IO dispatcher. Wait for its drain and final commit.
+        controller.state.first { !it.active }
         assertEquals(2, transport.audio.size)
         assertContentEquals(byteArrayOf(1, 0), transport.audio[0])
         assertContentEquals(byteArrayOf(2, 0), transport.audio[1])

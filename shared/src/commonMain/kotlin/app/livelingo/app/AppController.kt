@@ -439,7 +439,10 @@ class AppController(
                             },
                             pending = { mutable.value.current?.pendingCaptions().orEmpty() },
                             translate = { line ->
-                                translator.translate(connection, sessionApiKey, settings, line.text, "")
+                                val context = mutable.value.current?.fragments.orEmpty().asSequence()
+                                    .takeWhile { it.id != line.id }.filter { it.channel == TranscriptChannel.INPUT }
+                                    .map { it.text }.toList().takeLast(3).joinToString(" ")
+                                translator.translate(connection, sessionApiKey, settings, line.text, context)
                             },
                             saveOutput = { line, text ->
                                 appendCaption(record.id, line.copy(id = "translation-${line.id}", channel = TranscriptChannel.OUTPUT,

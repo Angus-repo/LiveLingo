@@ -35,6 +35,7 @@ internal class AndroidTeamsCaptions(
     private var display: VirtualDisplay? = null
     private var reader: ImageReader? = null
     private var preview: Bitmap? = null
+    private var pixels = java.nio.ByteBuffer.allocateDirect(0)
     private var dialog: AlertDialog? = null
     private var region: Rect? = null
     private var window = CaptionWindow()
@@ -91,6 +92,7 @@ internal class AndroidTeamsCaptions(
                 if (closed || source !== reader) return@setOnImageAvailableListener
                 try {
                     val image = source.acquireLatestImage() ?: return@setOnImageAvailableListener
+                    if (!visible) { image.close(); return@setOnImageAvailableListener }
                     queuedFrame?.close()
                     queuedFrame = image
                     scheduleRead()
@@ -132,17 +134,19 @@ internal class AndroidTeamsCaptions(
         // Read only the selected RGBA rows. Some devices omit trailing padding on the last row.
         check(plane.pixelStride == 4)
         val crop = area ?: Rect(0, 0, image.width, image.height)
-        val bitmap = Bitmap.createBitmap(crop.width(), crop.height(), Bitmap.Config.ARGB_8888)
-        val packed = java.nio.ByteBuffer.allocateDirect(bitmap.byteCount)
+        val bitmap = preview?.takeIf { area == null && it.width == crop.width() && it.height == crop.height() }
+            ?: Bitmap.createBitmap(crop.width(), crop.height(), Bitmap.Config.ARGB_8888)
+        if (pixels.capacity() < bitmap.byteCount) pixels = java.nio.ByteBuffer.allocateDirect(bitmap.byteCount)
+        pixels.clear()
         val source = plane.buffer.duplicate()
         for (y in crop.top until crop.bottom) {
             val offset = y * plane.rowStride + crop.left * 4
             source.limit(source.capacity()).position(offset)
             source.limit(offset + crop.width() * 4)
-            packed.put(source)
+            pixels.put(source)
         }
-        packed.flip()
-        bitmap.copyPixelsFromBuffer(packed)
+        pixels.flip()
+        bitmap.copyPixelsFromBuffer(pixels)
         if (area == null) {
             preview = bitmap
             return

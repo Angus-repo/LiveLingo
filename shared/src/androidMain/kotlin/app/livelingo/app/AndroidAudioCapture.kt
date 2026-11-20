@@ -209,7 +209,8 @@ internal class AndroidMicrophone(private val appContext: Context) : Microphone, 
         val grant = projection ?: throw AudioCaptureFailure("請重新授權分享 Teams 應用程式。")
         val capture = AndroidTeamsCaptions(appContext, grant, onHint) { interruptionCallback?.invoke(it) }
         teamsCaptions = capture
-        capture.start()
+        val activity = activityRef?.get() ?: throw AudioCaptureFailure("請回到 LiveLingo 重新開始字幕分享。")
+        capture.start(activity.windowManager.maximumWindowMetrics.bounds)
         return capture.captions
     }
 

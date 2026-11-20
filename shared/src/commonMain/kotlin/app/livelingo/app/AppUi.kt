@@ -229,7 +229,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                     Choice("翻譯來源", audioSource.label, controller.availableAudioSources().map { it.name to it.label }, !state.busy) {
                         controller.selectAudioSource(AudioSource.valueOf(it))
                     }
-                    Text(if (captions) "在 Teams 會議中開啟原文即時字幕。開始後選「單一應用程式」並指定 Teams，再回來框選字幕。請保持字幕可見，建議用分割畫面。"
+                    Text(if (captions) "在 Teams 會議中開啟原文即時字幕。支援英文及中文原文。開始後選「單一應用程式」並指定 Teams，再回來框選字幕。請保持字幕可見，建議用分割畫面。"
                         else if (audioSource.isPlayback) "開始後授權擷取允許錄製的媒體音訊。Android 不支援擷取通話音訊，同機 Teams 會議可能收不到聲音。"
                         else "收取現場或另一台裝置外放的聲音。同機 Teams 可能優先使用麥克風，即使 Teams 靜音也不保證釋放音源。",
                         style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971))

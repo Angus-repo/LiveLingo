@@ -563,6 +563,7 @@ class AppController(
                     recordDiagnostic(connection, sessionApiKey, diagnostic, sessionFailure.orEmpty(), success = false, showDialog = !listeningStarted)
                 }
             } finally {
+                captionStop = null
                 runCatching { services.microphone.stop() }
                 queue.cancel()
                 audio = null

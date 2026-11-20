@@ -14,7 +14,6 @@ import android.os.Looper
 import android.os.SystemClock
 import android.view.MotionEvent
 import android.view.View
-import android.view.WindowManager
 import androidx.annotation.RequiresApi
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
@@ -44,15 +43,21 @@ internal class AndroidTeamsCaptions(
     private var lastCaptionMs = 0L
     private var closed = false
     private var visible = true
+    private var queuedFrame: Image? = null
+    private val readFrame = Runnable { readLatestFrame() }
     private var processing = false
     private var generation = 0
     private val settle = Runnable { flush() }
+    private val maxWait = Runnable { flush() }
     private val emptyHint = Runnable { hint("尚未辨識到字幕。請保持 Teams 原文字幕可見，確認框選位置；若預覽全黑，畫面可能受保護。") }
     private val callback = object : MediaProjection.Callback() {
         override fun onStop() = Unit // AndroidMicrophone owns the grant and its stop action.
         override fun onCapturedContentVisibilityChanged(isVisible: Boolean) {
             visible = isVisible
+            if (isVisible && !closed) scheduleRead()
             if (!isVisible && !closed) {
+                queuedFrame?.close()
+                queuedFrame = null
                 generation++
                 flush()
                 handler.removeCallbacks(emptyHint)
@@ -66,9 +71,8 @@ internal class AndroidTeamsCaptions(
         }
     }
 
-    fun start() {
+    fun start(bounds: Rect) {
         projection.registerCallback(callback, handler)
-        val bounds = context.getSystemService(WindowManager::class.java).maximumWindowMetrics.bounds
         resize(bounds.width(), bounds.height())
         hint("先讓 Teams 顯示原文字幕，再回到這裡點「框選字幕範圍」。可使用分割畫面。")
     }
@@ -80,12 +84,17 @@ internal class AndroidTeamsCaptions(
         if (reader?.width == width && reader?.height == height) return
         resetRegion()
         val old = reader
-        val next = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
+        val next = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3)
         reader = next
         try {
             next.setOnImageAvailableListener({ source ->
                 if (closed || source !== reader) return@setOnImageAvailableListener
-                try { source.acquireLatestImage()?.use { accept(it) } }
+                try {
+                    val image = source.acquireLatestImage() ?: return@setOnImageAvailableListener
+                    queuedFrame?.close()
+                    queuedFrame = image
+                    scheduleRead()
+                }
                 catch (_: Exception) { fail("Teams 字幕畫面擷取中斷，已辨識的原文會保留。") }
             }, handler)
             val density = context.resources.configuration.densityDpi
@@ -101,10 +110,22 @@ internal class AndroidTeamsCaptions(
         } finally { old?.close() }
     }
 
+    // Keep the final frame even if the caption changes only once during the throttle interval.
+    private fun scheduleRead() {
+        if (!visible || processing || queuedFrame == null || handler.hasCallbacks(readFrame)) return
+        handler.postDelayed(readFrame, (lastRead + 650L - SystemClock.elapsedRealtime()).coerceAtLeast(0))
+    }
+
+    private fun readLatestFrame() {
+        val frame = queuedFrame ?: return
+        queuedFrame = null
+        try {
+            frame.use { if (!closed && visible) accept(it) }
+        } catch (_: Exception) { fail("無法讀取 Teams 字幕畫面。請重新分享 Teams 視窗。") }
+    }
+
     private fun accept(image: Image) {
-        val now = SystemClock.elapsedRealtime()
-        if (!visible || processing || now - lastRead < 650) return
-        lastRead = now
+        lastRead = SystemClock.elapsedRealtime()
         val area = region
         if (area == null && dialog?.isShowing == true) return
         val plane = image.planes.first()
@@ -126,11 +147,16 @@ internal class AndroidTeamsCaptions(
             preview = bitmap
             return
         }
+        recognize(bitmap)
+    }
+
+    private fun recognize(bitmap: Bitmap) {
         val token = generation
         processing = true
         recognizer.process(InputImage.fromBitmap(bitmap, 0)).addOnCompleteListener { result ->
             processing = false
             bitmap.recycle()
+            if (!closed) scheduleRead()
             if (closed || token != generation) return@addOnCompleteListener
             if (!result.isSuccessful) {
                 fail("裝置上的字幕辨識無法執行，請停止後重新開始。")
@@ -143,10 +169,12 @@ internal class AndroidTeamsCaptions(
             val previousMs = lastCaptionMs
             lastCaptionMs = System.currentTimeMillis()
             window.update(value)?.let { captions.trySend(CapturedCaption(it, previousMs)) }
+            if (value.isBlank()) handler.removeCallbacks(maxWait)
             if (value.isNotBlank()) {
                 hint("正在讀取框選範圍的 Teams 原文字幕。")
                 handler.removeCallbacks(emptyHint)
                 handler.postDelayed(settle, 1400)
+                if (!handler.hasCallbacks(maxWait)) handler.postDelayed(maxWait, 6_000)
             } else {
                 handler.removeCallbacks(emptyHint)
                 handler.postDelayed(emptyHint, 12_000)
@@ -156,11 +184,15 @@ internal class AndroidTeamsCaptions(
 
     private fun flush() {
         handler.removeCallbacks(settle)
+        handler.removeCallbacks(maxWait)
         window.flush()?.let { captions.trySend(CapturedCaption(it, lastCaptionMs)) }
     }
 
     private fun resetRegion() {
         generation++
+        handler.removeCallbacks(readFrame)
+        queuedFrame?.close()
+        queuedFrame = null
         flush()
         window = CaptionWindow()
         lastText = ""
@@ -197,6 +229,8 @@ internal class AndroidTeamsCaptions(
             hint("已框選。請保持 Teams 字幕可見，可用分割畫面查看譯文。")
             handler.postDelayed(emptyHint, 12_000)
             pickerDialog.dismiss()
+            val sample = Bitmap.createBitmap(frame, chosen.left, chosen.top, chosen.width(), chosen.height())
+            recognize(sample)
         }
     }
 

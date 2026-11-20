@@ -35,6 +35,7 @@ data class AppState(
     val streamNotice: String? = null,
     val sessionIssue: String? = null,
     val recoveryStatus: String? = null,
+    val captionHint: String? = null,
     val pendingAudioIds: Set<String> = emptySet(),
     val replayingSavedAudio: Boolean = false,
 ) {
@@ -56,6 +57,7 @@ class AppController(
     private var audio: Channel<ByteArray>? = null
     private var sessionJob: Job? = null
     private var probeJob: Job? = null
+    private var captionStop: CompletableDeferred<Unit>? = null
     private var sessionFailure: String? = null
     private var paragraphJob: Job? = null
     private val transcriptWrites = Mutex()
@@ -118,6 +120,7 @@ class AppController(
     }
 
     fun availableAudioSources(): List<AudioSource> = services.microphone.availableSources().filter { it.selectable }
+    fun selectCaptionRegion() { (services.microphone as? TeamsCaptionInput)?.selectCaptionRegion() }
     fun reportsAudioLevel(): Boolean = services.microphone.reportsAudioLevel()
     fun audioSourceUnavailableReason(): String? = services.microphone.unavailableReason(mutable.value.preferences.audioSource)
 
@@ -323,16 +326,18 @@ class AppController(
         connection.validationError()?.let { inform("請先到「設定」完成 ${connection.provider.label} 連線。$it"); return }
         if (apiKey.isBlank()) { inform("請先到「設定」儲存 ${connection.provider.label} API key。"); return }
         val sessionApiKey = apiKey
+        val captions = snapshot.preferences.audioSource == AudioSource.TEAMS_CAPTIONS
+        val realtimeAudio = !captions && connection.speechModel == SpeechModel.REALTIME_TRANSLATE
         val settings = SessionSettings(
-            if (connection.speechModel == SpeechModel.REALTIME_TRANSLATE) Language.AUTO else snapshot.preferences.source, snapshot.preferences.target,
-            if (connection.speechModel == SpeechModel.REALTIME_TRANSLATE) null else snapshot.knowledge.find { it.id == snapshot.preferences.knowledgeId },
+            if (realtimeAudio) Language.AUTO else snapshot.preferences.source, snapshot.preferences.target,
+            if (realtimeAudio) null else snapshot.knowledge.find { it.id == snapshot.preferences.knowledgeId },
             snapshot.preferences.pace, snapshot.preferences.quality,
             snapshot.preferences.provider,
             snapshot.preferences.audioSource,
             connection.speechModel,
         )
         settings.validationError()?.let { inform(it); return }
-        if (connection.speechModel.transcribes && connection.textDeployment.isBlank()) {
+        if ((captions || connection.speechModel.transcribes) && connection.textDeployment.isBlank()) {
             inform("此轉錄方案需設定文字翻譯模型；請到設定選擇 GPT-6 Luna 或其他文字模型。"); return
         }
         val now = services.currentTimeMillis()
@@ -340,10 +345,23 @@ class AppController(
         val title = "${settings.sourceLanguage.label} → ${settings.targetLanguage.label}"
         val rates = snapshot.preferences.costRateOverrides[connection.costRateKey()] ?: connection.defaultCostRates()
         val record = TranscriptRecord(id, title, now, settings, usage = MeetingUsage(id, title, now,
-            connection.provider, connection.deployment, connection.textDeployment, rates))
+            connection.provider, if (captions) "Teams 字幕" else connection.deployment, connection.textDeployment, rates),
+            captionConnection = connection.takeIf { captions })
         try { repository.saveTranscript(record) }
         catch (_: Exception) { inform("無法建立逐字稿，尚未開始收音。請確認儲存空間。"); return }
-        launchSession(record, connection, sessionApiKey, snapshot.preferences.paragraphModel().takeIf { snapshot.preferences.aiParagraphs }.orEmpty())
+        launchSession(record, connection, sessionApiKey, snapshot.preferences.paragraphModel().takeIf { !captions && snapshot.preferences.aiParagraphs }.orEmpty())
+    }
+
+    fun resumeCaptions(id: String) {
+        val state = mutable.value
+        if (state.busy || !state.storageAvailable || !state.transcriptSaved) return
+        val record = state.history.find { it.id == id } ?: return
+        val connection = record.captionConnection ?: return
+        if (record.pendingCaptions().isEmpty()) return
+        connection.validationError()?.let { inform(it); return }
+        val key = runCatching { repository.apiKey(connection.credentialEndpoint()) }.getOrNull()
+        if (key.isNullOrBlank()) { inform("請先設定這場會議原本使用的翻譯服務與 API key，再補譯。"); return }
+        launchSession(record, connection, key, "", replayOnly = true)
     }
 
     private fun hasPendingAudio(id: String): Boolean = AudioJournal.readState(services.storage, id)?.let {
@@ -368,6 +386,7 @@ class AppController(
                               paragraphModel: String, replayOnly: Boolean = false) {
         val snapshot = mutable.value
         val settings = record.settings
+        val captions = settings.audioSource == AudioSource.TEAMS_CAPTIONS
         val transcriptAttemptId = services.uniqueId()
         // This queue absorbs disk scheduling only; network outages use the persistent journal.
         val queue = Channel<ByteArray>(Channel.UNLIMITED)
@@ -378,7 +397,8 @@ class AppController(
             history = listOf(record) + snapshot.history.filterNot { it.id == record.id },
             meetingCosts = record.usage?.let { listOf(it) + snapshot.meetingCosts.filterNot { old -> old.id == record.id } } ?: snapshot.meetingCosts,
             message = null, lastConnectionReport = null, showReportInMessage = false,
-            paragraphStatus = if (paragraphModel.isBlank()) "基本分段；AI 語意分段可至設定指定文字模型。" else "AI 語意分段：等待可分段內容",
+            captionHint = null,
+            paragraphStatus = if (captions) null else if (paragraphModel.isBlank()) "基本分段；AI 語意分段可至設定指定文字模型。" else "AI 語意分段：等待可分段內容",
             audioInputStatus = AudioInputStatus(), streamNotice = null, sessionIssue = null, recoveryStatus = null,
             replayingSavedAudio = replayOnly)
         sessionJob = scope.launch {
@@ -396,6 +416,38 @@ class AppController(
                     throw cancelled
                 } catch (failure: Exception) {
                     throw TranslationFailure((failure as? AudioCaptureFailure)?.message ?: "無法準備背景翻譯音源。請在 App 前景開始，並允許所需的錄音或音訊擷取授權。")
+                }
+                if (captions) {
+                    val stop = CompletableDeferred<Unit>()
+                    captionStop = stop
+                    val incoming = if (replayOnly) null else {
+                        val input = services.microphone as? TeamsCaptionInput
+                            ?: throw TranslationFailure("此裝置無法擷取 Teams 字幕。")
+                        input.startCaptions { hint -> mutable.value = mutable.value.copy(captionHint = hint) }
+                    }
+                    mutable.value = mutable.value.copy(phase = ConnectionPhase.LISTENING)
+                    listeningStarted = true
+                    val translator = HttpTextTranslator(services.createHttpClient())
+                    translator.setUsageListener { recordUsage(record.id, it.copy(id = "$transcriptAttemptId-${it.id}")) }
+                    try {
+                        processTeamsCaptions(incoming, stop,
+                            saveInput = { caption ->
+                                val end = (caption.atMs - record.createdAtMs).coerceAtLeast(1L)
+                                val speaker = mutable.value.speaker.takeUnless { it == "未標記" }
+                                appendCaption(record.id, TranscriptFragment(services.uniqueId(), TranscriptChannel.INPUT,
+                                    (end - 1400).coerceAtLeast(0), end, caption.text, speaker))
+                            },
+                            pending = { mutable.value.current?.pendingCaptions().orEmpty() },
+                            translate = { line ->
+                                translator.translate(connection, sessionApiKey, settings, line.text, "")
+                            },
+                            saveOutput = { line, text ->
+                                appendCaption(record.id, line.copy(id = "translation-${line.id}", channel = TranscriptChannel.OUTPUT,
+                                    text = text, speakerLabel = null))
+                            },
+                            onStatus = { mutable.value = mutable.value.copy(recoveryStatus = it) })
+                    } finally { translator.close(); captionStop = null }
+                    return@launch
                 }
                 val journal = try { AudioJournal(services.storage, record.id, connection) }
                 catch (_: Exception) { throw TranslationFailure("無法建立或讀取錄音保存檔，尚未開始收音。請確認裝置儲存空間。") }
@@ -503,6 +555,7 @@ class AppController(
                 // User stop during connection and disposal intentionally cancel; microphone errors supply their own message.
             } catch (failure: Exception) {
                 sessionFailure = when (failure) {
+                    is AudioCaptureFailure -> failure.message
                     is TranslationFailure -> safeDiagnosticField(failure.message.orEmpty(), sessionApiKey)
                     else -> "${connection.provider.label} 連線失敗。請檢查端點、模型名稱、API key 與網路狀態；已收到的字幕已保留。"
                 }
@@ -547,7 +600,7 @@ class AppController(
                     sessionIssue = sessionFailure,
                     audioInputStatus = AudioInputStatus(),
                     pendingAudioIds = mutable.value.history.filter { runCatching { hasPendingAudio(it.id) }.getOrDefault(true) }.map { it.id }.toSet(),
-                    recoveryStatus = null,
+                    recoveryStatus = null, captionHint = null,
                     replayingSavedAudio = false,
                 )
                 // Do not dismiss the Android foreground service until the final network
@@ -555,6 +608,16 @@ class AppController(
                 services.microphone.releaseSession()
             }
         }
+    }
+
+    private suspend fun appendCaption(id: String, fragment: TranscriptFragment) {
+        val record = mutable.value.current?.takeIf { it.id == id } ?: throw TranslationFailure("逐字稿已變更。")
+        replaceRecord(record.copy(fragments = record.fragments + fragment.copy(text = fragment.text.trim() + "\n")))
+        mutable.value = mutable.value.copy(transcriptSaved = false)
+        try { persistCurrentTranscript(id) }
+        catch (e: CancellationException) { throw e }
+        catch (_: Exception) { throw TranslationFailure("Teams 字幕無法儲存，請先匯出逐字稿。") }
+        mutable.value = mutable.value.copy(transcriptSaved = true)
     }
 
     private suspend fun recordUsage(id: String, sample: UsageSample) {
@@ -659,7 +722,7 @@ class AppController(
             if (!mutable.value.active || mutable.value.current?.id != recordId) return@launch
             sessionFailure = message
             services.microphone.stop()
-            sessionJob?.cancel()
+            if (captionStop != null) captionStop?.complete(Unit) else sessionJob?.cancel()
         }
     }
 
@@ -674,6 +737,7 @@ class AppController(
             ConnectionPhase.LISTENING -> {
                 mutable.value = mutable.value.copy(phase = ConnectionPhase.STOPPING)
                 services.microphone.stop()
+                captionStop?.complete(Unit)
                 // A normal channel close drains captured audio before the transport sends Stop.
                 audio?.close()
                 if (mutable.value.replayingSavedAudio) sessionJob?.cancel()

@@ -84,7 +84,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                         }
                         Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(3.dp)) {
                             Text("v$APP_VERSION", style = MaterialTheme.typography.labelSmall, color = Color(0xFF657971))
-                            StatusPill(state.phase, state.connectionTesting, state.audioInputStatus.silencedBySystem, state.replayingSavedAudio)
+                            StatusPill(state.phase, state.connectionTesting, state.audioInputStatus.silencedBySystem, state.replayingSavedAudio, state.current?.settings?.audioSource == AudioSource.TEAMS_CAPTIONS)
                         }
                     }
                     Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
@@ -137,12 +137,12 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
     }
 }
 
-@Composable private fun StatusPill(phase: ConnectionPhase, testing: Boolean = false, silenced: Boolean = false, replaying: Boolean = false) {
+@Composable private fun StatusPill(phase: ConnectionPhase, testing: Boolean = false, silenced: Boolean = false, replaying: Boolean = false, captions: Boolean = false) {
     val text = if (testing) "測試連線" else when (phase) {
         ConnectionPhase.IDLE -> "待命"
         ConnectionPhase.CONNECTING -> "準備中"
         ConnectionPhase.RECONNECTING -> "自動重連"
-        ConnectionPhase.LISTENING -> if (replaying) "補處理中" else if (silenced) "收音受限" else "收音中"
+        ConnectionPhase.LISTENING -> if (replaying) "補處理中" else if (captions) "字幕模式" else if (silenced) "收音受限" else "收音中"
         ConnectionPhase.STOPPING -> "整理字幕"
         ConnectionPhase.ERROR -> "已停止"
     }
@@ -200,6 +200,8 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
     val target = state.preferences.target
     val knowledge = state.knowledge.find { it.id == state.preferences.knowledgeId }
     val audioSource = state.preferences.audioSource
+    val captions = audioSource == AudioSource.TEAMS_CAPTIONS
+    val realtimeAudio = !captions && state.preferences.connection().speechModel == SpeechModel.REALTIME_TRANSLATE
     val audioUnavailable = controller.audioSourceUnavailableReason()
     val needsConnection = !state.hasApiKey || state.preferences.connection().validationError() != null
     val listState = rememberLazyListState()
@@ -212,7 +214,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                 SectionCard("準備翻譯") {
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                         Box(Modifier.weight(1f)) {
-                            Choice("聽到的語言", if (state.preferences.connection().speechModel == SpeechModel.REALTIME_TRANSLATE) "自動偵測（模型決定）" else source.label, Language.entries.map { it.name to it.label }, !state.busy && state.preferences.connection().speechModel != SpeechModel.REALTIME_TRANSLATE, wrapSelection = true) {
+                            Choice("聽到的語言", if (realtimeAudio) "自動偵測（模型決定）" else source.label, Language.entries.map { it.name to it.label }, !state.busy && !realtimeAudio, wrapSelection = true) {
                                 controller.setLanguages(Language.valueOf(it), target)
                             }
                         }
@@ -223,11 +225,12 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                             }
                         }
                     }
-                    if (state.preferences.connection().speechModel == SpeechModel.REALTIME_TRANSLATE) Text("即時口譯：自動辨識語言，背景知識與翻譯策略不適用。", style = MaterialTheme.typography.bodySmall)
-                    Choice("音源", audioSource.label, controller.availableAudioSources().map { it.name to it.label }, !state.busy) {
+                    if (realtimeAudio) Text("即時口譯：自動辨識語言，背景知識與翻譯策略不適用。", style = MaterialTheme.typography.bodySmall)
+                    Choice("翻譯來源", audioSource.label, controller.availableAudioSources().map { it.name to it.label }, !state.busy) {
                         controller.selectAudioSource(AudioSource.valueOf(it))
                     }
-                    Text(if (audioSource.isPlayback) "開始後授權擷取允許錄製的媒體音訊。Android 不支援擷取通話音訊，同機 Teams 會議可能收不到聲音。"
+                    Text(if (captions) "在 Teams 會議中開啟原文即時字幕。開始後選「單一應用程式」並指定 Teams，再回來框選字幕。請保持字幕可見，建議用分割畫面。"
+                        else if (audioSource.isPlayback) "開始後授權擷取允許錄製的媒體音訊。Android 不支援擷取通話音訊，同機 Teams 會議可能收不到聲音。"
                         else "收取現場或另一台裝置外放的聲音。同機 Teams 可能優先使用麥克風，即使 Teams 靜音也不保證釋放音源。",
                         style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971))
                     audioUnavailable?.let { Text(it, color = Color(0xFF9A473E), style = MaterialTheme.typography.bodySmall) }
@@ -236,21 +239,21 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                         Text("更多選項", Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
                         Text(if (advanced) "收合 ⌃" else "展開 ⌄")
                     }
-                    if (!advanced) Text(if (state.preferences.connection().speechModel == SpeechModel.REALTIME_TRANSLATE) "本模型自動決定口譯策略"
+                    if (!advanced) Text(if (realtimeAudio) "本模型自動決定口譯策略"
                         else "${knowledge?.name ?: "未使用背景知識"} · ${state.preferences.pace.label} · ${state.preferences.quality.label}",
                         style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971))
                     if (advanced) {
-                        Choice("背景知識", knowledge?.name ?: "不使用背景知識", listOf("" to "不使用背景知識") + state.knowledge.map { it.id to it.name }, !state.busy && state.preferences.connection().speechModel != SpeechModel.REALTIME_TRANSLATE) {
+                        Choice("背景知識", knowledge?.name ?: "不使用背景知識", listOf("" to "不使用背景知識") + state.knowledge.map { it.id to it.name }, !state.busy && !realtimeAudio) {
                             controller.selectKnowledge(it.ifBlank { null })
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             Box(Modifier.weight(1f)) {
-                                Choice("翻譯速度", state.preferences.pace.label, TranslationPace.entries.map { it.name to it.label }, !state.busy && state.preferences.connection().speechModel != SpeechModel.REALTIME_TRANSLATE) {
+                                Choice("翻譯速度", state.preferences.pace.label, TranslationPace.entries.map { it.name to it.label }, !state.busy && !realtimeAudio) {
                                     controller.setTranslationOptions(TranslationPace.valueOf(it), state.preferences.quality)
                                 }
                             }
                             Box(Modifier.weight(1f)) {
-                                Choice("翻譯品質", state.preferences.quality.label, TranslationQuality.entries.map { it.name to it.label }, !state.busy && state.preferences.connection().speechModel != SpeechModel.REALTIME_TRANSLATE) {
+                                Choice("翻譯品質", state.preferences.quality.label, TranslationQuality.entries.map { it.name to it.label }, !state.busy && !realtimeAudio) {
                                     controller.setTranslationOptions(state.preferences.pace, TranslationQuality.valueOf(it))
                                 }
                             }
@@ -261,7 +264,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                         if (source == Language.INDIAN_ENGLISH) Text("印度英文會加入口音與用語提示，實際辨識仍取決於收音品質。", style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971))
                     }
                     TextButton(onClick = { audioHelp = !audioHelp }, contentPadding = PaddingValues(0.dp)) { Text(if (audioHelp) "收合收音說明 ⌃" else "收音與背景執行說明 ⌄") }
-                    if (audioHelp) Text(if (audioSource.isPlayback)
+                    if (audioHelp) Text(if (captions) "字幕圖像在手機上辨識。目前支援英文及中文原文。鎖定或隱藏 Teams 後可能暫停；翻譯服務離線時會先保存已辨識原文，再依序補譯。" else if (audioSource.isPlayback)
                         "裝置播放音訊只擷取允許錄製的媒體，不混入麥克風。其他 App 的播放聲音也可能被收取，通話或禁止錄製的內容可能無聲。每次開始須同意 Android 的螢幕分享／錄製授權；LiveLingo 只讀取音訊、不擷取畫面。鎖定螢幕可能停止擷取。"
                     else "Android 開始翻譯後可切換 App 或鎖定螢幕，並從常駐通知停止。iOS 目前須保持 App 在前景。",
                         style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971))
@@ -277,7 +280,11 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                         }
                         if (!state.active) TextButton(onClick = { editSetup = true }, enabled = !state.busy) { Text("調整設定") }
                     }
-                    if (!state.replayingSavedAudio && state.phase in setOf(ConnectionPhase.LISTENING, ConnectionPhase.RECONNECTING) && controller.reportsAudioLevel()) {
+                    if (state.current?.settings?.audioSource == AudioSource.TEAMS_CAPTIONS && !state.replayingSavedAudio && state.phase == ConnectionPhase.LISTENING) {
+                        state.captionHint?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                        OutlinedButton(onClick = controller::selectCaptionRegion) { Text("框選字幕範圍") }
+                    }
+                    if (state.current?.settings?.audioSource != AudioSource.TEAMS_CAPTIONS && !state.replayingSavedAudio && state.phase in setOf(ConnectionPhase.LISTENING, ConnectionPhase.RECONNECTING) && controller.reportsAudioLevel()) {
                         LinearProgressIndicator(progress = { state.audioInputStatus.level }, modifier = Modifier.fillMaxWidth(), color = Mint)
                         Text(when {
                             state.audioInputStatus.silencedBySystem -> "收音遭系統靜音"
@@ -289,10 +296,13 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                 }
             }
             state.recoveryStatus?.let { status -> item {
-                SectionCard(if (state.phase == ConnectionPhase.RECONNECTING) "正在恢復連線" else "錄音補處理") {
+                SectionCard(if (state.current?.settings?.audioSource == AudioSource.TEAMS_CAPTIONS) "字幕補譯" else if (state.phase == ConnectionPhase.RECONNECTING) "正在恢復連線" else "錄音補處理") {
                     Text(status, style = MaterialTheme.typography.bodySmall, color = Ink)
                 }
             } }
+            if (!state.active && state.current?.pendingCaptions()?.isNotEmpty() == true) item {
+                ResumeCaptionsButton(state.current, controller)
+            }
             if (state.current?.id in state.pendingAudioIds && !state.active) item {
                 SectionCard("還有錄音待補回文字") {
                     Text("錄音已保留在這台裝置，連上網路後可繼續補處理到同一份逐字稿。", style = MaterialTheme.typography.bodySmall)
@@ -341,7 +351,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
         // Outside the scrolling content: the primary action remains reachable above navigation.
         Surface(color = Color.White, shadowElevation = 3.dp) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                if (!state.active) Text("音訊${if (knowledge != null) "與所選背景知識" else ""}會傳至 ${state.preferences.provider.label}。",
+                if (!state.active) Text("${if (captions) "框內辨識出的文字" else "音訊"}${if (knowledge != null) "與所選背景知識" else ""}會傳至 ${state.preferences.provider.label}。",
                     style = MaterialTheme.typography.labelSmall, color = Color(0xFF657971))
                 Button(onClick = { if (state.active) controller.stop() else if (needsConnection) onSettings() else controller.start() },
                     enabled = state.phase != ConnectionPhase.STOPPING && state.storageAvailable && !state.connectionTesting &&
@@ -433,6 +443,11 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
 }
 
+@Composable private fun ResumeCaptionsButton(record: TranscriptRecord, controller: AppController) {
+    val remaining = record.pendingCaptions().size
+    if (remaining > 0) OutlinedButton(onClick = { controller.resumeCaptions(record.id) }) { Text("補譯 ${remaining} 段原文") }
+}
+
 @Composable private fun HistoryScreen(state: AppState, controller: AppController) {
     var selectedId by remember { mutableStateOf<String?>(null) }
     var deleting by remember { mutableStateOf<TranscriptRecord?>(null) }
@@ -448,6 +463,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                     Text(formatDate(item.createdAtMs), style = MaterialTheme.typography.labelMedium, color = Mint)
                     Text("${item.fragments.size} 個串流片段 · ${formatTime(item.fragments.maxOfOrNull { it.endMs } ?: 0)}", style = MaterialTheme.typography.bodySmall)
                     if (item.contentFilterCount > 0) Text("有內容篩選記錄，部分片段可能不完整", style = MaterialTheme.typography.bodySmall, color = Color(0xFF9A473E))
+                    if (!state.busy) ResumeCaptionsButton(item, controller)
                     if (item.id in state.pendingAudioIds) {
                         Text("有已保存的錄音待補回文字", style = MaterialTheme.typography.bodySmall, color = Mint)
                         TextButton(onClick = { controller.resumePendingAudio(item.id) }, enabled = !state.busy) { Text("補回待處理錄音") }
@@ -479,6 +495,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
     LazyColumn(contentPadding = PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item { TextButton(onClick = onBack) { Text("← 所有逐字稿") } }
         item { PageIntro(record.title, formatDate(record.createdAtMs)) }
+        if (!active && record.settings.audioSource == AudioSource.TEAMS_CAPTIONS) item { ResumeCaptionsButton(record, controller) }
         if (pendingAudio && !active) item {
             Button(onClick = { controller.resumePendingAudio(record.id) }) { Text("補回待處理錄音") }
         }

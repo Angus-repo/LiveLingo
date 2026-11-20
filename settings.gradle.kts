@@ -29,6 +29,11 @@ dependencyResolutionManagement {
                 includeGroupByRegex("com\\.android.*")
                 includeGroupByRegex("androidx\\..*")
                 includeGroup("com.google.testing.platform")
+                includeGroup("com.google.mlkit")
+                includeGroup("com.google.android.gms")
+                includeGroupByRegex("com\\.google\\.firebase.*")
+                includeGroupByRegex("com\\.google\\.android\\.datatransport.*")
+                includeGroup("com.google.android.odml")
             }
         }
         mavenCentral()

@@ -30,10 +30,11 @@ enum class TranslationQuality(val label: String) {
 enum class AudioSource(val label: String, val description: String) {
     MICROPHONE("麥克風", "透過目前的麥克風收取現場或喇叭播放的聲音。"),
     DEVICE_PLAYBACK("裝置播放音訊", "擷取此裝置上允許錄製的媒體聲音，不混入麥克風。其他 App 同時播放的聲音也可能被收取。"),
+    TEAMS_CAPTIONS("Teams 即時字幕", "在手機上讀取框選範圍的原文字幕，再交由文字模型翻譯。"),
     // Decode historical 0.1.7 records without rewriting their original source metadata.
     TEAMS("Microsoft Teams（舊版音源）", "此音源已移除，請重新選擇音源。"),
     ;
-    val isPlayback: Boolean get() = this != MICROPHONE
+    val isPlayback: Boolean get() = this == DEVICE_PLAYBACK || this == TEAMS
     val selectable: Boolean get() = this != TEAMS
 }
 
@@ -98,6 +99,7 @@ data class TranscriptRecord(
     val usage: MeetingUsage? = null,
     /** Previous partial text retained when a replay supplies a complete replacement (JSON export). */
     val recoveredText: List<TranscriptFragment> = emptyList(),
+    val captionConnection: FoundryConnection? = null,
 )
 
 /** Breaks are character offsets into an exact source snapshot. No model-rewritten text is stored. */

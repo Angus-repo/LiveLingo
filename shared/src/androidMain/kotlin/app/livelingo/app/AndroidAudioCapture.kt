@@ -39,7 +39,7 @@ internal fun playbackCaptureUsages(source: AudioSource): List<Int> {
     return listOf(AudioAttributes.USAGE_MEDIA, AudioAttributes.USAGE_GAME, AudioAttributes.USAGE_UNKNOWN)
 }
 
-internal class AndroidMicrophone(private val appContext: Context) : Microphone {
+internal class AndroidMicrophone(private val appContext: Context) : Microphone, TeamsCaptionInput {
     override fun reportsAudioLevel(): Boolean = true
     private var permissionContinuation: CancellableContinuation<Boolean>? = null
     private var projectionContinuation: CancellableContinuation<Intent?>? = null
@@ -50,6 +50,7 @@ internal class AndroidMicrophone(private val appContext: Context) : Microphone {
     private var activityRef: WeakReference<ComponentActivity>? = null
     private val captureScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val callbackScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var teamsCaptions: AndroidTeamsCaptions? = null
     private var preparedSource: AudioSource? = null
     private var projection: MediaProjection? = null
     private var projectionCallback: MediaProjection.Callback? = null
@@ -70,9 +71,14 @@ internal class AndroidMicrophone(private val appContext: Context) : Microphone {
     @Volatile private var generation = 0L
 
     override fun availableSources(): List<AudioSource> =
-        if (Build.VERSION.SDK_INT >= 29) listOf(AudioSource.MICROPHONE, AudioSource.DEVICE_PLAYBACK) else listOf(AudioSource.MICROPHONE)
+        buildList {
+            add(AudioSource.MICROPHONE)
+            if (Build.VERSION.SDK_INT >= 29) add(AudioSource.DEVICE_PLAYBACK)
+            if (Build.VERSION.SDK_INT >= 34) add(AudioSource.TEAMS_CAPTIONS)
+        }
 
     override fun unavailableReason(source: AudioSource): String? = when {
+        source == AudioSource.TEAMS_CAPTIONS && Build.VERSION.SDK_INT < 34 -> "Teams 字幕需要 Android 14 以上的單一應用程式分享。"
         source.isPlayback && Build.VERSION.SDK_INT < 29 -> "裝置播放音訊需要 Android 10 以上，請改用麥克風。"
         !source.selectable -> "此音源已移除，請重新選擇麥克風或裝置播放音訊。"
         else -> null
@@ -141,12 +147,12 @@ internal class AndroidMicrophone(private val appContext: Context) : Microphone {
         }
     }
 
-    private suspend fun requestProjectionConsent(manager: MediaProjectionManager): Intent? {
+    private suspend fun requestProjectionConsent(manager: MediaProjectionManager, captions: Boolean): Intent? {
         requireVisible()
         if (projectionPending) throw AudioCaptureFailure("請先完成或關閉上一個音訊擷取授權視窗，再開始翻譯。")
         val launcher = projectionLauncher ?: throw AudioCaptureFailure("請重新開啟 App 後授予音訊擷取權限。")
-        // Audio-only capture. No virtual display, screenshot, image surface or screen encoder is created.
-        val intent = if (Build.VERSION.SDK_INT >= 34)
+        // Playback keeps the original audio-only grant. Captions ask the user to select the Teams app.
+        val intent = if (Build.VERSION.SDK_INT >= 34 && !captions)
             manager.createScreenCaptureIntent(MediaProjectionConfig.createConfigForDefaultDisplay())
         else manager.createScreenCaptureIntent()
         return suspendCancellableCoroutine { continuation ->
@@ -167,13 +173,14 @@ internal class AndroidMicrophone(private val appContext: Context) : Microphone {
         check(recording == null && preparedSource == null)
         statusCallback = onStatus
         interruptionCallback = onError
-        if (!permitted()) throw AudioCaptureFailure("未取得錄音權限。Android 擷取播放音訊也需要這項權限；請到系統設定中允許。")
+        val captions = source == AudioSource.TEAMS_CAPTIONS
+        if (!captions && !permitted()) throw AudioCaptureFailure("未取得錄音權限。Android 擷取播放音訊也需要這項權限；請到系統設定中允許。")
         ensureActive()
         val manager = appContext.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        val consent = if (source.isPlayback) requestProjectionConsent(manager)
+        val consent = if (source.isPlayback || captions) requestProjectionConsent(manager, captions)
             ?: throw AudioCaptureFailure("未授權音訊擷取，尚未連線或開始收音。可重新開始，或選擇麥克風。") else null
         ensureActive()
-        requireVisible()
+        if (!captions) requireVisible() // Selecting a single app can bring Teams to the foreground.
         // Android 14+ requires consent -> mediaProjection FGS -> getMediaProjection, in this order.
         val ready = AndroidTranslationForegroundService.requestStart(appContext, source)
         withTimeout(5_000) { ready.await() }
@@ -187,7 +194,8 @@ internal class AndroidMicrophone(private val appContext: Context) : Microphone {
                     if (projection !== granted) return
                     val interrupted = interruptionCallback
                     stop()
-                    interrupted?.invoke("系統已停止播放音訊擷取，可能是鎖定螢幕、撤回授權或其他 App 開始分享。已收到的字幕會保留，請回到 App 重新開始。")
+                    if (captions) interrupted?.invoke("Teams 字幕分享已結束，已擷取的原文可在逐字稿補譯。")
+                    else interrupted?.invoke("系統已停止播放音訊擷取，可能是鎖定螢幕、撤回授權或其他 App 開始分享。已收到的字幕會保留，請回到 App 重新開始。")
                 }
             }
             projectionCallback = callback
@@ -196,9 +204,23 @@ internal class AndroidMicrophone(private val appContext: Context) : Microphone {
         preparedSource = source
     }
 
+    override fun startCaptions(onHint: (String) -> Unit): kotlinx.coroutines.channels.ReceiveChannel<CapturedCaption> {
+        check(Build.VERSION.SDK_INT >= 34 && preparedSource == AudioSource.TEAMS_CAPTIONS)
+        val grant = projection ?: throw AudioCaptureFailure("請重新授權分享 Teams 應用程式。")
+        val capture = AndroidTeamsCaptions(appContext, grant, onHint) { interruptionCallback?.invoke(it) }
+        teamsCaptions = capture
+        capture.start()
+        return capture.captions
+    }
+
+    override fun selectCaptionRegion() {
+        if (Build.VERSION.SDK_INT >= 34) activityRef?.get()?.let { teamsCaptions?.selectRegion(it) }
+    }
+
     override suspend fun start(onAudio: (ByteArray) -> Unit, onError: (String) -> Unit): Unit = withContext(Dispatchers.Main.immediate) {
         check(recording == null)
         val source = preparedSource ?: throw AudioCaptureFailure("音源尚未準備完成，請重新開始。")
+        check(source != AudioSource.TEAMS_CAPTIONS)
         if (!hasRecordPermission()) throw AudioCaptureFailure("錄音權限已撤回，請重新授權。")
         if (!AndroidTranslationForegroundService.isActive) throw AudioCaptureFailure("背景翻譯服務已停止，請回到 App 重新開始。")
         val minBuffer = AudioRecord.getMinBufferSize(24_000, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
@@ -282,6 +304,8 @@ internal class AndroidMicrophone(private val appContext: Context) : Microphone {
             session.job?.cancel()
             synchronized(stateLock) { if (recording === session) recording = null }
         }
+        if (Build.VERSION.SDK_INT >= 34) teamsCaptions?.close()
+        teamsCaptions = null
         val grant = projection
         projection = null // Invalidate callbacks before stopping the projection intentionally.
         projectionCallback?.let { callback -> runCatching { grant?.unregisterCallback(callback) } }

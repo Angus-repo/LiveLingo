@@ -61,6 +61,9 @@ private val knownProviderParams = setOf(
     "type", "audio", "event_id",
 )
 
+internal fun safeProviderType(raw: String?): String? = raw?.takeIf { it in knownProviderTypes }
+internal fun safeProviderParam(raw: String?): String? = raw?.takeIf { it in knownProviderParams }
+
 fun safeProviderCode(raw: String?): String? = raw?.let { value -> knownProviderCodes.firstOrNull { it.equals(value, ignoreCase = true) } }
 
 fun safeRequestId(raw: String?, secret: String? = null): String? {

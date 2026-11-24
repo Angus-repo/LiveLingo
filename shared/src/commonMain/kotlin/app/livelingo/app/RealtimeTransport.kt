@@ -305,7 +305,7 @@ internal class RealtimeTransport(
                 TranslationFailure(failure.message.orEmpty(), FoundryDiagnostic(stage, "PROTOCOL")) else classifyFoundryFailure(failure, stage)
             val code = withTimeoutOrNull(150) { runCatching { socket?.peerCloseCode() }.getOrNull() }
             throw TranslationFailure(safeDiagnosticField(safe.message.orEmpty(), key),
-                (safe.diagnostic ?: FoundryDiagnostic(stage, "SESSION_FAILURE")).copy(webSocketCloseCode = safeWebSocketCloseCode(code)))
+                (safe.diagnostic ?: FoundryDiagnostic(stage, "SESSION_FAILURE")).copy(webSocketCloseCode = safeWebSocketCloseCode(code)), cause = failure)
         } finally {
             withContext(NonCancellable) {
                 try { checkpoint() } finally { withTimeoutOrNull(2000) { runCatching { socket?.close() } }; socket?.cancel() }

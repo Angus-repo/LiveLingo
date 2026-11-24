@@ -17,6 +17,50 @@ import kotlinx.serialization.encodeToString
 import kotlin.test.*
 
 class AppLogicTest {
+    @Test fun unexpectedDisconnectCanBeDownloadedAfterRestartWithoutMeetingContent() = runTest {
+        val services = configuredServices()
+        val transport = FakeTransport().apply {
+            streamFailure = IllegalStateException("private transcript and credential", IllegalArgumentException("private cause"))
+        }
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val controller = AppController(services, transport, dispatcher)
+        controller.start()
+        runCurrent()
+        services.mic.emit(ByteArray(4800))
+        controller.state.first { it.phase == ConnectionPhase.ERROR }
+        controller.dispose()
+        val reopened = AppController(services, FakeTransport(), dispatcher)
+        reopened.downloadDiagnosticLog()
+        val report = services.exports.single()
+        for (field in listOf("session_begin", "connection_attempt", "ready", "session_failure", "stage=stream",
+                "IllegalStateException", "IllegalArgumentException", "pending_chunks=1", "transcript_saved=true", "pending_audio=true"))
+            assertContains(report, field)
+        for (privateValue in listOf("private", "example.openai.azure.com", "https://"))
+            assertFalse(privateValue in report)
+        reopened.dispose()
+    }
+
+    @Test fun logRotatesAndLimitsServiceErrorsToSafeMetadata() {
+        val services = FakeServices()
+        val log = SessionDiagnostics(services)
+        val diagnostic = FoundryDiagnostic(FoundryStages.START, "PROVIDER_ERROR", 403, "req_valid123456",
+            "permission_denied", 1008, "private reason", "permission_error", "session.model", "private body")
+        val fields = log.safeFields(null, diagnostic, "private")
+        assertContains(fields, "http=403")
+        assertContains(fields, "ws_close=1008")
+        assertContains(fields, "request_id=req_valid123456")
+        assertContains(fields, "provider_code=permission_denied")
+        assertFalse("private" in fields)
+        val untrusted = diagnostic.copy(stage = "private stage", code = "private code", requestId = "req_private_secrets",
+            providerCode = "private", providerType = "private", providerParam = "private")
+        assertFalse("private" in log.safeFields(null, untrusted, "private"))
+        repeat(170) { log.event("marker", "index=$it") }
+        val restored = SessionDiagnostics(services).report()
+        assertEquals(160, restored.lineSequence().count { " marker " in it })
+        assertFalse("marker index=0 " in restored)
+        assertContains(restored, "marker index=169")
+    }
+
     @Test fun meetingCostsSurviveRestartDeletionAndChangingDefaultRates() = runTest {
         val services = configuredServices()
         val transport = FakeTransport()

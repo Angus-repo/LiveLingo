@@ -52,6 +52,7 @@ class AppController(
 ) {
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
     private val repository = AppRepository(services.storage)
+    private val diagnostics = SessionDiagnostics(services)
     private val mutable = MutableStateFlow(AppState())
     val state: StateFlow<AppState> = mutable.asStateFlow()
     private var apiKey = ""
@@ -274,6 +275,12 @@ class AppController(
         mutable.value = mutable.value.copy(message = "可複製或分享以下診斷資訊。", showReportInMessage = true)
     }
 
+    fun downloadDiagnosticLog() {
+        try {
+            services.exporter.saveDiagnostic("LiveLingo-diagnostic-${services.currentTimeMillis()}.txt", diagnostics.report())
+        } catch (_: Exception) { inform("無法開啟診斷紀錄的儲存畫面，請重試。") }
+    }
+
     fun exportConnectionReport() {
         val report = mutable.value.lastConnectionReport ?: return
         try { services.exporter.export("LiveLingo_connection_diagnostic_${services.currentTimeMillis()}.txt", "text/plain", report) }
@@ -282,6 +289,10 @@ class AppController(
 
     private fun recordDiagnostic(connection: FoundryConnection, secret: String, diagnostic: FoundryDiagnostic,
                                  message: String, success: Boolean, showDialog: Boolean = true) {
+        if (mutable.value.connectionTesting) {
+            diagnostics.event("probe_result", "provider=${connection.provider} speech=${connection.speechModel} " +
+                diagnostics.safeFields(null, diagnostic, secret))
+        }
         val safeMessage = safeDiagnosticField(message, secret)
         mutable.value = mutable.value.copy(
             message = if (showDialog) safeMessage else null,
@@ -380,7 +391,10 @@ class AppController(
             val key = repository.apiKey(pending.connection.credentialEndpoint())
             if (key.isBlank()) { inform("請先設定原錄音所使用服務的 API key，再補回待處理錄音。"); return }
             launchSession(record, pending.connection, key, "", replayOnly = true)
-        } catch (_: Exception) { inform("無法讀取待處理錄音或原服務金鑰，錄音與逐字稿仍保留在裝置。") }
+        } catch (failure: Exception) {
+            diagnostics.event("recovery_open_failed", diagnostics.safeFields(failure, null, apiKey))
+            inform("無法讀取待處理錄音或原服務金鑰，錄音與逐字稿仍保留在裝置。")
+        }
     }
 
     private fun launchSession(record: TranscriptRecord, connection: FoundryConnection, sessionApiKey: String,
@@ -389,6 +403,11 @@ class AppController(
         val settings = record.settings
         val captions = settings.audioSource == AudioSource.TEAMS_CAPTIONS
         val transcriptAttemptId = services.uniqueId()
+        val mode = when { textOnly -> "text_recovery"; replayOnly -> "audio_recovery"; captions -> "captions"; else -> "live" }
+        val config = "app=$APP_VERSION meeting_ms=${record.createdAtMs} mode=$mode provider=${connection.provider} " +
+            "speech=${connection.speechModel} text=${connection.textModelKind} input=${settings.audioSource} " +
+            "source=${settings.sourceLanguage} target=${settings.targetLanguage}"
+        diagnostics.event("session_begin", config)
         // This queue absorbs disk scheduling only; network outages use the persistent journal.
         val queue = Channel<ByteArray>(Channel.UNLIMITED)
         if (replayOnly) queue.close()
@@ -404,6 +423,15 @@ class AppController(
             replayingSavedAudio = replayOnly, pendingInWindow = 0)
         sessionJob = scope.launch {
             var listeningStarted = false
+            var stage = "prepare_input"
+            var recoveryJournal: AudioJournal? = null
+            var attempt = 0
+            fun trace(event: String, extra: String = "") {
+                val audioState = recoveryJournal?.state
+                val counters = if (audioState == null) "" else " audio_saved_ms=${audioState.bytes / 48} " +
+                    "audio_committed_ms=${audioState.committedBytes / 48} pending_chunks=${audioState.next - audioState.committed} replay_blocked=${audioState.blocked}"
+                diagnostics.event(event, "meeting_ms=${record.createdAtMs} stage=$stage phase=${mutable.value.phase} attempt=$attempt$counters $extra")
+            }
             try {
                 // Android must create its microphone foreground service while Activity is visible,
                 // not after the potentially slow Foundry handshake.
@@ -416,9 +444,10 @@ class AppController(
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (failure: Exception) {
-                    throw TranslationFailure((failure as? AudioCaptureFailure)?.message ?: "無法準備背景翻譯音源。請在 App 前景開始，並允許所需的錄音或音訊擷取授權。")
+                    throw TranslationFailure((failure as? AudioCaptureFailure)?.message ?: "無法準備背景翻譯音源。請在 App 前景開始，並允許所需的錄音或音訊擷取授權。", cause = failure)
                 }
                 if (captions || textOnly) {
+                    stage = "text_translation"
                     val stop = CompletableDeferred<Unit>()
                     captionStop = stop
                     val incoming = if (replayOnly) null else {
@@ -428,6 +457,7 @@ class AppController(
                     }
                     mutable.value = mutable.value.copy(phase = ConnectionPhase.LISTENING)
                     listeningStarted = true
+                    trace("ready")
                     val translator = HttpTextTranslator(services.createHttpClient())
                     translator.setUsageListener { recordUsage(record.id, it.copy(id = "$transcriptAttemptId-${it.id}")) }
                     try {
@@ -450,16 +480,27 @@ class AppController(
                                 appendCaption(record.id, line.copy(id = "translation-${line.id}", channel = TranscriptChannel.OUTPUT,
                                     text = text, speakerLabel = null), completedPendingId = line.id)
                             },
-                            onStatus = { mutable.value = mutable.value.copy(recoveryStatus = it) })
+                            onStatus = { mutable.value = mutable.value.copy(recoveryStatus = it) },
+                            onFailure = { failure ->
+                                trace("text_failure", diagnostics.safeFields(failure, (failure as? TranslationFailure)?.diagnostic, sessionApiKey))
+                            })
                     } finally { translator.close(); captionStop = null }
                     return@launch
                 }
+                stage = "open_audio_journal"
                 val journal = try { AudioJournal(services.storage, record.id, connection) }
-                catch (_: Exception) { throw TranslationFailure("無法建立或讀取錄音保存檔，尚未開始收音。請確認裝置儲存空間。") }
+                catch (failure: Exception) { throw TranslationFailure("無法建立或讀取錄音保存檔，尚未開始收音。請確認裝置儲存空間。", cause = failure) }
+                recoveryJournal = journal
                 journal.acknowledgeSaved(record.audioCheckpoint)
                 if (replayOnly && journal.state.committed == journal.state.next) return@launch
                 RecoveringTranslationSession(journal, transport).run(sessionApiKey, settings, queue,
+                    onAttempt = { index, _ ->
+                        attempt = index + 1
+                        stage = "connect"
+                        trace("connection_attempt")
+                    },
                     onReady = {
+                        stage = "start_input"
                         ensureActive()
                         if (!mutable.value.active || mutable.value.phase == ConnectionPhase.STOPPING) {
                             if (!listeningStarted && !replayOnly) throw CancellationException()
@@ -477,13 +518,15 @@ class AppController(
                         catch (failure: Exception) {
                             throw TranslationFailure((failure as? AudioCaptureFailure)?.message ?: if (settings.audioSource == AudioSource.MICROPHONE)
                                 "無法啟用麥克風。請允許麥克風權限，並確認沒有其他 App 或通話占用麥克風，再重新開始。"
-                            else "無法啟用所選播放音源。請確認音訊擷取授權與裝置音訊狀態，再重新開始。")
+                            else "無法啟用所選播放音源。請確認音訊擷取授權與裝置音訊狀態，再重新開始。", cause = failure)
                         }
                         ensureActive()
                         if (mutable.value.phase != ConnectionPhase.STOPPING) mutable.value = mutable.value.copy(
                             phase = ConnectionPhase.LISTENING,
                             recoveryStatus = if (mutable.value.recoveryStatus != null || replayOnly) "已連線，正在補回待處理錄音；已有字幕會保留。" else null)
                         listeningStarted = true
+                        stage = "stream"
+                        trace("ready")
                         if (paragraphModel.isNotBlank() && paragraphJob == null) paragraphJob = scope.launch {
                             while (isActive && mutable.value.current?.id == record.id && mutable.value.active) {
                                 delay(8_000)
@@ -526,6 +569,7 @@ class AppController(
                                 pendingTranslations = updated.pendingTranslations + pending,
                                 captionConnection = updated.captionConnection ?: connection.takeIf { pending.isNotEmpty() })
                             else updated
+                            if (complete && pending.isNotEmpty()) trace("translation_deferred", "count=${pending.size}")
                             replaceRecord(next)
                             if (publish) mutable.value = mutable.value.copy(pendingInWindow = if (complete) 0 else pending.size)
                             if (publish && next.contentFilterCount > 0) mutable.value = mutable.value.copy(
@@ -536,10 +580,14 @@ class AppController(
                                 mutable.value = mutable.value.copy(transcriptSaved = true,
                                     recoveryStatus = if (complete && mutable.value.recoveryStatus != null) "待處理片段已補回，繼續接收後續錄音。" else mutable.value.recoveryStatus)
                             } catch (cancelled: CancellationException) { throw cancelled }
-                            catch (_: Exception) { throw TranslationFailure("逐字稿無法寫入裝置，已停止收音。請先匯出目前逐字稿，再確認儲存空間。") }
+                            catch (failure: Exception) {
+                                stage = "save_transcript"
+                                throw TranslationFailure("逐字稿無法寫入裝置，已停止收音。請先匯出目前逐字稿，再確認儲存空間。", cause = failure)
+                            }
                         }
                     },
                     onRetry = { retry, failure ->
+                        trace("retry", "retry=$retry " + diagnostics.safeFields(failure, failure.diagnostic, sessionApiKey))
                         recordDiagnostic(connection, sessionApiKey, failure.diagnostic ?: FoundryDiagnostic(FoundryStages.STREAM, "TIMEOUT"),
                             failure.message.orEmpty(), success = false, showDialog = false)
                         mutable.value = mutable.value.copy(phase = ConnectionPhase.RECONNECTING,
@@ -555,6 +603,7 @@ class AppController(
                     attemptId = services::uniqueId,
                     stopCapture = { try { services.microphone.stop() } finally { queue.close() } },
                     onNotice = { notice ->
+                        trace("service_notice", diagnostics.safeFields(null, notice.diagnostic, sessionApiKey))
                         val current = mutable.value.current?.takeIf { it.id == record.id }
                         if (current != null && notice.diagnostic.code == "CONTENT_FILTER") {
                             val count = current.contentFilterCount.coerceAtMost(Int.MAX_VALUE - 1) + 1
@@ -568,14 +617,16 @@ class AppController(
                                 persistCurrentTranscript(record.id)
                                 mutable.value = mutable.value.copy(transcriptSaved = true)
                             } catch (cancelled: CancellationException) { throw cancelled }
-                            catch (_: Exception) { throw TranslationFailure("內容篩選記錄無法寫入裝置，已停止收音；請先匯出目前逐字稿。") }
+                            catch (failure: Exception) { throw TranslationFailure("內容篩選記錄無法寫入裝置，已停止收音；請先匯出目前逐字稿。", cause = failure) }
                         }
                     })
-            } catch (_: TimeoutCancellationException) {
+            } catch (failure: TimeoutCancellationException) {
+                trace("session_timeout", diagnostics.safeFields(failure, null, sessionApiKey))
                 sessionFailure = "連線等待逾時，請檢查服務狀態。已收到的字幕已保留。"
             } catch (_: CancellationException) {
                 // User stop during connection and disposal intentionally cancel; microphone errors supply their own message.
             } catch (failure: Exception) {
+                trace("session_failure", diagnostics.safeFields(failure, (failure as? TranslationFailure)?.diagnostic, sessionApiKey))
                 sessionFailure = when (failure) {
                     is AudioCaptureFailure -> failure.message
                     is TranslationFailure -> safeDiagnosticField(failure.message.orEmpty(), sessionApiKey)
@@ -611,7 +662,11 @@ class AppController(
                     // on the same dispatcher so returning to a cancelled session cannot skip phase/release.
                     withContext(NonCancellable) {
                         try { persistCurrentTranscript(record.id); saved = true }
-                        catch (_: Exception) { sessionFailure = "最後收到的字幕無法寫入裝置。請先從逐字稿匯出目前內容，再確認儲存空間。" }
+                        catch (failure: Exception) {
+                            stage = "final_save"
+                            trace("save_failed", diagnostics.safeFields(failure, null, sessionApiKey))
+                            sessionFailure = "最後收到的字幕無法寫入裝置。請先從逐字稿匯出目前內容，再確認儲存空間。"
+                        }
                     }
                     mutable.value = mutable.value.copy(transcriptSaved = saved)
                 }
@@ -626,6 +681,9 @@ class AppController(
                     recoveryStatus = null, captionHint = null, pendingInWindow = 0,
                     replayingSavedAudio = false,
                 )
+                val endState = mutable.value
+                trace("session_end", "transcript_saved=${endState.transcriptSaved} pending_text=${endState.current?.pendingCaptions()?.size ?: 0} " +
+                    "pending_audio=${record.id in endState.pendingAudioIds}")
                 // Do not dismiss the Android foreground service until the final network
                 // frames and transcript writes have completed.
                 services.microphone.releaseSession()
@@ -649,7 +707,7 @@ class AppController(
         mutable.value = mutable.value.copy(transcriptSaved = false)
         try { persistCurrentTranscript(id) }
         catch (e: CancellationException) { throw e }
-        catch (_: Exception) { throw TranslationFailure("字幕無法儲存，請先匯出逐字稿。") }
+        catch (failure: Exception) { throw TranslationFailure("字幕無法儲存，請先匯出逐字稿。", cause = failure) }
         mutable.value = mutable.value.copy(transcriptSaved = true)
     }
 
@@ -662,7 +720,7 @@ class AppController(
             persistCurrentTranscript(id)
             mutable.value = mutable.value.copy(transcriptSaved = true)
         } catch (cancelled: CancellationException) { throw cancelled }
-        catch (_: Exception) { throw TranslationFailure("用量無法儲存，請確認裝置儲存空間。") }
+        catch (failure: Exception) { throw TranslationFailure("用量無法儲存，請確認裝置儲存空間。", cause = failure) }
     }
 
     fun costRates(): CostRates {
@@ -753,6 +811,7 @@ class AppController(
     private fun microphoneFailed(message: String, recordId: String?) {
         scope.launch {
             if (!mutable.value.active || mutable.value.current?.id != recordId) return@launch
+            diagnostics.event("input_interruption", "phase=${mutable.value.phase} input=${mutable.value.current?.settings?.audioSource}")
             sessionFailure = message
             services.microphone.stop()
             if (captionStop != null) captionStop?.complete(Unit) else sessionJob?.cancel()
@@ -760,6 +819,7 @@ class AppController(
     }
 
     fun stop() {
+        if (mutable.value.active) diagnostics.event("stop_requested", "phase=${mutable.value.phase}")
         when (mutable.value.phase) {
             ConnectionPhase.CONNECTING, ConnectionPhase.RECONNECTING -> {
                 mutable.value = mutable.value.copy(phase = ConnectionPhase.STOPPING)

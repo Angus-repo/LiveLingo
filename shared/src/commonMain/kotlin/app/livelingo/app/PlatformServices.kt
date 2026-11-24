@@ -33,10 +33,14 @@ interface Microphone {
 class AudioCaptureFailure(message: String) : Exception(message)
 
 interface TextExporter {
+    fun saveDiagnostic(fileName: String, text: String) = export(fileName, "text/plain", text)
     fun export(fileName: String, mimeType: String, text: String)
 }
 
 interface PlatformServices {
+    val diagnosticPlatform: String get() = "unknown"
+    fun diagnosticNetwork(): String = "unknown"
+    fun diagnosticLocation(error: Throwable): String? = null
     val storage: LocalStorage
     val microphone: Microphone
     val exporter: TextExporter

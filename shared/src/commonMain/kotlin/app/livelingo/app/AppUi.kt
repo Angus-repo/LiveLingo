@@ -321,6 +321,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                         style = MaterialTheme.typography.bodySmall, color = Color(0xFF9A473E))
                     if (!state.active) Text(if (state.transcriptSaved) "逐字稿已儲存。點下方「開始下一段」即可收取新的音訊。" else "逐字稿尚未完整儲存，請先到「逐字稿」匯出。",
                         style = MaterialTheme.typography.bodySmall, color = Ink)
+                    OutlinedButton(onClick = controller::downloadDiagnosticLog) { Text("下載診斷紀錄") }
                     if (state.lastConnectionReport != null) TextButton(onClick = controller::showConnectionReport) { Text("查看診斷") }
                 }
             }
@@ -591,6 +592,9 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                 controller.selectProvider(ModelProvider.valueOf(it))
             }
             Text("Microsoft Foundry 與 OpenAI 的設定、金鑰獨立保存，切換後可繼續使用原本的資料。", style = MaterialTheme.typography.bodySmall)
+        } }
+        item { SectionCard("診斷紀錄", "保存最近的連線、重試與字幕儲存狀態。可將文字檔提供給協助排錯的人。") {
+            OutlinedButton(onClick = controller::downloadDiagnosticLog) { Text("下載診斷紀錄") }
         } }
         item { SectionCard("連線設定", "API key 使用裝置的安全儲存機制加密保存。") {
             if (!isOpenAi) OutlinedTextField(endpoint, { endpoint = it }, label = { Text("Azure OpenAI／Foundry 資源端點") }, placeholder = { Text("https://your-resource.openai.azure.com") }, singleLine = true, enabled = !state.busy, modifier = Modifier.fillMaxWidth())

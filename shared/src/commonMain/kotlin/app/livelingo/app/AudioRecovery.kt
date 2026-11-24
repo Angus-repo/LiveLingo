@@ -152,6 +152,7 @@ internal class RecoveringTranslationSession(
         allowRetry: () -> Boolean,
         attemptId: () -> String,
         stopCapture: () -> Unit,
+        onAttempt: (Int, Long) -> Unit = { _, _ -> },
         contextForSegment: (Long) -> String = { "" },
     ) = coroutineScope {
         check(!journal.state.blocked) { "Content-filtered audio cannot be replayed" }
@@ -165,7 +166,7 @@ internal class RecoveringTranslationSession(
                 for (bytes in audio) {
                     try { journal.append(bytes) }
                     catch (cancelled: CancellationException) { throw cancelled }
-                    catch (_: Exception) { throw TranslationFailure("錄音無法寫入裝置，已停止收音。已保存的錄音與文字仍保留，請確認儲存空間。") }
+                    catch (failure: Exception) { throw TranslationFailure("錄音無法寫入裝置，已停止收音。已保存的錄音與文字仍保留，請確認儲存空間。", cause = failure) }
                     revision.value++
                 }
             } finally {
@@ -192,6 +193,7 @@ internal class RecoveringTranslationSession(
                 val queue = Channel<ByteArray>(1)
                 val events = mutableListOf<TranscriptDelta>()
                 val currentAttempt = attempt++
+                onAttempt(currentAttempt, start)
                 val usagePrefix = attemptId()
                 transport.setUsageListener { onUsage(it.copy(id = "$usagePrefix:${it.id}")) }
                 var end = start

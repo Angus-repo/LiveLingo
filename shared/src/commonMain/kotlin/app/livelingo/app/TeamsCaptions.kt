@@ -65,6 +65,7 @@ internal suspend fun processTeamsCaptions(
     translate: suspend (TranscriptFragment) -> String,
     saveOutput: suspend (TranscriptFragment, String) -> Unit,
     onStatus: (String?) -> Unit,
+    onFailure: (Exception) -> Unit = {},
 ) = coroutineScope {
     val changed = Channel<Unit>(Channel.CONFLATED)
     if (incoming != null) launch {
@@ -85,6 +86,7 @@ internal suspend fun processTeamsCaptions(
         onStatus("等待補譯 ${queue.size} 段")
         val translated = try { translate(first) } catch (failure: Exception) {
             currentCoroutineContext().ensureActive()
+            onFailure(failure)
             if (failure is TranslationFailure && failure.targetLanguageMismatch) {
                 deferred += first.id
                 continue

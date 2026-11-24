@@ -31,6 +31,7 @@ interface IosNativeServices {
 data class IosReadResult(val value: String?, val error: String?)
 
 private class IosPlatformServices(private val native: IosNativeServices) : PlatformServices {
+    override val diagnosticPlatform: String get() = "iOS ${platform.UIKit.UIDevice.currentDevice.systemVersion}"
     override val storage: LocalStorage = object : LocalStorage {
         private fun readNative(key: String, secret: Boolean): String? {
             val result = native.readValue(key, secret)

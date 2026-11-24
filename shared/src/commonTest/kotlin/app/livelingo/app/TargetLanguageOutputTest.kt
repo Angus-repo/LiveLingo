@@ -36,6 +36,20 @@ class TargetLanguageOutputTest {
         }
     }
 
+    @Test fun voiceRepairCanDeferAnUntranslatedSpanAndDeliverLaterSpeech() = runTest {
+        val input = Channel<TranscriptDelta>(2)
+        input.send(TranscriptDelta(TranscriptChannel.OUTPUT, "Can we proceed?", 0, 800))
+        input.send(TranscriptDelta(TranscriptChannel.OUTPUT, "下一句。", 800, 1600))
+        input.close()
+        val emitted = mutableListOf<TranscriptDelta>()
+        deliverVoiceOutput(input, Language.ZH_TW, {
+            throw TranslationFailure("wrong language", FoundryDiagnostic("文字翻譯", "TARGET_LANGUAGE_MISMATCH"))
+        }, { emitted += it })
+        assertEquals(listOf("下一句。"), emitted.filter { it.channel == TranscriptChannel.OUTPUT }.map { it.text })
+        assertEquals("Can we proceed?", emitted.single { it.translationPending }.text)
+        assertFalse(needsTargetTranslation("請交給 IT 部門。", Language.ZH_TW))
+    }
+
     @Test fun aSplitWordIsRepairedOnceBeforeDisplayAndUnpunctuatedTailDrains() = runTest {
         val input = Channel<TranscriptDelta>(Channel.UNLIMITED)
         listOf("先確認。", "Ca", "n we call the API", "?", "最後看 API").forEachIndexed { i, text ->

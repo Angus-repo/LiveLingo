@@ -300,6 +300,10 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                     Text(status, style = MaterialTheme.typography.bodySmall, color = Ink)
                 }
             } }
+            val deferredCount = (state.current?.pendingTranslations?.size ?: 0) + state.pendingInWindow
+            if (deferredCount > 0 && state.phase == ConnectionPhase.LISTENING && !state.replayingSavedAudio) item {
+                Text("有 ${deferredCount} 段待補譯，後續發言會繼續翻譯。", style = MaterialTheme.typography.bodySmall)
+            }
             if (!state.active && state.current?.pendingCaptions()?.isNotEmpty() == true) item {
                 ResumeCaptionsButton(state.current, controller)
             }
@@ -495,7 +499,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
     LazyColumn(contentPadding = PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item { TextButton(onClick = onBack) { Text("← 所有逐字稿") } }
         item { PageIntro(record.title, formatDate(record.createdAtMs)) }
-        if (!active && record.settings.audioSource == AudioSource.TEAMS_CAPTIONS) item { ResumeCaptionsButton(record, controller) }
+        if (!active && record.pendingCaptions().isNotEmpty()) item { ResumeCaptionsButton(record, controller) }
         if (pendingAudio && !active) item {
             Button(onClick = { controller.resumePendingAudio(record.id) }) { Text("補回待處理錄音") }
         }

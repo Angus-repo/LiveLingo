@@ -35,6 +35,20 @@ class TeamsCaptionsTest {
     private fun input(id: String) = TranscriptFragment(id, TranscriptChannel.INPUT, 0, 10, id)
     private fun output(line: TranscriptFragment) = line.copy(id = "translation-${line.id}", channel = TranscriptChannel.OUTPUT)
 
+    @Test fun retryPassSkipsRepeatedMismatchAndTranslatesOtherPendingLinesOnce() = runTest {
+        val first = input("first")
+        val second = input("second")
+        val waiting = mutableListOf(first, second)
+        val sent = mutableListOf<String>()
+        processTeamsCaptions(null, CompletableDeferred(), {}, { waiting.toList() }, { line ->
+            sent += line.id
+            if (line == first) throw TranslationFailure("wrong language", FoundryDiagnostic("文字翻譯", "TARGET_LANGUAGE_MISMATCH"))
+            "完成。"
+        }, { line, _ -> waiting.remove(line) }, {})
+        assertEquals(listOf("first", "second"), sent)
+        assertEquals(listOf(first), waiting)
+    }
+
     @Test fun intakeContinuesOfflineThenDrainsInOrderWithoutDuplicateOutput() = runTest {
         val incoming = Channel<CapturedCaption>(Channel.UNLIMITED)
         val stop = CompletableDeferred<Unit>()

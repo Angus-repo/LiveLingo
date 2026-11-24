@@ -33,10 +33,25 @@ internal fun needsTargetTranslation(text: String, target: Language): Boolean {
     }
     return latinPhrase.findAll(prose).any { match ->
         val words = match.value.split(' ', '\t', '-').filter(String::isNotEmpty)
+        // Acronyms such as IT in a Chinese sentence can also spell English function words.
+        if (words.size == 1 && (han > 0 || kana || hangul) && words[0] in setOf("IT", "IS", "OR", "AT", "DO"))
+            return@any false
         words.any { it.lowercase() in wordsToTranslate } ||
             words.size >= 2 && words.any { word -> word.all { it in 'a'..'z' } }
     }
 }
+
+internal val TranslationFailure.targetLanguageMismatch: Boolean
+    get() = diagnostic?.code == "TARGET_LANGUAGE_MISMATCH"
+
+/** Defer only a rejected language result. Transport, storage and provider failures keep their own policies. */
+internal suspend fun TranscriptDelta.translateOrDefer(translate: suspend (String) -> String): TranscriptDelta =
+    try {
+        copy(channel = TranscriptChannel.OUTPUT, text = translate(text))
+    } catch (failure: TranslationFailure) {
+        if (!failure.targetLanguageMismatch) throw failure
+        copy(channel = TranscriptChannel.INPUT, translationPending = true)
+    }
 
 /** A successful window with only a source track still needs an actual translation. */
 internal class MissingVoiceTranslation {
@@ -80,8 +95,7 @@ internal suspend fun deliverVoiceOutput(
     var pending: TranscriptDelta? = null
     suspend fun flush() {
         val span = pending ?: return
-        val text = if (needsTargetTranslation(span.text, target)) repair(span.text) else span.text
-        emit(span.copy(text = text))
+        emit(if (needsTargetTranslation(span.text, target)) span.translateOrDefer(repair) else span)
         pending = null
     }
     while (true) {

@@ -71,7 +71,7 @@ class AudioRecoveryTest {
         }
         var seq = 0
         RecoveringTranslationSession(journal, transport, windowBytes = 4800).run("key", settings, capture,
-            {}, { segment, _, events, complete, _ -> if (complete) { segments += segment; starts += events.single().startMs } }, {},
+            {}, { segment, _, events, complete, _ -> if (complete != null) { segments += segment; starts += events.single().startMs } }, {},
             { _, _ -> fail("Healthy rollover should not back off") }, { usage += it }, { true }, { "${seq++}" }, {})
         assertEquals(listOf(4800, 4800, 4800), sent)
         assertEquals(listOf(0L, 1L, 2L), segments)
@@ -117,7 +117,7 @@ class AudioRecoveryTest {
         }
         assertFailsWith<TranslationFailure> {
             RecoveringTranslationSession(journal, transport).run("key", settings, capture, {},
-                { _, _, _, complete, _ -> if (complete) throw TranslationFailure("disk full") }, {}, { _, _ -> fail("No network retry") }, {}, { true }, { "a" }, {})
+                { _, _, _, complete, _ -> if (complete != null) throw TranslationFailure("disk full") }, {}, { _, _ -> fail("No network retry") }, {}, { true }, { "a" }, {})
         }
         assertEquals(0L, journal.state.committed)
         assertContentEquals(byteArrayOf(1, 2), journal.read(0))
@@ -192,6 +192,19 @@ class AudioRecoveryTest {
         assertEquals("new text", record.recoveredText.single().text)
         repository.saveTranscript(record)
         assertEquals(1, repository.history().single().recoveredText.size)
+    }
+
+    @Test fun restartAcknowledgesATranscriptAlreadySavedBeforeAudioCleanup() = runTest {
+        val storage = RecoveryStorage()
+        val journal = AudioJournal(storage, "checkpoint", connection, StandardTestDispatcher(testScheduler))
+        journal.append(byteArrayOf(1, 2))
+        journal.append(byteArrayOf(3, 4))
+        val reopened = AudioJournal(storage, "checkpoint", connection, StandardTestDispatcher(testScheduler))
+        val cursor = AudioWindowCheckpoint(0, 1, 2)
+        reopened.acknowledgeSaved(cursor)
+        reopened.acknowledgeSaved(cursor)
+        assertEquals(1L, reopened.state.committed)
+        assertContentEquals(byteArrayOf(3, 4), reopened.read(1))
     }
 
     @Test fun onlyAnEstablishedMeetingGetsOneRetryForAnUnspecifiedRejection() = runTest {

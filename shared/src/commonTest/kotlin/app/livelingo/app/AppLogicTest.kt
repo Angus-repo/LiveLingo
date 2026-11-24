@@ -1090,6 +1090,32 @@ class AppLogicTest {
         reopened.dispose()
     }
 
+    @Test fun meetingKeepsRecordingAndPersistsOnlyTheMissingSentenceForLater() = runTest {
+        val services = configuredServices()
+        val transport = FakeTransport()
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
+        controller.setAiParagraphs(false)
+        controller.start()
+        runCurrent()
+        services.mic.emit(ByteArray(4800))
+        transport.receiver!!(TranscriptDelta(TranscriptChannel.INPUT, "First sentence.", 0, 50, translationPending = true))
+        assertTrue(services.mic.recording)
+        assertEquals(1, controller.state.value.pendingInWindow)
+        assertEquals("", liveCaptionText(controller.state.value.current, TranscriptChannel.OUTPUT))
+        transport.receiver!!(TranscriptDelta(TranscriptChannel.OUTPUT, "後續譯文。", 50, 100))
+        controller.stop()
+        controller.state.first { !it.active }
+        val saved = AppRepository(services.memory).history().single()
+        assertEquals(listOf("First sentence."), saved.pendingTranslations.map { it.text })
+        assertEquals("後續譯文。", liveCaptionText(saved, TranscriptChannel.OUTPUT))
+        assertTrue(saved.recoveredText.none { it.text == "First sentence." })
+        assertNotNull(saved.captionConnection)
+        assertFalse(saved.id in controller.state.value.pendingAudioIds)
+        assertNull(controller.state.value.sessionIssue)
+        assertEquals(1, transport.starts)
+        controller.dispose()
+    }
+
     private fun configuredServices() = FakeServices().also {
         val repository = AppRepository(it.memory)
         repository.savePreferences(AppPreferences(foundryEndpoint = "https://example.openai.azure.com"))

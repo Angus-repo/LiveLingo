@@ -87,6 +87,10 @@ data class TranscriptFragment(
     }
 }
 
+/** Audio cursor associated with a durably saved transcript window. */
+@Serializable
+data class AudioWindowCheckpoint(val start: Long, val end: Long, val endBytes: Long)
+
 @Serializable
 data class TranscriptRecord(
     val id: String,
@@ -100,6 +104,9 @@ data class TranscriptRecord(
     /** Previous partial text retained when a replay supplies a complete replacement (JSON export). */
     val recoveredText: List<TranscriptFragment> = emptyList(),
     val captionConnection: FoundryConnection? = null,
+    /** Text awaiting translation, separate from both published tracks. */
+    val pendingTranslations: List<TranscriptFragment> = emptyList(),
+    val audioCheckpoint: AudioWindowCheckpoint? = null,
 )
 
 /** Breaks are character offsets into an exact source snapshot. No model-rewritten text is stored. */

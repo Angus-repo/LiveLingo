@@ -53,6 +53,14 @@ internal class AudioJournal(
         Base64.decode(storage.read(chunkKey(index)) ?: throw TranslationFailure("待處理錄音讀取失敗，已保留逐字稿；請確認裝置儲存空間。"))
     }
 
+    // The transcript and its text queue may already be durable after a crash between
+    // saving the record and acknowledging PCM. Never replay that completed window.
+    suspend fun acknowledgeSaved(checkpoint: AudioWindowCheckpoint?) {
+        val saved = checkpoint ?: return
+        if (saved.start == state.committed && saved.end > saved.start && saved.end <= state.next &&
+            saved.endBytes > state.committedBytes && saved.endBytes <= state.bytes) commit(saved.end, saved.endBytes)
+    }
+
     suspend fun commit(end: Long, endBytes: Long) = lock.withLock {
         withContext(NonCancellable + io) {
             val old = state.committed
@@ -137,7 +145,7 @@ internal class RecoveringTranslationSession(
         settings: SessionSettings,
         audio: ReceiveChannel<ByteArray>,
         onReady: suspend () -> Unit,
-        onSnapshot: suspend (segment: Long, attempt: Int, events: List<TranscriptDelta>, complete: Boolean, publish: Boolean) -> Unit,
+        onSnapshot: suspend (segment: Long, attempt: Int, events: List<TranscriptDelta>, checkpoint: AudioWindowCheckpoint?, publish: Boolean) -> Unit,
         onNotice: suspend (TranslationNotice) -> Unit,
         onRetry: suspend (Int, TranslationFailure) -> Unit,
         onUsage: suspend (UsageSample) -> Unit,
@@ -219,7 +227,7 @@ internal class RecoveringTranslationSession(
                                         withContext(NonCancellable) {
                                             journal.saveDraft(events)
                                             // Keep the previous received text visible while replay is incomplete.
-                                            onSnapshot(start, currentAttempt, events.toList(), false, !replaying)
+                                            onSnapshot(start, currentAttempt, events.toList(), null, !replaying)
                                         }
                                     }
                                 }, onNotice = { notice ->
@@ -233,7 +241,7 @@ internal class RecoveringTranslationSession(
                         } finally { feeder.cancelAndJoin() }
                     }
                     // Do not erase known text if the provider finishes a replay without returning it.
-                    onSnapshot(start, currentAttempt, events.toList(), true, true)
+                    onSnapshot(start, currentAttempt, events.toList(), AudioWindowCheckpoint(start, end, endBytes), true)
                     if (end > start) journal.commit(end, endBytes)
                     retries = 0
                     retriedRejection = false

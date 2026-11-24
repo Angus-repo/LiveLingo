@@ -91,6 +91,35 @@ class RealtimeTransportTest {
             assertTrue(socket.closed && socket.cancelled)
         }
     }
+    @Test fun oneRejectedTextResultDoesNotCloseTheSocketOrDropTheFollowingTurn() = runTest {
+        val socket = RealtimeSocket()
+        val audio = Channel<ByteArray>(Channel.UNLIMITED)
+        val ready = CompletableDeferred<Unit>()
+        val events = mutableListOf<TranscriptDelta>()
+        var turns = 0
+        socket.onCommit = {
+            val id = ++turns
+            socket.incoming.send("""{"type":"input_audio_buffer.committed","item_id":"$id"}""")
+            socket.incoming.send("""{"type":"conversation.item.input_audio_transcription.completed","item_id":"$id","transcript":"Turn $id"}""")
+        }
+        val transport = RealtimeTransport(FoundrySocketFactory { _, _ -> socket }, TextTranslator { _, _, _, text, _ ->
+            if (text == "Turn 1") throw TranslationFailure("wrong language", FoundryDiagnostic("文字翻譯", "TARGET_LANGUAGE_MISMATCH"))
+            "第二句"
+        })
+        val meeting = launch { transport.run(c(SpeechModel.LIVE_TRANSCRIBE), "test-key", SessionSettings(), audio,
+            { ready.complete(Unit) }, { events += it }, {}) }
+        ready.await()
+        repeat(3) { audio.send(ByteArray(48_000)) }
+        runCurrent()
+        assertTrue(meeting.isActive)
+        assertEquals("Turn 1", events.single { it.translationPending }.text)
+        repeat(3) { audio.send(ByteArray(48_000)) }
+        audio.close()
+        meeting.join()
+        assertEquals(listOf("第二句"), events.filter { it.channel == TranscriptChannel.OUTPUT }.map { it.text })
+        assertEquals(1, socket.sent.count { it.eventString("type") == "session.update" })
+    }
+
     @Test fun aSlowTextModelDrainsEveryTurnOfATwoMinuteMeetingWindow() = runTest {
         val socket = RealtimeSocket()
         var commits = 0

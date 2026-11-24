@@ -41,8 +41,7 @@ class ModelTranslationTransport(clientFactory: () -> HttpClient) : TranslationTr
                 // Only after a normal drain can we tell whether this window had any output.
                 // The source and target timelines cannot establish coverage of individual clauses.
                 missing.finish { source ->
-                    val text = translator.translate(connection, apiKey, settings, source.text, "")
-                    onTranscript(source.copy(channel = TranscriptChannel.OUTPUT, text = text))
+                    onTranscript(source.translateOrDefer { translator.translate(connection, apiKey, settings, it, "") })
                 }
             } finally { output.close() }
         }
@@ -209,9 +208,15 @@ internal class RealtimeTransport(
                     var previousOutput = ""
                     for (source in translations) {
                         if (connection.textDeployment.isBlank()) throw TranslationFailure("轉錄方案需要設定文字翻譯模型。")
-                        val output = translator.translate(connection, key, settings, source.text, context)
+                        val result = source.translateOrDefer { translator.translate(connection, key, settings, it, context) }
+                        if (result.translationPending) {
+                            onTranscript(result)
+                            context = (context + "\nOriginal: " + source.text).takeLast(2500)
+                            continue
+                        }
+                        val output = result.text
                         val separated = separatedTranscript(previousOutput, output)
-                        onTranscript(source.copy(channel = TranscriptChannel.OUTPUT, text = separated))
+                        onTranscript(result.copy(text = separated))
                         previousOutput = separated.takeLast(1)
                         context = (context + "\nOriginal: " + source.text + "\nTranslation: " + output).takeLast(2500)
                     }

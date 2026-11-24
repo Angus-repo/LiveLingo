@@ -624,7 +624,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
             TextButton(onClick = { runCatching { uriHandler.openUri(textKind.price(provider).sourceUrl) }.onFailure { controller.inform("無法開啟定價網頁。") } }) { Text("文字費用來源 ↗") }
             if (speechKind.transcribes) Text("每約 3 秒完成一段原文轉錄，再由文字模型翻譯；即使關閉 AI 分段，文字翻譯仍會執行並計費。", style = MaterialTheme.typography.bodySmall)
             if (state.preferences.aiParagraphs) Text("收音時定期整理新字幕的標點與段落，停止時完成最後一段，譯文依原文分段。只補標點與換行，不改寫文字或數字。此功能會使用所選文字模型並計費，需有可用部署與配額。", style = MaterialTheme.typography.bodySmall)
-            Text("偵測到未譯句子時會使用此文字模型補譯，依文字用量計費。", style = MaterialTheme.typography.bodySmall)
+            Text("偵測到未譯句子，或整段口譯只收到原文時，會使用此文字模型補譯，依文字用量計費。", style = MaterialTheme.typography.bodySmall)
             Text("費用為美元公開參考價，查核：$PRICE_CHECKED_DATE；非帳單即時報價。實際費用依用量、部署與合約而定。", style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971))
             if (!isOpenAi) TextButton(onClick = { runCatching { uriHandler.openUri(FOUNDRY_PRICING_URL) }.onFailure { controller.inform("無法開啟定價網頁。") } }) { Text("查看 Azure 官方定價 ↗") }
             webSocketPreview?.let { preview ->

@@ -23,6 +23,7 @@ class ModelTranslationTransport(clientFactory: () -> HttpClient) : TranslationTr
             return
         }
         coroutineScope {
+            val missing = MissingVoiceTranslation()
             val output = Channel<TranscriptDelta>(32)
             launch {
                 deliverVoiceOutput(output, settings.targetLanguage,
@@ -31,8 +32,18 @@ class ModelTranslationTransport(clientFactory: () -> HttpClient) : TranslationTr
             }
             try {
                 service.run(connection, apiKey, settings, audio, onReady, onTranscript = {
+                    missing.observe(it)
                     if (it.channel == TranscriptChannel.INPUT) onTranscript(it) else output.send(it)
-                }, onNotice = onNotice)
+                }, onNotice = { notice ->
+                    if (notice.diagnostic.code == "CONTENT_FILTER") missing.disable()
+                    onNotice(notice)
+                })
+                // Only after a normal drain can we tell whether this window had any output.
+                // The source and target timelines cannot establish coverage of individual clauses.
+                missing.finish { source ->
+                    val text = translator.translate(connection, apiKey, settings, source.text, "")
+                    onTranscript(source.copy(channel = TranscriptChannel.OUTPUT, text = text))
+                }
             } finally { output.close() }
         }
     }

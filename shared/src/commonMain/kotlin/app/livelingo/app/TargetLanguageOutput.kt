@@ -11,7 +11,7 @@ private val latinPhrase = Regex("""[A-Za-z]+(?:['’][A-Za-z]+)?(?:[ \t-]+[A-Za-
 private val wordsToTranslate = setOf("a", "an", "the", "this", "that", "these", "those", "i", "we", "you", "it",
     "is", "are", "was", "have", "has", "will", "would", "can", "could", "and", "or", "but", "to",
     "of", "for", "in", "at", "do", "does", "yes", "yeah", "no", "ok", "okay", "hmm", "hello",
-    "hi", "thanks", "right", "please", "ready", "stop", "wait", "help", "sure", "sorry", "goodbye")
+    "hi", "thanks", "right", "please", "ready", "stop", "wait", "help", "sure", "sorry", "goodbye", "local", "remote")
 
 private fun Char.han() = code in 0x3400..0x9fff || code in 0xf900..0xfaff
 private fun Char.kana() = code in 0x3040..0x30ff || code in 0xff66..0xff9d
@@ -35,6 +35,37 @@ internal fun needsTargetTranslation(text: String, target: Language): Boolean {
         val words = match.value.split(' ', '\t', '-').filter(String::isNotEmpty)
         words.any { it.lowercase() in wordsToTranslate } ||
             words.size >= 2 && words.any { word -> word.all { it in 'a'..'z' } }
+    }
+}
+
+/** A successful window with only a source track still needs an actual translation. */
+internal class MissingVoiceTranslation {
+    private val inputs = mutableListOf<TranscriptDelta>()
+    private var eligible = true
+
+    fun observe(delta: TranscriptDelta) {
+        if (!eligible) return
+        if (delta.channel == TranscriptChannel.INPUT) inputs += delta
+        else if (delta.text.isNotBlank()) disable()
+    }
+
+    fun disable() {
+        eligible = false
+        inputs.clear()
+    }
+
+    suspend fun finish(translate: suspend (TranscriptDelta) -> Unit) {
+        var group: TranscriptDelta? = null
+        for (input in inputs.sortedBy { it.startMs }) {
+            val previous = group
+            group = if (previous != null && previous.text.length + input.text.length <= 1800) {
+                previous.copy(text = previous.text + input.text, endMs = maxOf(previous.endMs, input.endMs))
+            } else {
+                if (previous != null && previous.text.isNotBlank()) translate(previous)
+                input
+            }
+        }
+        group?.takeIf { it.text.isNotBlank() }?.let { translate(it) }
     }
 }
 

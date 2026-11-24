@@ -21,6 +21,21 @@ class TargetLanguageOutputTest {
         assertFalse(needsTargetTranslation("API를 호출합니다.", Language.KOREAN))
     }
 
+    @Test fun inputOnlyWindowsRequestTranslationOnceAndLateOrFilteredOutputDoesNotTriggerFallback() = runTest {
+        val original = TranscriptDelta(TranscriptChannel.INPUT, "Call ", 0, 500)
+        val rest = original.copy(text = "again.", startMs = 500, endMs = 900)
+        for (mode in listOf("missing", "arrived", "filtered")) {
+            val window = MissingVoiceTranslation()
+            window.observe(original)
+            window.observe(rest)
+            if (mode == "arrived") window.observe(rest.copy(channel = TranscriptChannel.OUTPUT, text = "再打一次。"))
+            if (mode == "filtered") window.disable()
+            val submitted = mutableListOf<TranscriptDelta>()
+            window.finish { submitted += it }
+            assertEquals(if (mode == "missing") listOf(original.copy(text = "Call again.", endMs = 900)) else emptyList(), submitted)
+        }
+    }
+
     @Test fun aSplitWordIsRepairedOnceBeforeDisplayAndUnpunctuatedTailDrains() = runTest {
         val input = Channel<TranscriptDelta>(Channel.UNLIMITED)
         listOf("先確認。", "Ca", "n we call the API", "?", "最後看 API").forEachIndexed { i, text ->

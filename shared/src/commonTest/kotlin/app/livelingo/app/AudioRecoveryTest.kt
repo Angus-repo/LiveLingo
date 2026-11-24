@@ -260,6 +260,105 @@ class AudioRecoveryTest {
         assertContentEquals(byteArrayOf(3, 4), reopened.read(1))
     }
 
+    @Test fun repeatedAudioRejectionKeepsPcmAndContinuesWithLaterSpeechThenRepairsOnlyTheGap() = runTest {
+        val storage = RecoveryStorage()
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val journal = AudioJournal(storage, "meeting", connection, dispatcher)
+        val capture = Channel<ByteArray>(Channel.UNLIMITED)
+        fun frame(value: Int) = ByteArray(4800) { value.toByte() }
+        capture.send(frame(1))
+        val attempts = mutableListOf<Int>()
+        val snapshots = mutableListOf<Pair<Long, Long>>()
+        val transport = ScriptTransport { audio, ready, transcript, _ ->
+            ready()
+            val first = audio.receive().first().toInt()
+            attempts += first
+            if (first == 1) {
+                // Both provider events point at audio, even when the retry reaches its final drain.
+                val stage = if (attempts.size == 1) FoundryStages.STREAM else FoundryStages.STOP
+                throw TranslationFailure("rejected", FoundryDiagnostic(stage, "PROVIDER_ERROR", 101,
+                    providerType = "invalid_request_error", providerParam = "audio"))
+            }
+            for (bytes in audio) fail("Unexpected additional PCM")
+            transcript(TranscriptDelta(TranscriptChannel.OUTPUT, "later", 0, 100))
+        }
+        RecoveringTranslationSession(journal, transport, windowBytes = 4800).run("key", settings, capture,
+            {}, { segment, _, events, checkpoint, _ ->
+                if (checkpoint != null) snapshots += segment to events.single().startMs
+            }, {}, { _, _ -> capture.send(frame(2)) }, {}, { true }, { "id" }, { capture.close() },
+            onDeferred = { capture.close() })
+        assertEquals(listOf(1, 1, 2), attempts)
+        assertEquals(listOf(1L to 100L), snapshots)
+        assertEquals(4800L, journal.state.confirmedBytes)
+        assertEquals(1L, journal.state.pendingChunks)
+        assertContentEquals(frame(1), journal.read(0))
+        assertNull(storage.read("pcm_meeting_1"))
+
+        val reopened = AudioJournal(storage, "meeting", connection, dispatcher)
+        val recovered = mutableListOf<Byte>()
+        val recovery = ScriptTransport { audio, ready, transcript, _ ->
+            ready()
+            for (chunk in audio) recovered += chunk.first()
+            transcript(TranscriptDelta(TranscriptChannel.OUTPUT, "earlier", 0, 100))
+        }
+        RecoveringTranslationSession(reopened, recovery).run("key", settings, Channel<ByteArray>(0).also { it.close() },
+            {}, { segment, _, events, checkpoint, _ ->
+                if (checkpoint != null) snapshots += segment to events.single().startMs
+            }, {}, { _, _ -> fail() }, {}, { true }, { "repair" }, {}, recoverDeferred = true)
+        assertEquals(listOf<Byte>(1), recovered)
+        assertEquals(listOf(1L to 100L, 0L to 0L), snapshots)
+        assertEquals(0L, reopened.state.pendingChunks)
+        assertEquals(9600L, reopened.state.confirmedBytes)
+        assertNull(storage.read("pcm_meeting_0"))
+    }
+
+    @Test fun providerAcceptsPacedReplayOfTheSameAudioWithoutDeferringIt() = runTest {
+        val journal = AudioJournal(RecoveryStorage(), "pace", connection, StandardTestDispatcher(testScheduler))
+        repeat(2) { journal.append(ByteArray(4800)) }
+        var calls = 0
+        val replayTimes = mutableListOf<Long>()
+        val transport = ScriptTransport { audio, ready, _, _ ->
+            ready()
+            for (chunk in audio) if (calls > 0) replayTimes += testScheduler.currentTime
+            if (++calls == 1) throw TranslationFailure("rejected", FoundryDiagnostic(FoundryStages.STOP,
+                "PROVIDER_ERROR", 101, providerType = "invalid_request_error", providerParam = "audio"))
+        }
+        RecoveringTranslationSession(journal, transport).run("key", settings, Channel<ByteArray>(0).also { it.close() },
+            {}, { _, _, _, _, _ -> }, {}, { _, _ -> }, {}, { true }, { "id" }, {}, recoverDeferred = true)
+        assertEquals(2, calls)
+        assertEquals(100L, replayTimes.last() - replayTimes.first())
+        assertEquals(0L, journal.state.pendingChunks)
+        assertTrue(journal.state.deferred.isEmpty())
+    }
+
+    @Test fun failedManualRepairDoesNotLoopOrBlockOtherDeferredRangesAndCrashAcknowledgementIsIdempotent() = runTest {
+        val store = RecoveryStorage()
+        val journal = AudioJournal(store, "gaps", connection, StandardTestDispatcher(testScheduler))
+        repeat(3) { journal.append(byteArrayOf(it.toByte(), 0)) }
+        journal.defer(DeferredAudio(0, 0, 1, 2))
+        journal.defer(DeferredAudio(1, 2, 2, 4))
+        journal.commit(AudioWindowCheckpoint(2, 3, 6))
+        val attempted = mutableListOf<Int>()
+        val transport = ScriptTransport { audio, ready, _, _ ->
+            ready()
+            val value = audio.receive().first().toInt()
+            attempted += value
+            if (value == 0) throw TranslationFailure("bad audio", FoundryDiagnostic(FoundryStages.STREAM, "PROVIDER_ERROR",
+                providerType = "invalid_request_error", providerParam = "audio"))
+            for (unused in audio) fail()
+        }
+        RecoveringTranslationSession(journal, transport).run("key", settings, Channel<ByteArray>(0).also { it.close() },
+            {}, { _, _, _, _, _ -> }, {}, { _, _ -> }, {}, { true }, { "id" }, {}, recoverDeferred = true)
+        assertEquals(listOf(0, 0, 1), attempted)
+        assertEquals(1L, journal.state.pendingChunks)
+        val checkpoint = AudioWindowCheckpoint(0, 1, 2)
+        journal.acknowledgeSaved(checkpoint)
+        journal.acknowledgeSaved(checkpoint)
+        assertEquals(0L, journal.state.pendingChunks)
+        assertEquals(3L, journal.state.committed)
+        assertFalse(store.values.keys.any { it.startsWith("pcm_") })
+    }
+
     @Test fun onlyAnEstablishedMeetingGetsOneRetryForAnUnspecifiedRejection() = runTest {
         for ((wasReady, expectedCalls) in listOf(false to 1, true to 2)) {
             val journal = AudioJournal(RecoveryStorage(), "rejected", connection, StandardTestDispatcher(testScheduler))

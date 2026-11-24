@@ -377,7 +377,7 @@ class AppController(
     }
 
     private fun hasPendingAudio(id: String): Boolean = AudioJournal.readState(services.storage, id)?.let {
-        !it.blocked && it.next > it.committed
+        !it.blocked && it.pendingChunks > 0
     } ?: false
 
     fun resumePendingAudio(id: String) {
@@ -386,7 +386,7 @@ class AppController(
         val record = snapshot.history.find { it.id == id } ?: return
         try {
             val pending = AudioJournal.readState(services.storage, id) ?: return
-            if (pending.blocked || pending.next <= pending.committed) return
+            if (pending.blocked || pending.pendingChunks == 0L) return
             pending.connection.validationError()?.let { inform(it); return }
             val key = repository.apiKey(pending.connection.credentialEndpoint())
             if (key.isBlank()) { inform("請先設定原錄音所使用服務的 API key，再補回待處理錄音。"); return }
@@ -429,7 +429,7 @@ class AppController(
             fun trace(event: String, extra: String = "") {
                 val audioState = recoveryJournal?.state
                 val counters = if (audioState == null) "" else " audio_saved_ms=${audioState.bytes / 48} " +
-                    "audio_committed_ms=${audioState.committedBytes / 48} pending_chunks=${audioState.next - audioState.committed} replay_blocked=${audioState.blocked}"
+                    "audio_committed_ms=${audioState.confirmedBytes / 48} pending_chunks=${audioState.pendingChunks} replay_blocked=${audioState.blocked}"
                 diagnostics.event(event, "meeting_ms=${record.createdAtMs} stage=$stage phase=${mutable.value.phase} attempt=$attempt$counters $extra")
             }
             try {
@@ -492,8 +492,13 @@ class AppController(
                 catch (failure: Exception) { throw TranslationFailure("無法建立或讀取錄音保存檔，尚未開始收音。請確認裝置儲存空間。", cause = failure) }
                 recoveryJournal = journal
                 journal.acknowledgeSaved(record.audioCheckpoint)
-                if (replayOnly && journal.state.committed == journal.state.next) return@launch
+                if (replayOnly && journal.state.pendingChunks == 0L) return@launch
                 RecoveringTranslationSession(journal, transport).run(sessionApiKey, settings, queue,
+                    recoverDeferred = replayOnly,
+                    onDeferred = { range ->
+                        trace("audio_deferred", "from_ms=${range.startBytes / 48} to_ms=${range.endBytes / 48}")
+                        mutable.value = mutable.value.copy(recoveryStatus = "服務再次拒絕這段錄音，已保留供稍後補回。")
+                    },
                     onAttempt = { index, _ ->
                         attempt = index + 1
                         stage = "connect"
@@ -523,7 +528,8 @@ class AppController(
                         ensureActive()
                         if (mutable.value.phase != ConnectionPhase.STOPPING) mutable.value = mutable.value.copy(
                             phase = ConnectionPhase.LISTENING,
-                            recoveryStatus = if (mutable.value.recoveryStatus != null || replayOnly) "已連線，正在補回待處理錄音；已有字幕會保留。" else null)
+                            recoveryStatus = if (journal.state.deferred.isNotEmpty() && !replayOnly) "部分錄音待補回，後續發言繼續翻譯。"
+                                else if (mutable.value.recoveryStatus != null || replayOnly) "已連線，正在補回待處理錄音；已有字幕會保留。" else null)
                         listeningStarted = true
                         stage = "stream"
                         trace("ready")
@@ -578,7 +584,8 @@ class AppController(
                             try {
                                 persistCurrentTranscript(record.id)
                                 mutable.value = mutable.value.copy(transcriptSaved = true,
-                                    recoveryStatus = if (complete && mutable.value.recoveryStatus != null) "待處理片段已補回，繼續接收後續錄音。" else mutable.value.recoveryStatus)
+                                    recoveryStatus = if (journal.state.deferred.isNotEmpty() && !replayOnly) "部分錄音待補回，後續發言繼續翻譯。"
+                                    else if (complete && mutable.value.recoveryStatus != null) "待處理片段已補回，繼續接收後續錄音。" else mutable.value.recoveryStatus)
                             } catch (cancelled: CancellationException) { throw cancelled }
                             catch (failure: Exception) {
                                 stage = "save_transcript"

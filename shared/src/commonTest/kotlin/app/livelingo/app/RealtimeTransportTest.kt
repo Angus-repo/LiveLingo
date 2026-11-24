@@ -91,6 +91,30 @@ class RealtimeTransportTest {
             assertTrue(socket.closed && socket.cancelled)
         }
     }
+    @Test fun aSlowTextModelDrainsEveryTurnOfATwoMinuteMeetingWindow() = runTest {
+        val socket = RealtimeSocket()
+        var commits = 0
+        socket.onCommit = {
+            val id = ++commits
+            socket.incoming.send("""{"type":"input_audio_buffer.committed","item_id":"$id"}""")
+            socket.incoming.send("""{"type":"conversation.item.input_audio_transcription.completed","item_id":"$id","transcript":"Turn $id."}""")
+        }
+        val transport = RealtimeTransport(FoundrySocketFactory { _, _ -> socket }, TextTranslator { _, _, _, _, _ ->
+            delay(4_000)
+            "完成。"
+        })
+        val audio = Channel<ByteArray>(Channel.UNLIMITED)
+        val frame = ByteArray(48_000)
+        repeat(120) { audio.trySend(frame) }
+        audio.close()
+        val events = mutableListOf<TranscriptDelta>()
+        transport.run(c(SpeechModel.LIVE_TRANSCRIBE), "key", SessionSettings(), audio, {}, { events += it }, {})
+        assertEquals(40, commits)
+        assertEquals(40, events.count { it.channel == TranscriptChannel.INPUT })
+        assertEquals(40, events.count { it.channel == TranscriptChannel.OUTPUT })
+        assertEquals(120_000L, events.last().endMs)
+    }
+
     @Test fun completionsOutOfOrderAreReorderedAndAuthoritativeFinalsReplaceDrafts() {
         val buffer = CommittedTranscriptBuffer()
         buffer.commit(3000); buffer.acknowledge("one")

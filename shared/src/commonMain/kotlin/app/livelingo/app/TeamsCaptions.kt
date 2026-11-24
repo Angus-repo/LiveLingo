@@ -84,9 +84,7 @@ internal suspend fun processTeamsCaptions(
         onStatus("等待補譯 ${queue.size} 段")
         val translated = try { translate(first) } catch (failure: Exception) {
             currentCoroutineContext().ensureActive()
-            val http = (failure as? TranslationFailure)?.diagnostic?.httpStatus
-            val permanent = if (http == null) failure is TranslationFailure
-                else http !in 500..599 && http !in setOf(408, 425, 429)
+            val permanent = failure is TranslationFailure && !retryableTranslationFailure(failure)
             if (permanent) {
                 onStatus(failure.message ?: "文字服務拒絕請求。原文已保存，可停止後從逐字稿補譯。")
                 if (incoming != null) stop.await()

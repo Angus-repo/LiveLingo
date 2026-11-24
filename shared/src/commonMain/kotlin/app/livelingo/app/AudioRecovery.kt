@@ -107,7 +107,7 @@ internal fun retryableTranslationFailure(failure: TranslationFailure): Boolean {
         diagnostic.sessionCloseReason == "content" || isContentFilterCode(diagnostic.providerCode)) return false
     if (diagnostic.providerCode?.lowercase() in setOf("insufficient_quota", "quota_exceeded", "invalid_api_key", "authentication_error")) return false
     return diagnostic.code in setOf("TIMEOUT", "CONNECTION_CLOSED", "SESSION_EXPIRED", "DNS", "CONNECT", "NETWORK_UNKNOWN") ||
-        diagnostic.httpStatus in setOf(408, 429, 500, 502, 503, 504) ||
+        (diagnostic.httpStatus in setOf(408, 425, 429) || diagnostic.httpStatus?.let { it in 500..599 } == true) ||
         diagnostic.sessionCloseReason in setOf("expired", "connection_lost", "remote_hangup") ||
         diagnostic.providerType in setOf("server_error", "rate_limit_error") ||
         diagnostic.providerCode?.lowercase() in setOf("server_error", "internal_error", "service_unavailable", "rate_limit_exceeded", "toomanyrequests", "session_expired", "session_timeout")
@@ -169,6 +169,7 @@ internal class RecoveringTranslationSession(
         var retries = 0
         var meetingWasReady = journal.state.committed > 0
         var retriedRejection = false
+        var omitRecentContext = false
         var attempt = 0
         var filtered = false
         try {
@@ -188,6 +189,7 @@ internal class RecoveringTranslationSession(
                 var end = start
                 var endBytes = offset
                 var drained = false
+                val sessionSettings = if (omitRecentContext) settings else settings.withRecoveryContext(contextForSegment(start))
                 try {
                     coroutineScope {
                         val feeder = launch {
@@ -205,7 +207,6 @@ internal class RecoveringTranslationSession(
                             queue.close()
                         }
                         try {
-                            val sessionSettings = if (retriedRejection) settings else settings.withRecoveryContext(contextForSegment(start))
                             transport.run(journal.state.connection, key, sessionSettings, queue, onReady = {
                                 onReady()
                                 meetingWasReady = true
@@ -241,7 +242,7 @@ internal class RecoveringTranslationSession(
                     throw cancelled
                 } catch (failure: TranslationFailure) {
                     if (failure.diagnostic?.code in setOf("CONTENT_FILTER", "DISCONNECTED_AFTER_FILTER") ||
-                        failure.diagnostic?.sessionCloseReason == "content") {
+                        failure.diagnostic?.sessionCloseReason == "content" || isContentFilterCode(failure.diagnostic?.providerCode)) {
                         filtered = true
                         journal.blockReplay()
                     }
@@ -249,8 +250,14 @@ internal class RecoveringTranslationSession(
                     if (!retryableTranslationFailure(failure)) {
                         // A working meeting can lose its session mid-stream or during rollover. Never
                         // continually resend the same rejected audio or retry an initial setup error.
-                        if (!meetingWasReady || retriedRejection || !ambiguousSessionRejection(failure)) throw failure
+                        val diagnostic = failure.diagnostic
+                        val addedContextRejected = sessionSettings != settings && diagnostic?.stage == FoundryStages.START &&
+                            (diagnostic.providerCode == "context_length_exceeded" ||
+                                (diagnostic.providerParam == "session.instructions" &&
+                                    diagnostic.providerType == "invalid_request_error"))
+                        if (!meetingWasReady || retriedRejection || !(ambiguousSessionRejection(failure) || addedContextRejected)) throw failure
                         retriedRejection = true
+                        if (sessionSettings != settings && diagnostic?.stage == FoundryStages.START) omitRecentContext = true
                     }
                     replaying = true
                     retries++

@@ -2,14 +2,16 @@ package app.livelingo.app
 
 import app.livelingo.core.*
 import kotlinx.coroutines.channels.ReceiveChannel
-import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.selects.onTimeout
+import kotlinx.coroutines.selects.select
 
 private val literal = Regex("""(?:https?://|www\.)[^\s，。！？]+|[A-Za-z0-9_.+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|\b[A-Za-z]+[0-9]+[A-Za-z0-9_-]*\b""")
 private val latinPhrase = Regex("""[A-Za-z]+(?:['’][A-Za-z]+)?(?:[ \t-]+[A-Za-z]+(?:['’][A-Za-z]+)?)*""")
 private val wordsToTranslate = setOf("a", "an", "the", "this", "that", "these", "those", "i", "we", "you", "it",
     "is", "are", "was", "have", "has", "will", "would", "can", "could", "and", "or", "but", "to",
     "of", "for", "in", "at", "do", "does", "yes", "yeah", "no", "ok", "okay", "hmm", "hello",
-    "hi", "thanks", "right", "local", "mainframe", "microservice", "platform")
+    "hi", "thanks", "right", "please", "ready", "stop", "wait", "help", "sure", "sorry", "goodbye")
 
 private fun Char.han() = code in 0x3400..0x9fff || code in 0xf900..0xfaff
 private fun Char.kana() = code in 0x3040..0x30ff || code in 0xff66..0xff9d
@@ -37,6 +39,7 @@ internal fun needsTargetTranslation(text: String, target: Language): Boolean {
 }
 
 /** Native speech models send word pieces, so evaluate foreign runs together before publishing them. */
+@OptIn(ExperimentalCoroutinesApi::class)
 internal suspend fun deliverVoiceOutput(
     input: ReceiveChannel<TranscriptDelta>,
     target: Language,
@@ -51,7 +54,10 @@ internal suspend fun deliverVoiceOutput(
         pending = null
     }
     while (true) {
-        val next = if (pending == null) input.receiveCatching() else withTimeoutOrNull(1_500) { input.receiveCatching() }
+        val next: kotlinx.coroutines.channels.ChannelResult<TranscriptDelta>? = if (pending == null) input.receiveCatching() else select {
+            input.onReceiveCatching { it }
+            onTimeout(1_500) { null }
+        }
         if (next == null) { flush(); continue }
         val delta = next.getOrNull() ?: break
         val old = pending

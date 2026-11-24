@@ -6,6 +6,7 @@ import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.request.*
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.*
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.*
 
 internal fun interface TextTranslator {
@@ -57,15 +58,18 @@ internal class HttpTextTranslator(private val original: HttpClient) : TextTransl
         val reportUsage = usageListener
         val usageId = "translation-${++requestNumber}"
         reportUsage(UsageSample(usageId, UsageKind.TRANSLATION, known = false))
-        val response = client.post(connection.chatCompletionsUrl()) {
-            contentType(ContentType.Application.Json)
-            if (connection.provider == ModelProvider.OPENAI) header(HttpHeaders.Authorization, "Bearer $key") else header("api-key", key)
-            setBody(translationTextRequest(connection, settings, text, context, retry))
-        }
+        val response = try {
+            client.post(connection.chatCompletionsUrl()) {
+                contentType(ContentType.Application.Json)
+                if (connection.provider == ModelProvider.OPENAI) header(HttpHeaders.Authorization, "Bearer $key") else header("api-key", key)
+                setBody(translationTextRequest(connection, settings, text, context, retry))
+            }
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (failure: Exception) { throw classifyFoundryFailure(failure, "文字翻譯") }
         if (response.status.value !in 200..299) {
             val fields = safeJsonErrorFields(response.bodyAsText(), key)
             throw TranslationFailure("文字翻譯回應 HTTP ${response.status.value}，已保留原文，請檢查文字模型部署與配額。",
-            FoundryDiagnostic("文字翻譯", "HTTP_${response.status.value}", response.status.value, fields.requestId, fields.providerCode))
+                FoundryDiagnostic("文字翻譯", "HTTP_${response.status.value}", response.status.value, fields.requestId, fields.providerCode))
         }
         val body = response.bodyAsText()
         if (body.length > 131_072) throw TranslationFailure("文字翻譯回應超過大小限制。")

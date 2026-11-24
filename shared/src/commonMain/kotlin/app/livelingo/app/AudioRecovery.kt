@@ -241,7 +241,9 @@ internal class RecoveringTranslationSession(
                 try {
                     coroutineScope {
                         val paceReplay = audioRetryEnd != null || deferred != null
+                        val readyForReplay = CompletableDeferred<Unit>()
                         val feeder = launch {
+                            if (paceReplay) readyForReplay.await()
                             var sentMillis = 0L
                             while (end < replayEnd && endBytes - offset < limit) {
                                 val observed = revision.value
@@ -266,6 +268,7 @@ internal class RecoveringTranslationSession(
                             transport.run(journal.state.connection, key, sessionSettings, queue, onReady = {
                                 onReady()
                                 meetingWasReady = true
+                                readyForReplay.complete(Unit)
                             },
                                 onTranscript = { event ->
                                     if (event.startMs < 0 || event.endMs <= event.startMs || event.text.length > 65_536)
@@ -310,7 +313,8 @@ internal class RecoveringTranslationSession(
                     if (filtered || !allowRetry()) throw failure
                     val diagnostic = failure.diagnostic
                     val audioRejected = meetingWasReady && end > start && diagnostic != null &&
-                        diagnostic.stage in setOf(FoundryStages.STREAM, FoundryStages.STOP) && diagnostic.code == "PROVIDER_ERROR" && diagnostic.providerType == "invalid_request_error" &&
+                        diagnostic.stage in setOf(FoundryStages.STREAM, FoundryStages.STOP) &&
+                        diagnostic.code == "PROVIDER_ERROR" && diagnostic.providerType == "invalid_request_error" &&
                         diagnostic.providerParam == "audio" && diagnostic.providerCode in setOf(null, "invalid_request_error", "invalid_value", "invalid_parameter")
                     if (audioRejected) {
                         if (audioRetryEnd != null) {
@@ -320,7 +324,7 @@ internal class RecoveringTranslationSession(
                             audioRetryEnd = null
                             retriedRejection = false
                             retries = 0
-                            replaying = true
+                            replaying = journal.state.bytes - journal.state.committedBytes > 5L * 48_000
                             continue
                         }
                         // Freeze the first attempted range. Audio captured during the retry belongs to the next window.

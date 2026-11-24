@@ -1100,6 +1100,57 @@ class AppLogicTest {
         controller.dispose()
     }
 
+    @Test fun rejectedAudioDoesNotInterruptLiveCaptionsAndReopenedMeetingFillsTheGapInOrder() = runTest {
+        val services = configuredServices()
+        val laterWindow = CompletableDeferred<Unit>()
+        val spoken = mutableListOf<Int>()
+        val transport = ScriptTransport { audio, ready, transcript, _ ->
+            ready()
+            if (spoken.size == 2) laterWindow.complete(Unit)
+            for (chunk in audio) {
+                val value = chunk.first().toInt()
+                spoken += value
+                if (value == 1) throw TranslationFailure("audio rejected", FoundryDiagnostic(
+                    FoundryStages.STREAM, "PROVIDER_ERROR", 101, providerType = "invalid_request_error", providerParam = "audio"))
+                transcript(TranscriptDelta(TranscriptChannel.OUTPUT, "後段。", 0, 100))
+            }
+        }
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val controller = AppController(services, transport, dispatcher)
+        controller.setAiParagraphs(false)
+        controller.start()
+        controller.state.first { it.phase == ConnectionPhase.LISTENING }
+        val id = controller.state.value.current!!.id
+        services.mic.emit(ByteArray(4800) { 1 })
+        laterWindow.await()
+        assertTrue(services.mic.recording)
+        services.mic.emit(ByteArray(4800) { 2 })
+        controller.state.first { liveCaptionText(it.current, TranscriptChannel.OUTPUT) == "後段。" }
+        controller.stop()
+        controller.state.first { !it.active }
+        assertNull(controller.state.value.sessionIssue)
+        assertTrue(id in controller.state.value.pendingAudioIds)
+        assertEquals(listOf(1, 1, 2), spoken)
+        controller.dispose()
+
+        val repair = ScriptTransport { audio, ready, transcript, _ ->
+            ready()
+            for (chunk in audio) assertEquals(1, chunk.first().toInt())
+            transcript(TranscriptDelta(TranscriptChannel.OUTPUT, "前段。", 0, 100))
+        }
+        val reopened = AppController(services, repair, dispatcher)
+        assertTrue(id in reopened.state.value.pendingAudioIds)
+        reopened.resumePendingAudio(id)
+        reopened.state.first { it.active }
+        reopened.state.first { !it.active }
+        assertTrue(reopened.state.value.pendingAudioIds.isEmpty())
+        assertEquals(1, services.mic.starts)
+        val saved = AppRepository(services.memory).history().single()
+        assertEquals(id, saved.id)
+        assertEquals("前段。後段。", liveCaptionText(saved, TranscriptChannel.OUTPUT))
+        reopened.dispose()
+    }
+
     @Test fun stoppedOfflineAudioSurvivesRestartAndCanBeRecoveredWithoutStartingMicrophone() = runTest {
         val services = configuredServices()
         val transport = FakeTransport().apply {

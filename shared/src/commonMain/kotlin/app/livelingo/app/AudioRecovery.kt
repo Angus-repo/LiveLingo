@@ -109,7 +109,16 @@ internal fun retryableTranslationFailure(failure: TranslationFailure): Boolean {
     return diagnostic.code in setOf("TIMEOUT", "CONNECTION_CLOSED", "SESSION_EXPIRED", "DNS", "CONNECT", "NETWORK_UNKNOWN") ||
         diagnostic.httpStatus in setOf(408, 429, 500, 502, 503, 504) ||
         diagnostic.sessionCloseReason in setOf("expired", "connection_lost", "remote_hangup") ||
-        diagnostic.providerCode?.lowercase() in setOf("server_error", "internal_error", "service_unavailable", "rate_limit_exceeded")
+        diagnostic.providerType in setOf("server_error", "rate_limit_error") ||
+        diagnostic.providerCode?.lowercase() in setOf("server_error", "internal_error", "service_unavailable", "rate_limit_exceeded", "toomanyrequests", "session_expired", "session_timeout")
+}
+
+private fun ambiguousSessionRejection(failure: TranslationFailure): Boolean {
+    val diagnostic = failure.diagnostic ?: return false
+    val genericCodes = setOf("invalid_request_error", "invalid_request", "badrequest")
+    if (diagnostic.code != "PROVIDER_ERROR" || diagnostic.providerParam != null) return false
+    return diagnostic.providerCode?.lowercase() in genericCodes ||
+        (diagnostic.providerCode == null && diagnostic.providerType == "invalid_request_error")
 }
 
 /**
@@ -158,6 +167,8 @@ internal class RecoveringTranslationSession(
         } }
         var initial = true
         var retries = 0
+        var meetingWasReady = journal.state.committed > 0
+        var retriedRejection = false
         var attempt = 0
         var filtered = false
         try {
@@ -194,7 +205,11 @@ internal class RecoveringTranslationSession(
                             queue.close()
                         }
                         try {
-                            transport.run(journal.state.connection, key, settings.withRecoveryContext(contextForSegment(start)), queue, onReady,
+                            val sessionSettings = if (retriedRejection) settings else settings.withRecoveryContext(contextForSegment(start))
+                            transport.run(journal.state.connection, key, sessionSettings, queue, onReady = {
+                                onReady()
+                                meetingWasReady = true
+                            },
                                 onTranscript = { event ->
                                     if (event.startMs < 0 || event.endMs <= event.startMs || event.text.length > 65_536)
                                         throw TranslationFailure("服務回傳了無效的字幕時間或內容。")
@@ -220,6 +235,7 @@ internal class RecoveringTranslationSession(
                     onSnapshot(start, currentAttempt, events.toList(), true, true)
                     if (end > start) journal.commit(end, endBytes)
                     retries = 0
+                    retriedRejection = false
                     replaying = journal.state.bytes - journal.state.committedBytes > 5L * 48_000
                 } catch (cancelled: CancellationException) {
                     throw cancelled
@@ -229,7 +245,13 @@ internal class RecoveringTranslationSession(
                         filtered = true
                         journal.blockReplay()
                     }
-                    if (filtered || !allowRetry() || !retryableTranslationFailure(failure)) throw failure
+                    if (filtered || !allowRetry()) throw failure
+                    if (!retryableTranslationFailure(failure)) {
+                        // A working meeting can lose its session mid-stream or during rollover. Never
+                        // continually resend the same rejected audio or retry an initial setup error.
+                        if (!meetingWasReady || retriedRejection || !ambiguousSessionRejection(failure)) throw failure
+                        retriedRejection = true
+                    }
                     replaying = true
                     retries++
                     onRetry(retries, failure)

@@ -15,7 +15,7 @@ class PunctuationFormatterTest {
         } } }
     }.toString()
 
-    @Test fun screenshotWithoutAnyPunctuationIsSentAndSupplementSharesFormattedOriginal() {
+    @Test fun punctuationIsAppliedOnlyToTheOriginalWhenTranslationIsPending() {
         val window = paragraphWindows(record, final = true).single()
         assertTrue(window.restorePunctuation)
         val clause = source.indexOf("就社群")
@@ -28,10 +28,10 @@ class PunctuationFormatterTest {
         assertTrue("台灣。\n\n所以" in original)
         assertTrue("那個政策？現在" in original)
         assertEquals(source.filter { it.isLetterOrDigit() }, original.filter { it.isLetterOrDigit() })
-        assertEquals("〔原文補充〕\n" + TaiwanText.convert(original), liveCaptionText(updated, TranscriptChannel.OUTPUT))
+        assertEquals("", liveCaptionText(updated, TranscriptChannel.OUTPUT))
         assertEquals(record.fragments, updated.fragments)
         assertTrue("已補標點與分段" in paragraphProgress(updated))
-        assertTrue("沿用原文標點與段落" in paragraphProgress(updated))
+        assertFalse("原文補充" in paragraphProgress(updated))
     }
 
     @Test fun requestMarksSafeIdsAndFinalityButContainsNoRewrittenTranscript() {

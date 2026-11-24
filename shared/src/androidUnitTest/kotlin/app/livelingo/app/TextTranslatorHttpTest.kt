@@ -68,6 +68,17 @@ class TextTranslatorHttpTest {
                 assertFalse(usages.last().known) // redirected request has no usage, never invent zero
                 assertEquals(4, usages.map { it.id }.distinct().size)
                 assertEquals(setOf(host), requestedHosts.toSet())
+                enqueue("stop", "我們繼續。 Can we call it?")
+                enqueue("stop", "我們繼續。可以呼叫它嗎？")
+                val source = "Let us continue. Can we call it?"
+                assertEquals("我們繼續。可以呼叫它嗎？", translator.translate(connection, "test-secret", SessionSettings(), source, ""))
+                enqueue("stop", "Can we call it?")
+                enqueue("stop", "Can we call it?")
+                val rejected = assertFailsWith<TranslationFailure> {
+                    translator.translate(connection, "test-secret", SessionSettings(), source, "")
+                }
+                assertEquals("TARGET_LANGUAGE_MISMATCH", rejected.diagnostic?.code)
+                assertEquals(8, usages.map { it.id }.distinct().size)
             } finally { translator.close(); server.shutdown() }
         }
     }

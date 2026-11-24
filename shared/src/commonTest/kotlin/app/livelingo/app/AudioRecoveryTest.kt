@@ -194,6 +194,28 @@ class AudioRecoveryTest {
         assertEquals(1, repository.history().single().recoveredText.size)
     }
 
+    @Test fun onlyAnEstablishedMeetingGetsOneRetryForAnUnspecifiedRejection() = runTest {
+        for ((wasReady, expectedCalls) in listOf(false to 1, true to 2)) {
+            val journal = AudioJournal(RecoveryStorage(), "rejected", connection, StandardTestDispatcher(testScheduler))
+            val capture = Channel<ByteArray>(1).also { it.trySend(byteArrayOf(1, 2)); it.close() }
+            var calls = 0
+            val transport = ScriptTransport { audio, ready, _, _ ->
+                calls++
+                if (wasReady && calls == 1) { ready(); audio.receive() }
+                throw TranslationFailure("request rejected", FoundryDiagnostic(
+                    if (calls == 1 && wasReady) FoundryStages.STREAM else FoundryStages.START,
+                    "PROVIDER_ERROR", providerType = "invalid_request_error"))
+            }
+            assertFailsWith<TranslationFailure> {
+                RecoveringTranslationSession(journal, transport, retryDelayMillis = 1).run("key", settings, capture,
+                    {}, { _, _, _, _, _ -> }, {}, { _, _ -> }, {}, { true }, { "id" }, {})
+            }
+            assertEquals(expectedCalls, calls)
+            assertEquals(0, journal.state.committed)
+            assertContentEquals(byteArrayOf(1, 2), journal.read(0))
+        }
+    }
+
     @Test fun retryPolicySeparatesTemporaryFailuresFromCredentialsQuotaAndProtocolErrors() {
         for (code in listOf("TIMEOUT", "DNS", "CONNECT", "CONNECTION_CLOSED", "SESSION_EXPIRED"))
             assertTrue(retryableTranslationFailure(TranslationFailure("test", FoundryDiagnostic(FoundryStages.STREAM, code))))

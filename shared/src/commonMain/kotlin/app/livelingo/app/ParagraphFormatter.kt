@@ -90,10 +90,7 @@ internal fun paragraphProgress(record: TranscriptRecord): String {
         }
         "${if (channel == TranscriptChannel.INPUT) "原文" else "譯文"}：$status"
     }
-    val supplement = if (record.translationSupplementText().isNotBlank() &&
-        record.paragraphLayouts.any { it.channel == TranscriptChannel.INPUT && (it.punctuation.isNotEmpty() || it.breakOffsets.isNotEmpty()) })
-        "；原文補充：沿用原文標點與段落" else ""
-    return tracks.joinToString("；").ifEmpty { "AI 標點與分段：等待字幕" } + supplement
+    return tracks.joinToString("；").ifEmpty { "AI 標點與分段：等待字幕" }
 }
 
 internal fun paragraphRequest(model: String, windows: List<ParagraphWindow>, kind: TextModel = TextModel.infer(model)): String = buildJsonObject {

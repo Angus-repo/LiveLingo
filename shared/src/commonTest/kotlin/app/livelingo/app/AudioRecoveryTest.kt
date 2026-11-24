@@ -79,6 +79,59 @@ class AudioRecoveryTest {
         assertEquals(3, usage.map { it.id }.distinct().size)
     }
 
+    @Test fun overlappingSourceAndTranslationAfterRolloverPublishDurablePrefixesInOrder() = runTest {
+        val storage = RecoveryStorage()
+        val journal = AudioJournal(storage, "overlap", connection, StandardTestDispatcher(testScheduler))
+        val capture = Channel<ByteArray>(Channel.UNLIMITED)
+        repeat(3) { capture.trySend(ByteArray(4800)) }
+        capture.close()
+        val firstPublishing = CompletableDeferred<Unit>()
+        val releasePublish = CompletableDeferred<Unit>()
+        val partials = mutableListOf<List<TranscriptDelta>>()
+        val windows = mutableListOf<AudioWindowCheckpoint>()
+        val input = TranscriptDelta(TranscriptChannel.INPUT, "source", 1, 90)
+        val output = TranscriptDelta(TranscriptChannel.OUTPUT, "translation", 2, 91)
+        var attempts = 0
+        val transport = ScriptTransport { audio, ready, transcript, _ ->
+            ready()
+            for (chunk in audio) assertEquals(4800, chunk.size)
+            if (++attempts == 3) coroutineScope {
+                // Both producers enter before the first draft's IO dispatcher gets to run.
+                launch(start = CoroutineStart.UNDISPATCHED) { transcript(input) }
+                launch(start = CoroutineStart.UNDISPATCHED) { transcript(output) }
+            }
+        }
+        val session = launch {
+            RecoveringTranslationSession(journal, transport, windowBytes = 4800).run("key", settings, capture,
+                onReady = {}, onSnapshot = { _, _, events, checkpoint, _ ->
+                    if (checkpoint == null) {
+                        if (firstPublishing.complete(Unit)) releasePublish.await()
+                        partials += events
+                    } else {
+                        windows += checkpoint
+                        if (windows.size == 3) assertEquals(partials.last(), events)
+                    }
+                }, onNotice = {}, onRetry = { _, _ -> fail("Local caption writes should not reconnect") },
+                onUsage = {}, allowRetry = { true }, attemptId = { "attempt" }, stopCapture = {})
+        }
+        firstPublishing.await()
+        runCurrent()
+        // Capture the durable state before unblocking the first UI/record write.
+        val draft = WireJson.decodeFromString<List<TranscriptDelta>>(storage.values.getValue("audio_draft_overlap"))
+        val earlyPublications = partials.size
+        val previouslyCommitted = journal.state.committed
+        releasePublish.complete(Unit)
+        session.join()
+        val shiftedInput = input.copy(startMs = 201, endMs = 290)
+        val shiftedOutput = output.copy(startMs = 202, endMs = 291)
+        assertEquals(listOf(shiftedInput), draft)
+        assertEquals(0, earlyPublications)
+        assertEquals(2L, previouslyCommitted)
+        assertEquals(listOf(listOf(shiftedInput), listOf(shiftedInput, shiftedOutput)), partials)
+        assertEquals(listOf(1L, 2L, 3L), windows.map { it.end })
+        assertEquals(3L, journal.state.committed)
+    }
+
     @Test fun cancellingDuringBackoffKeepsFinalMicrophoneFrameForRestart() = runTest {
         val storage = RecoveryStorage()
         val dispatcher = StandardTestDispatcher(testScheduler)

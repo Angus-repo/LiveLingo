@@ -630,7 +630,7 @@ class AppController(
                 sessionFailure = when (failure) {
                     is AudioCaptureFailure -> failure.message
                     is TranslationFailure -> safeDiagnosticField(failure.message.orEmpty(), sessionApiKey)
-                    else -> "${connection.provider.label} 連線失敗。請檢查端點、模型名稱、API key 與網路狀態；已收到的字幕已保留。"
+                    else -> "翻譯處理發生未預期的錯誤。請下載診斷紀錄以確認原因。"
                 }
                 (failure as? TranslationFailure)?.diagnostic?.let { diagnostic ->
                     recordDiagnostic(connection, sessionApiKey, diagnostic, sessionFailure.orEmpty(), success = false, showDialog = !listeningStarted)

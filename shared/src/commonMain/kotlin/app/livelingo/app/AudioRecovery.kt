@@ -191,7 +191,8 @@ internal class RecoveringTranslationSession(
                 val replayEnd = if (replaying && journal.state.next > start) journal.state.next else Long.MAX_VALUE
                 val limit = if (replaying) minOf(windowBytes, 30L * 48_000) else windowBytes
                 val queue = Channel<ByteArray>(1)
-                val events = mutableListOf<TranscriptDelta>()
+                var events: List<TranscriptDelta> = emptyList()
+                val publishLock = Mutex()
                 val currentAttempt = attempt++
                 onAttempt(currentAttempt, start)
                 val usagePrefix = attemptId()
@@ -225,11 +226,14 @@ internal class RecoveringTranslationSession(
                                     if (event.startMs < 0 || event.endMs <= event.startMs || event.text.length > 65_536)
                                         throw TranslationFailure("服務回傳了無效的字幕時間或內容。")
                                     if (event.text.isNotEmpty()) {
-                                        events += event.copy(startMs = event.startMs + offset / 48, endMs = event.endMs + offset / 48)
+                                        // Source and translation workers may both emit while disk IO is suspended.
+                                        // Finish publishing each received delta before the next draft can replace it.
                                         withContext(NonCancellable) {
-                                            journal.saveDraft(events)
-                                            // Keep the previous received text visible while replay is incomplete.
-                                            onSnapshot(start, currentAttempt, events.toList(), null, !replaying)
+                                            publishLock.withLock {
+                                                events = events + event.copy(startMs = event.startMs + offset / 48, endMs = event.endMs + offset / 48)
+                                                journal.saveDraft(events)
+                                                onSnapshot(start, currentAttempt, events, null, !replaying)
+                                            }
                                         }
                                     }
                                 }, onNotice = { notice ->
@@ -243,7 +247,7 @@ internal class RecoveringTranslationSession(
                         } finally { feeder.cancelAndJoin() }
                     }
                     // Do not erase known text if the provider finishes a replay without returning it.
-                    onSnapshot(start, currentAttempt, events.toList(), AudioWindowCheckpoint(start, end, endBytes), true)
+                    onSnapshot(start, currentAttempt, events, AudioWindowCheckpoint(start, end, endBytes), true)
                     if (end > start) journal.commit(end, endBytes)
                     retries = 0
                     retriedRejection = false

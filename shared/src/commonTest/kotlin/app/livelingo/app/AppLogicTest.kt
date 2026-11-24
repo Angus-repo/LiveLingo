@@ -27,7 +27,8 @@ class AppLogicTest {
         controller.start()
         runCurrent()
         services.mic.emit(ByteArray(4800))
-        controller.state.first { it.phase == ConnectionPhase.ERROR }
+        val failed = controller.state.first { it.phase == ConnectionPhase.ERROR }
+        assertContains(failed.sessionIssue.orEmpty(), "下載診斷紀錄")
         controller.dispose()
         val reopened = AppController(services, FakeTransport(), dispatcher)
         reopened.downloadDiagnosticLog()

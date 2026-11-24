@@ -13,11 +13,12 @@ class PunctuationTest {
             PunctuationInsertion(first, "，"), PunctuationInsertion(second, "。"), PunctuationInsertion(source.length, "。")), finalized = true)
         assertEquals("今天討論付款流程，明天進行整合測試。\n\n最後確認部署時間。", paragraphText(source, layout))
         val record = TranscriptRecord("r", "x", 0, SessionSettings(), listOf(TranscriptFragment("in", TranscriptChannel.INPUT, 0, 8000, source)), listOf(layout))
-        assertEquals(paragraphText(source, layout), record.translationSupplementText())
         val restored = WireJson.decodeFromString<TranscriptRecord>(WireJson.encodeToString(record))
         assertEquals(record, restored)
         assertEquals(source, restored.fragments.single().text)
-        for (channel in TranscriptChannel.entries) {
+        assertEquals("", SubtitleExporter.srt(restored, TranscriptChannel.OUTPUT))
+        run {
+            val channel = TranscriptChannel.INPUT
             val srt = SubtitleExporter.srt(restored, channel)
             assertTrue("付款流程，" in srt)
             assertTrue("整合測試。" in srt)
@@ -48,13 +49,12 @@ class PunctuationTest {
         }
     }
 
-    @Test fun supplementUsesNormalizedSourceFormattingBeforeTraditionalConversion() {
+    @Test fun originalExportUsesNormalizedSourceFormatting() {
         val source = "我要去台南  然後與秘书確認需求\r\n\r\n最後確認測試"
         val snapshot = "我要去台南 然後與秘书確認需求\n\n最後確認測試"
         val boundary = snapshot.indexOf("然後") - 1
         val layout = ParagraphLayout(TranscriptChannel.INPUT, snapshot, emptyList(), punctuation = listOf(PunctuationInsertion(boundary, "，")))
         val record = TranscriptRecord("r", "x", 0, SessionSettings(), listOf(TranscriptFragment("in", TranscriptChannel.INPUT, 0, 1000, source)), listOf(layout))
-        assertEquals("我要去臺南，然後與祕書確認需求\n\n最後確認測試", record.translationSupplementText())
         assertTrue("台南，" in SubtitleExporter.srt(record, TranscriptChannel.INPUT))
     }
 

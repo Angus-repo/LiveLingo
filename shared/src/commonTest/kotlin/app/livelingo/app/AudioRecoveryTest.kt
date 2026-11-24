@@ -71,12 +71,65 @@ class AudioRecoveryTest {
         }
         var seq = 0
         RecoveringTranslationSession(journal, transport, windowBytes = 4800).run("key", settings, capture,
-            {}, { segment, _, events, complete, _ -> if (complete) { segments += segment; starts += events.single().startMs } }, {},
+            {}, { segment, _, events, complete, _ -> if (complete != null) { segments += segment; starts += events.single().startMs } }, {},
             { _, _ -> fail("Healthy rollover should not back off") }, { usage += it }, { true }, { "${seq++}" }, {})
         assertEquals(listOf(4800, 4800, 4800), sent)
         assertEquals(listOf(0L, 1L, 2L), segments)
         assertEquals(listOf(0L, 100L, 200L), starts)
         assertEquals(3, usage.map { it.id }.distinct().size)
+    }
+
+    @Test fun overlappingSourceAndTranslationAfterRolloverPublishDurablePrefixesInOrder() = runTest {
+        val storage = RecoveryStorage()
+        val journal = AudioJournal(storage, "overlap", connection, StandardTestDispatcher(testScheduler))
+        val capture = Channel<ByteArray>(Channel.UNLIMITED)
+        repeat(3) { capture.trySend(ByteArray(4800)) }
+        capture.close()
+        val firstPublishing = CompletableDeferred<Unit>()
+        val releasePublish = CompletableDeferred<Unit>()
+        val partials = mutableListOf<List<TranscriptDelta>>()
+        val windows = mutableListOf<AudioWindowCheckpoint>()
+        val input = TranscriptDelta(TranscriptChannel.INPUT, "source", 1, 90)
+        val output = TranscriptDelta(TranscriptChannel.OUTPUT, "translation", 2, 91)
+        var attempts = 0
+        val transport = ScriptTransport { audio, ready, transcript, _ ->
+            ready()
+            for (chunk in audio) assertEquals(4800, chunk.size)
+            if (++attempts == 3) coroutineScope {
+                // Both producers enter before the first draft's IO dispatcher gets to run.
+                launch(start = CoroutineStart.UNDISPATCHED) { transcript(input) }
+                launch(start = CoroutineStart.UNDISPATCHED) { transcript(output) }
+            }
+        }
+        val session = launch {
+            RecoveringTranslationSession(journal, transport, windowBytes = 4800).run("key", settings, capture,
+                onReady = {}, onSnapshot = { _, _, events, checkpoint, _ ->
+                    if (checkpoint == null) {
+                        if (firstPublishing.complete(Unit)) releasePublish.await()
+                        partials += events
+                    } else {
+                        windows += checkpoint
+                        if (windows.size == 3) assertEquals(partials.last(), events)
+                    }
+                }, onNotice = {}, onRetry = { _, _ -> fail("Local caption writes should not reconnect") },
+                onUsage = {}, allowRetry = { true }, attemptId = { "attempt" }, stopCapture = {})
+        }
+        firstPublishing.await()
+        runCurrent()
+        // Capture the durable state before unblocking the first UI/record write.
+        val draft = WireJson.decodeFromString<List<TranscriptDelta>>(storage.values.getValue("audio_draft_overlap"))
+        val earlyPublications = partials.size
+        val previouslyCommitted = journal.state.committed
+        releasePublish.complete(Unit)
+        session.join()
+        val shiftedInput = input.copy(startMs = 201, endMs = 290)
+        val shiftedOutput = output.copy(startMs = 202, endMs = 291)
+        assertEquals(listOf(shiftedInput), draft)
+        assertEquals(0, earlyPublications)
+        assertEquals(2L, previouslyCommitted)
+        assertEquals(listOf(listOf(shiftedInput), listOf(shiftedInput, shiftedOutput)), partials)
+        assertEquals(listOf(1L, 2L, 3L), windows.map { it.end })
+        assertEquals(3L, journal.state.committed)
     }
 
     @Test fun cancellingDuringBackoffKeepsFinalMicrophoneFrameForRestart() = runTest {
@@ -117,7 +170,7 @@ class AudioRecoveryTest {
         }
         assertFailsWith<TranslationFailure> {
             RecoveringTranslationSession(journal, transport).run("key", settings, capture, {},
-                { _, _, _, complete, _ -> if (complete) throw TranslationFailure("disk full") }, {}, { _, _ -> fail("No network retry") }, {}, { true }, { "a" }, {})
+                { _, _, _, complete, _ -> if (complete != null) throw TranslationFailure("disk full") }, {}, { _, _ -> fail("No network retry") }, {}, { true }, { "a" }, {})
         }
         assertEquals(0L, journal.state.committed)
         assertContentEquals(byteArrayOf(1, 2), journal.read(0))
@@ -192,6 +245,140 @@ class AudioRecoveryTest {
         assertEquals("new text", record.recoveredText.single().text)
         repository.saveTranscript(record)
         assertEquals(1, repository.history().single().recoveredText.size)
+    }
+
+    @Test fun restartAcknowledgesATranscriptAlreadySavedBeforeAudioCleanup() = runTest {
+        val storage = RecoveryStorage()
+        val journal = AudioJournal(storage, "checkpoint", connection, StandardTestDispatcher(testScheduler))
+        journal.append(byteArrayOf(1, 2))
+        journal.append(byteArrayOf(3, 4))
+        val reopened = AudioJournal(storage, "checkpoint", connection, StandardTestDispatcher(testScheduler))
+        val cursor = AudioWindowCheckpoint(0, 1, 2)
+        reopened.acknowledgeSaved(cursor)
+        reopened.acknowledgeSaved(cursor)
+        assertEquals(1L, reopened.state.committed)
+        assertContentEquals(byteArrayOf(3, 4), reopened.read(1))
+    }
+
+    @Test fun repeatedAudioRejectionKeepsPcmAndContinuesWithLaterSpeechThenRepairsOnlyTheGap() = runTest {
+        val storage = RecoveryStorage()
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val journal = AudioJournal(storage, "meeting", connection, dispatcher)
+        val capture = Channel<ByteArray>(Channel.UNLIMITED)
+        fun frame(value: Int) = ByteArray(4800) { value.toByte() }
+        capture.send(frame(1))
+        val attempts = mutableListOf<Int>()
+        val snapshots = mutableListOf<Pair<Long, Long>>()
+        val transport = ScriptTransport { audio, ready, transcript, _ ->
+            ready()
+            val first = audio.receive().first().toInt()
+            attempts += first
+            if (first == 1) {
+                // Both provider events point at audio, even when the retry reaches its final drain.
+                val stage = if (attempts.size == 1) FoundryStages.STREAM else FoundryStages.STOP
+                throw TranslationFailure("rejected", FoundryDiagnostic(stage, "PROVIDER_ERROR", 101,
+                    providerType = "invalid_request_error", providerParam = "audio"))
+            }
+            for (bytes in audio) fail("Unexpected additional PCM")
+            transcript(TranscriptDelta(TranscriptChannel.OUTPUT, "later", 0, 100))
+        }
+        RecoveringTranslationSession(journal, transport, windowBytes = 4800).run("key", settings, capture,
+            {}, { segment, _, events, checkpoint, _ ->
+                if (checkpoint != null) snapshots += segment to events.single().startMs
+            }, {}, { _, _ -> capture.send(frame(2)) }, {}, { true }, { "id" }, { capture.close() },
+            onDeferred = { capture.close() })
+        assertEquals(listOf(1, 1, 2), attempts)
+        assertEquals(listOf(1L to 100L), snapshots)
+        assertEquals(4800L, journal.state.confirmedBytes)
+        assertEquals(1L, journal.state.pendingChunks)
+        assertContentEquals(frame(1), journal.read(0))
+        assertNull(storage.read("pcm_meeting_1"))
+
+        val reopened = AudioJournal(storage, "meeting", connection, dispatcher)
+        val recovered = mutableListOf<Byte>()
+        val recovery = ScriptTransport { audio, ready, transcript, _ ->
+            ready()
+            for (chunk in audio) recovered += chunk.first()
+            transcript(TranscriptDelta(TranscriptChannel.OUTPUT, "earlier", 0, 100))
+        }
+        RecoveringTranslationSession(reopened, recovery).run("key", settings, Channel<ByteArray>(0).also { it.close() },
+            {}, { segment, _, events, checkpoint, _ ->
+                if (checkpoint != null) snapshots += segment to events.single().startMs
+            }, {}, { _, _ -> fail() }, {}, { true }, { "repair" }, {}, recoverDeferred = true)
+        assertEquals(listOf<Byte>(1), recovered)
+        assertEquals(listOf(1L to 100L, 0L to 0L), snapshots)
+        assertEquals(0L, reopened.state.pendingChunks)
+        assertEquals(9600L, reopened.state.confirmedBytes)
+        assertNull(storage.read("pcm_meeting_0"))
+    }
+
+    @Test fun providerAcceptsPacedReplayOfTheSameAudioWithoutDeferringIt() = runTest {
+        val journal = AudioJournal(RecoveryStorage(), "pace", connection, StandardTestDispatcher(testScheduler))
+        repeat(2) { journal.append(ByteArray(4800)) }
+        var calls = 0
+        val replayTimes = mutableListOf<Long>()
+        val transport = ScriptTransport { audio, ready, _, _ ->
+            ready()
+            for (chunk in audio) if (calls > 0) replayTimes += testScheduler.currentTime
+            if (++calls == 1) throw TranslationFailure("rejected", FoundryDiagnostic(FoundryStages.STOP,
+                "PROVIDER_ERROR", 101, providerType = "invalid_request_error", providerParam = "audio"))
+        }
+        RecoveringTranslationSession(journal, transport).run("key", settings, Channel<ByteArray>(0).also { it.close() },
+            {}, { _, _, _, _, _ -> }, {}, { _, _ -> }, {}, { true }, { "id" }, {}, recoverDeferred = true)
+        assertEquals(2, calls)
+        assertEquals(100L, replayTimes.last() - replayTimes.first())
+        assertEquals(0L, journal.state.pendingChunks)
+        assertTrue(journal.state.deferred.isEmpty())
+    }
+
+    @Test fun failedManualRepairDoesNotLoopOrBlockOtherDeferredRangesAndCrashAcknowledgementIsIdempotent() = runTest {
+        val store = RecoveryStorage()
+        val journal = AudioJournal(store, "gaps", connection, StandardTestDispatcher(testScheduler))
+        repeat(3) { journal.append(byteArrayOf(it.toByte(), 0)) }
+        journal.defer(DeferredAudio(0, 0, 1, 2))
+        journal.defer(DeferredAudio(1, 2, 2, 4))
+        journal.commit(AudioWindowCheckpoint(2, 3, 6))
+        val attempted = mutableListOf<Int>()
+        val transport = ScriptTransport { audio, ready, _, _ ->
+            ready()
+            val value = audio.receive().first().toInt()
+            attempted += value
+            if (value == 0) throw TranslationFailure("bad audio", FoundryDiagnostic(FoundryStages.STREAM, "PROVIDER_ERROR",
+                providerType = "invalid_request_error", providerParam = "audio"))
+            for (unused in audio) fail()
+        }
+        RecoveringTranslationSession(journal, transport).run("key", settings, Channel<ByteArray>(0).also { it.close() },
+            {}, { _, _, _, _, _ -> }, {}, { _, _ -> }, {}, { true }, { "id" }, {}, recoverDeferred = true)
+        assertEquals(listOf(0, 0, 1), attempted)
+        assertEquals(1L, journal.state.pendingChunks)
+        val checkpoint = AudioWindowCheckpoint(0, 1, 2)
+        journal.acknowledgeSaved(checkpoint)
+        journal.acknowledgeSaved(checkpoint)
+        assertEquals(0L, journal.state.pendingChunks)
+        assertEquals(3L, journal.state.committed)
+        assertFalse(store.values.keys.any { it.startsWith("pcm_") })
+    }
+
+    @Test fun onlyAnEstablishedMeetingGetsOneRetryForAnUnspecifiedRejection() = runTest {
+        for ((wasReady, expectedCalls) in listOf(false to 1, true to 2)) {
+            val journal = AudioJournal(RecoveryStorage(), "rejected", connection, StandardTestDispatcher(testScheduler))
+            val capture = Channel<ByteArray>(1).also { it.trySend(byteArrayOf(1, 2)); it.close() }
+            var calls = 0
+            val transport = ScriptTransport { audio, ready, _, _ ->
+                calls++
+                if (wasReady && calls == 1) { ready(); audio.receive() }
+                throw TranslationFailure("request rejected", FoundryDiagnostic(
+                    if (calls == 1 && wasReady) FoundryStages.STREAM else FoundryStages.START,
+                    "PROVIDER_ERROR", providerType = "invalid_request_error"))
+            }
+            assertFailsWith<TranslationFailure> {
+                RecoveringTranslationSession(journal, transport, retryDelayMillis = 1).run("key", settings, capture,
+                    {}, { _, _, _, _, _ -> }, {}, { _, _ -> }, {}, { true }, { "id" }, {})
+            }
+            assertEquals(expectedCalls, calls)
+            assertEquals(0, journal.state.committed)
+            assertContentEquals(byteArrayOf(1, 2), journal.read(0))
+        }
     }
 
     @Test fun retryPolicySeparatesTemporaryFailuresFromCredentialsQuotaAndProtocolErrors() {

@@ -17,6 +17,51 @@ import kotlinx.serialization.encodeToString
 import kotlin.test.*
 
 class AppLogicTest {
+    @Test fun unexpectedDisconnectCanBeDownloadedAfterRestartWithoutMeetingContent() = runTest {
+        val services = configuredServices()
+        val transport = FakeTransport().apply {
+            streamFailure = IllegalStateException("private transcript and credential", IllegalArgumentException("private cause"))
+        }
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val controller = AppController(services, transport, dispatcher)
+        controller.start()
+        runCurrent()
+        services.mic.emit(ByteArray(4800))
+        val failed = controller.state.first { it.phase == ConnectionPhase.ERROR }
+        assertContains(failed.sessionIssue.orEmpty(), "下載診斷紀錄")
+        controller.dispose()
+        val reopened = AppController(services, FakeTransport(), dispatcher)
+        reopened.downloadDiagnosticLog()
+        val report = services.exports.single()
+        for (field in listOf("session_begin", "connection_attempt", "ready", "session_failure", "stage=stream",
+                "IllegalStateException", "IllegalArgumentException", "pending_chunks=1", "transcript_saved=true", "pending_audio=true"))
+            assertContains(report, field)
+        for (privateValue in listOf("private", "example.openai.azure.com", "https://"))
+            assertFalse(privateValue in report)
+        reopened.dispose()
+    }
+
+    @Test fun logRotatesAndLimitsServiceErrorsToSafeMetadata() {
+        val services = FakeServices()
+        val log = SessionDiagnostics(services)
+        val diagnostic = FoundryDiagnostic(FoundryStages.START, "PROVIDER_ERROR", 403, "req_valid123456",
+            "permission_denied", 1008, "private reason", "permission_error", "session.model", "private body")
+        val fields = log.safeFields(null, diagnostic, "private")
+        assertContains(fields, "http=403")
+        assertContains(fields, "ws_close=1008")
+        assertContains(fields, "request_id=req_valid123456")
+        assertContains(fields, "provider_code=permission_denied")
+        assertFalse("private" in fields)
+        val untrusted = diagnostic.copy(stage = "private stage", code = "private code", requestId = "req_private_secrets",
+            providerCode = "private", providerType = "private", providerParam = "private")
+        assertFalse("private" in log.safeFields(null, untrusted, "private"))
+        repeat(170) { log.event("marker", "index=$it") }
+        val restored = SessionDiagnostics(services).report()
+        assertEquals(160, restored.lineSequence().count { " marker " in it })
+        assertFalse("marker index=0 " in restored)
+        assertContains(restored, "marker index=169")
+    }
+
     @Test fun meetingCostsSurviveRestartDeletionAndChangingDefaultRates() = runTest {
         val services = configuredServices()
         val transport = FakeTransport()
@@ -108,12 +153,12 @@ class AppLogicTest {
         advanceTimeBy(8_000); runCurrent()
         val live = controller.state.first { it.current?.paragraphLayouts?.isNotEmpty() == true }.current!!
         assertEquals("今天確認付款流程，明天討論整合測試。\n\n最後決定部署時間", liveCaptionText(live, TranscriptChannel.INPUT))
-        assertEquals("〔原文補充〕\n" + liveCaptionText(live, TranscriptChannel.INPUT), liveCaptionText(live, TranscriptChannel.OUTPUT))
+        assertEquals("", liveCaptionText(live, TranscriptChannel.OUTPUT))
         controller.stop(); controller.state.first { it.phase == ConnectionPhase.IDLE }
         assertEquals(1, finishes)
         val saved = AppRepository(services.memory).history().single()
         assertTrue(liveCaptionText(saved, TranscriptChannel.INPUT).endsWith("部署時間。"))
-        assertTrue(liveCaptionText(saved, TranscriptChannel.OUTPUT).endsWith("部署時間。"))
+        assertEquals("", liveCaptionText(saved, TranscriptChannel.OUTPUT))
         assertEquals(raw, saved.fragments.single().text)
         controller.dispose()
     }
@@ -134,38 +179,38 @@ class AppLogicTest {
         transport.receiver!!(TranscriptDelta(TranscriptChannel.OUTPUT, "我曾在Sony工作。", 8000, 12000))
         transport.receiver!!(TranscriptDelta(TranscriptChannel.INPUT, "我要去臺南。\n\n我的祕書說OK。", 3000, 6000))
         val live = controller.state.value.current!!
-        assertTrue(liveCaptionText(live, TranscriptChannel.OUTPUT).contains("我要去臺南。\n\n我的祕書說OK。"))
+        assertEquals("我曾在Sony工作。", liveCaptionText(live, TranscriptChannel.OUTPUT))
         assertEquals("我曾在Sony工作。", captionSourceText(live, TranscriptChannel.OUTPUT))
         assertTrue(paragraphWindows(live).none { it.channel == TranscriptChannel.OUTPUT && "原文補充" in it.source })
         controller.stop(); controller.state.first { it.phase == ConnectionPhase.IDLE }
         assertTrue(formatCalls > 0)
         assertTrue(controller.state.value.paragraphStatus.orEmpty().contains("暫時無法使用"))
         val saved = AppRepository(services.memory).history().single()
-        assertTrue(liveCaptionText(saved, TranscriptChannel.OUTPUT).contains("我的祕書說OK。"))
+        assertEquals("我曾在Sony工作。", liveCaptionText(saved, TranscriptChannel.OUTPUT))
         assertEquals(3, saved.fragments.size)
         controller.export(saved, "txt", TranscriptChannel.OUTPUT)
         controller.export(saved, "srt", TranscriptChannel.OUTPUT)
         controller.export(saved, "vtt", TranscriptChannel.OUTPUT)
-        assertTrue(services.exports.all { "原文補充" in it && "我的祕書說OK。" in it })
+        assertTrue(services.exports.all { "原文補充" !in it && "我曾在Sony工作。" in it })
         controller.dispose()
         val restored = AppController(services, FakeTransport(), StandardTestDispatcher(testScheduler))
         assertEquals(liveCaptionText(saved, TranscriptChannel.OUTPUT), liveCaptionText(restored.state.value.history.single(), TranscriptChannel.OUTPUT))
         restored.dispose()
     }
 
-    @Test fun fallbackDoesNotWaitForParagraphsAndLateOutputIsNotDisplayedTwice() = runTest {
+    @Test fun outputWaitsForTheTranslationAndDisplaysItOnce() = runTest {
         val services = configuredServices()
         val transport = FakeTransport()
         val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
         controller.setAiParagraphs(false)
         controller.start(); runCurrent()
         transport.receiver!!(TranscriptDelta(TranscriptChannel.INPUT, "我要去臺南。", 0, 1000))
-        assertEquals("〔原文補充〕\n我要去臺南。", liveCaptionText(controller.state.value.current, TranscriptChannel.OUTPUT))
+        assertEquals("", liveCaptionText(controller.state.value.current, TranscriptChannel.OUTPUT))
         transport.receiver!!(TranscriptDelta(TranscriptChannel.OUTPUT, "我要去", 8000, 9000))
         transport.receiver!!(TranscriptDelta(TranscriptChannel.OUTPUT, "臺南。", 9000, 10000))
         assertEquals("我要去臺南。", liveCaptionText(controller.state.value.current, TranscriptChannel.OUTPUT))
         controller.stop(); controller.state.first { it.phase == ConnectionPhase.IDLE }
-        assertTrue(AppRepository(services.memory).history().single().translationSupplements().isEmpty())
+        assertEquals("我要去臺南。", liveCaptionText(AppRepository(services.memory).history().single(), TranscriptChannel.OUTPUT))
         controller.dispose()
     }
 
@@ -1055,6 +1100,57 @@ class AppLogicTest {
         controller.dispose()
     }
 
+    @Test fun rejectedAudioDoesNotInterruptLiveCaptionsAndReopenedMeetingFillsTheGapInOrder() = runTest {
+        val services = configuredServices()
+        val laterWindow = CompletableDeferred<Unit>()
+        val spoken = mutableListOf<Int>()
+        val transport = ScriptTransport { audio, ready, transcript, _ ->
+            ready()
+            if (spoken.size == 2) laterWindow.complete(Unit)
+            for (chunk in audio) {
+                val value = chunk.first().toInt()
+                spoken += value
+                if (value == 1) throw TranslationFailure("audio rejected", FoundryDiagnostic(
+                    FoundryStages.STREAM, "PROVIDER_ERROR", 101, providerType = "invalid_request_error", providerParam = "audio"))
+                transcript(TranscriptDelta(TranscriptChannel.OUTPUT, "後段。", 0, 100))
+            }
+        }
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val controller = AppController(services, transport, dispatcher)
+        controller.setAiParagraphs(false)
+        controller.start()
+        controller.state.first { it.phase == ConnectionPhase.LISTENING }
+        val id = controller.state.value.current!!.id
+        services.mic.emit(ByteArray(4800) { 1 })
+        laterWindow.await()
+        assertTrue(services.mic.recording)
+        services.mic.emit(ByteArray(4800) { 2 })
+        controller.state.first { liveCaptionText(it.current, TranscriptChannel.OUTPUT) == "後段。" }
+        controller.stop()
+        controller.state.first { !it.active }
+        assertNull(controller.state.value.sessionIssue)
+        assertTrue(id in controller.state.value.pendingAudioIds)
+        assertEquals(listOf(1, 1, 2), spoken)
+        controller.dispose()
+
+        val repair = ScriptTransport { audio, ready, transcript, _ ->
+            ready()
+            for (chunk in audio) assertEquals(1, chunk.first().toInt())
+            transcript(TranscriptDelta(TranscriptChannel.OUTPUT, "前段。", 0, 100))
+        }
+        val reopened = AppController(services, repair, dispatcher)
+        assertTrue(id in reopened.state.value.pendingAudioIds)
+        reopened.resumePendingAudio(id)
+        reopened.state.first { it.active }
+        reopened.state.first { !it.active }
+        assertTrue(reopened.state.value.pendingAudioIds.isEmpty())
+        assertEquals(1, services.mic.starts)
+        val saved = AppRepository(services.memory).history().single()
+        assertEquals(id, saved.id)
+        assertEquals("前段。後段。", liveCaptionText(saved, TranscriptChannel.OUTPUT))
+        reopened.dispose()
+    }
+
     @Test fun stoppedOfflineAudioSurvivesRestartAndCanBeRecoveredWithoutStartingMicrophone() = runTest {
         val services = configuredServices()
         val transport = FakeTransport().apply {
@@ -1088,6 +1184,32 @@ class AppLogicTest {
         assertEquals("離線錄音已補回", AppRepository(services.memory).history().single().fragments.single().text)
         assertTrue(reopened.state.value.pendingAudioIds.isEmpty())
         reopened.dispose()
+    }
+
+    @Test fun meetingKeepsRecordingAndPersistsOnlyTheMissingSentenceForLater() = runTest {
+        val services = configuredServices()
+        val transport = FakeTransport()
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
+        controller.setAiParagraphs(false)
+        controller.start()
+        runCurrent()
+        services.mic.emit(ByteArray(4800))
+        transport.receiver!!(TranscriptDelta(TranscriptChannel.INPUT, "First sentence.", 0, 50, translationPending = true))
+        assertTrue(services.mic.recording)
+        assertEquals(1, controller.state.value.pendingInWindow)
+        assertEquals("", liveCaptionText(controller.state.value.current, TranscriptChannel.OUTPUT))
+        transport.receiver!!(TranscriptDelta(TranscriptChannel.OUTPUT, "後續譯文。", 50, 100))
+        controller.stop()
+        controller.state.first { !it.active }
+        val saved = AppRepository(services.memory).history().single()
+        assertEquals(listOf("First sentence."), saved.pendingTranslations.map { it.text })
+        assertEquals("後續譯文。", liveCaptionText(saved, TranscriptChannel.OUTPUT))
+        assertTrue(saved.recoveredText.none { it.text == "First sentence." })
+        assertNotNull(saved.captionConnection)
+        assertFalse(saved.id in controller.state.value.pendingAudioIds)
+        assertNull(controller.state.value.sessionIssue)
+        assertEquals(1, transport.starts)
+        controller.dispose()
     }
 
     private fun configuredServices() = FakeServices().also {

@@ -1,6 +1,10 @@
 # 即時譯 LiveLingo
 
-使用 Kotlin Multiplatform + Compose Multiplatform 的 Android／iOS 即時字幕翻譯 App。**0.1.18 加入逾時自動重連與錄音保存／補處理；將語音、文字與原文字幕模型統一為下拉選單，保留自訂模型及部署；支援缺少標點的字幕整理，原文補充同步套用標點與段落；保留原文優先分段、模型費用與右上角版本。語音模型依類型使用不同串流協定，文字模型預設 GPT-6 Luna；可用 Microsoft Foundry 或 OpenAI，由 App 直接連線，不需自架後端。**
+LiveLingo 使用 Kotlin Multiplatform 與 Compose Multiplatform，在 Android 和 iOS 上提供即時字幕翻譯。可連線至 Microsoft Foundry 或 OpenAI。
+
+0.1.21 會將連續兩次未完整翻譯的句子保留待補譯，同一場會議繼續收音與翻譯。停止後可從即時翻譯頁或逐字稿補譯這些句子。完成的譯文依原時間顯示。
+
+0.1.20 的即時字幕、逐字稿和字幕匯出只在譯文軌顯示翻譯結果。遇到明顯未翻譯的外語句子，App 使用選定的文字模型補譯，另計文字用量。錄音持續保存，已連線的會議遇到未指明原因的工作階段拒絕時，會在同一份逐字稿嘗試恢復一次。
 
 API key 由使用者自行輸入，Android 以 Keystore 保護加密金鑰並加密保存，iOS 以 Keychain 保存。原始碼、APK、逐字稿匯出及一般設定均不內建或保存明文 API key。
 

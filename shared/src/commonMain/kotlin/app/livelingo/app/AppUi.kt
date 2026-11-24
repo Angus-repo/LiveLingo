@@ -300,6 +300,10 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                     Text(status, style = MaterialTheme.typography.bodySmall, color = Ink)
                 }
             } }
+            val deferredCount = (state.current?.pendingTranslations?.size ?: 0) + state.pendingInWindow
+            if (deferredCount > 0 && state.phase == ConnectionPhase.LISTENING && !state.replayingSavedAudio) item {
+                Text("有 ${deferredCount} 段待補譯，後續發言會繼續翻譯。", style = MaterialTheme.typography.bodySmall)
+            }
             if (!state.active && state.current?.pendingCaptions()?.isNotEmpty() == true) item {
                 ResumeCaptionsButton(state.current, controller)
             }
@@ -317,6 +321,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                         style = MaterialTheme.typography.bodySmall, color = Color(0xFF9A473E))
                     if (!state.active) Text(if (state.transcriptSaved) "逐字稿已儲存。點下方「開始下一段」即可收取新的音訊。" else "逐字稿尚未完整儲存，請先到「逐字稿」匯出。",
                         style = MaterialTheme.typography.bodySmall, color = Ink)
+                    OutlinedButton(onClick = controller::downloadDiagnosticLog) { Text("下載診斷紀錄") }
                     if (state.lastConnectionReport != null) TextButton(onClick = controller::showConnectionReport) { Text("查看診斷") }
                 }
             }
@@ -495,7 +500,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
     LazyColumn(contentPadding = PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item { TextButton(onClick = onBack) { Text("← 所有逐字稿") } }
         item { PageIntro(record.title, formatDate(record.createdAtMs)) }
-        if (!active && record.settings.audioSource == AudioSource.TEAMS_CAPTIONS) item { ResumeCaptionsButton(record, controller) }
+        if (!active && record.pendingCaptions().isNotEmpty()) item { ResumeCaptionsButton(record, controller) }
         if (pendingAudio && !active) item {
             Button(onClick = { controller.resumePendingAudio(record.id) }) { Text("補回待處理錄音") }
         }
@@ -588,6 +593,9 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
             }
             Text("Microsoft Foundry 與 OpenAI 的設定、金鑰獨立保存，切換後可繼續使用原本的資料。", style = MaterialTheme.typography.bodySmall)
         } }
+        item { SectionCard("診斷紀錄", "保存最近的連線、重試與字幕儲存狀態。可將文字檔提供給協助排錯的人。") {
+            OutlinedButton(onClick = controller::downloadDiagnosticLog) { Text("下載診斷紀錄") }
+        } }
         item { SectionCard("連線設定", "API key 使用裝置的安全儲存機制加密保存。") {
             if (!isOpenAi) OutlinedTextField(endpoint, { endpoint = it }, label = { Text("Azure OpenAI／Foundry 資源端點") }, placeholder = { Text("https://your-resource.openai.azure.com") }, singleLine = true, enabled = !state.busy, modifier = Modifier.fillMaxWidth())
             else Text("OpenAI 官方端點：api.openai.com", style = MaterialTheme.typography.bodySmall, color = Mint)
@@ -614,18 +622,17 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                 Text("AI 標點與分段", modifier = Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
                 Switch(state.preferences.aiParagraphs, controller::setAiParagraphs, enabled = !state.busy)
             }
-            if (state.preferences.aiParagraphs || speechKind.transcribes) {
-                ModelDropdown(if (speechKind.transcribes) "文字模型（翻譯與標點分段）" else "AI 標點與分段模型",
-                    state.preferences, previewConnection, ModelRole.TEXT, !state.busy,
-                    onCustom = { customModelRole = ModelRole.TEXT }) {
-                    textKind = TextModel.valueOf(it.kind)
-                    paragraphModel = it.modelId
-                }
-                Text(textKind.price(provider).note, style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971))
-                TextButton(onClick = { runCatching { uriHandler.openUri(textKind.price(provider).sourceUrl) }.onFailure { controller.inform("無法開啟定價網頁。") } }) { Text("文字費用來源 ↗") }
-                if (speechKind.transcribes) Text("每約 3 秒完成一段原文轉錄，再由文字模型翻譯；即使關閉 AI 分段，文字翻譯仍會執行並計費。", style = MaterialTheme.typography.bodySmall)
-                if (state.preferences.aiParagraphs) Text("收音時定期整理新字幕的標點與段落，停止時完成最後一段；譯文依原文分段，原文補充也沿用相同格式。只補標點與換行，不改寫文字或數字。此功能會使用所選文字模型並計費，需有可用部署與配額。", style = MaterialTheme.typography.bodySmall)
+            ModelDropdown("文字模型（翻譯、補譯與分段）",
+                state.preferences, previewConnection, ModelRole.TEXT, !state.busy,
+                onCustom = { customModelRole = ModelRole.TEXT }) {
+                textKind = TextModel.valueOf(it.kind)
+                paragraphModel = it.modelId
             }
+            Text(textKind.price(provider).note, style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971))
+            TextButton(onClick = { runCatching { uriHandler.openUri(textKind.price(provider).sourceUrl) }.onFailure { controller.inform("無法開啟定價網頁。") } }) { Text("文字費用來源 ↗") }
+            if (speechKind.transcribes) Text("每約 3 秒完成一段原文轉錄，再由文字模型翻譯；即使關閉 AI 分段，文字翻譯仍會執行並計費。", style = MaterialTheme.typography.bodySmall)
+            if (state.preferences.aiParagraphs) Text("收音時定期整理新字幕的標點與段落，停止時完成最後一段，譯文依原文分段。只補標點與換行，不改寫文字或數字。此功能會使用所選文字模型並計費，需有可用部署與配額。", style = MaterialTheme.typography.bodySmall)
+            Text("偵測到未譯句子，或整段口譯只收到原文時，會使用此文字模型補譯，依文字用量計費。", style = MaterialTheme.typography.bodySmall)
             Text("費用為美元公開參考價，查核：$PRICE_CHECKED_DATE；非帳單即時報價。實際費用依用量、部署與合約而定。", style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971))
             if (!isOpenAi) TextButton(onClick = { runCatching { uriHandler.openUri(FOUNDRY_PRICING_URL) }.onFailure { controller.inform("無法開啟定價網頁。") } }) { Text("查看 Azure 官方定價 ↗") }
             webSocketPreview?.let { preview ->

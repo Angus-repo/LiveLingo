@@ -48,7 +48,7 @@ private val knownProviderCodes = setOf(
     "model_not_found", "deployment_not_found", "rate_limit_exceeded", "quota_exceeded", "insufficient_quota",
     "TooManyRequests", "invalid_request_error", "invalid_request", "BadRequest", "unsupported_model",
     "model_not_supported", "OperationNotSupported", "content_filter", "ResponsibleAIPolicyViolation", "server_error", "internal_error",
-    "service_unavailable", "invalid_audio", "context_length_exceeded",
+    "service_unavailable", "session_expired", "session_timeout", "invalid_audio", "context_length_exceeded",
     "unknown_parameter", "missing_required_parameter", "invalid_value", "invalid_parameter", "invalid_event",
 )
 
@@ -60,6 +60,9 @@ private val knownProviderParams = setOf(
     "session.audio.output", "session.audio.output.voice", "session.voice", "session.delegation", "session.delegation.type",
     "type", "audio", "event_id",
 )
+
+internal fun safeProviderType(raw: String?): String? = raw?.takeIf { it in knownProviderTypes }
+internal fun safeProviderParam(raw: String?): String? = raw?.takeIf { it in knownProviderParams }
 
 fun safeProviderCode(raw: String?): String? = raw?.let { value -> knownProviderCodes.firstOrNull { it.equals(value, ignoreCase = true) } }
 
@@ -77,8 +80,14 @@ fun safeJsonErrorFields(body: String, secret: String? = null): SafeFoundryErrorF
     val error = (root["error"] as? JsonObject) ?: root
     fun JsonObject.string(key: String): String? = (get(key) as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
     val innerCode = (error["innererror"] as? JsonObject)?.string("code")
+    val code = safeProviderCode(error.string("code"))
+    val providerCode = when {
+        isContentFilterCode(innerCode) -> "content_filter"
+        code == null && error.string("message")?.startsWith("You have no credits remaining", ignoreCase = true) == true -> "insufficient_quota"
+        else -> code
+    }
     return SafeFoundryErrorFields(
-        providerCode = if (isContentFilterCode(innerCode)) "content_filter" else safeProviderCode(error.string("code")),
+        providerCode = providerCode,
         requestId = safeRequestId(root.string("request_id") ?: error.string("request_id"), secret),
         providerType = error.string("type")?.takeIf { it in knownProviderTypes && (secret.isNullOrEmpty() || !it.contains(secret, ignoreCase = true)) },
         providerParam = error.string("param")?.takeIf { it in knownProviderParams && (secret.isNullOrEmpty() || !it.contains(secret, ignoreCase = true)) },

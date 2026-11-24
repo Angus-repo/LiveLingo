@@ -12,6 +12,9 @@ import kotlinx.serialization.encodeToString
 import kotlin.io.encoding.Base64
 
 @Serializable
+internal data class DeferredAudio(val start: Long, val startBytes: Long, val end: Long, val endBytes: Long)
+
+@Serializable
 internal data class AudioRecoveryState(
     val connection: FoundryConnection,
     val next: Long = 0,
@@ -19,7 +22,12 @@ internal data class AudioRecoveryState(
     val bytes: Long = 0,
     val committedBytes: Long = 0,
     val blocked: Boolean = false,
-)
+    // committed is the forward cursor. Ranges behind it retain their PCM until separately acknowledged.
+    val deferred: List<DeferredAudio> = emptyList(),
+) {
+    val pendingChunks: Long get() = next - committed + deferred.sumOf { it.end - it.start }
+    val confirmedBytes: Long get() = committedBytes - deferred.sumOf { it.endBytes - it.startBytes }
+}
 
 /** PCM is written before it is eligible for transmission. A socket send is NOT an acknowledgement. */
 internal class AudioJournal(
@@ -53,14 +61,42 @@ internal class AudioJournal(
         Base64.decode(storage.read(chunkKey(index)) ?: throw TranslationFailure("待處理錄音讀取失敗，已保留逐字稿；請確認裝置儲存空間。"))
     }
 
-    suspend fun commit(end: Long, endBytes: Long) = lock.withLock {
+    // The transcript and its text queue may already be durable after a crash between
+    // saving the record and acknowledging PCM. Never replay that completed window.
+    suspend fun acknowledgeSaved(checkpoint: AudioWindowCheckpoint?) {
+        val saved = checkpoint ?: return
+        val range = state.deferred.firstOrNull { it.start == saved.start }
+        val offset = range?.startBytes ?: state.committedBytes
+        if ((range != null || saved.start == state.committed) &&
+            saved.end in (saved.start + 1)..(range?.end ?: state.next) &&
+            saved.endBytes in (offset + 1)..(range?.endBytes ?: state.bytes)) commit(saved)
+    }
+
+    suspend fun defer(range: DeferredAudio) = lock.withLock {
+        check(range.start == state.committed && range.startBytes == state.committedBytes && range.end in (range.start + 1)..state.next)
         withContext(NonCancellable + io) {
-            val old = state.committed
-            val next = state.copy(committed = end, committedBytes = endBytes)
-            // The transcript must already be durable before this call. Publish before garbage collection.
+            val next = state.copy(committed = range.end, committedBytes = range.endBytes, deferred = state.deferred + range)
             storage.write(manifestKey, WireJson.encodeToString(next))
             current.value = next
-            for (index in old until end) runCatching { storage.delete(chunkKey(index)) }
+        }
+    }
+
+    suspend fun commit(saved: AudioWindowCheckpoint) = lock.withLock {
+        withContext(NonCancellable + io) {
+            val next = if (saved.start == state.committed) {
+                state.copy(committed = saved.end, committedBytes = saved.endBytes)
+            } else {
+                val range = state.deferred.first { it.start == saved.start }
+                val remaining = state.deferred.mapNotNull {
+                    if (it != range) it else if (saved.end == range.end) null
+                    else range.copy(start = saved.end, startBytes = saved.endBytes)
+                }
+                state.copy(deferred = remaining)
+            }
+            // The transcript is durable before the range is removed from the manifest.
+            storage.write(manifestKey, WireJson.encodeToString(next))
+            current.value = next
+            for (index in saved.start until saved.end) runCatching { storage.delete(chunkKey(index)) }
             runCatching { storage.delete("audio_draft_$id") }
         }
     }
@@ -107,9 +143,18 @@ internal fun retryableTranslationFailure(failure: TranslationFailure): Boolean {
         diagnostic.sessionCloseReason == "content" || isContentFilterCode(diagnostic.providerCode)) return false
     if (diagnostic.providerCode?.lowercase() in setOf("insufficient_quota", "quota_exceeded", "invalid_api_key", "authentication_error")) return false
     return diagnostic.code in setOf("TIMEOUT", "CONNECTION_CLOSED", "SESSION_EXPIRED", "DNS", "CONNECT", "NETWORK_UNKNOWN") ||
-        diagnostic.httpStatus in setOf(408, 429, 500, 502, 503, 504) ||
+        (diagnostic.httpStatus in setOf(408, 425, 429) || diagnostic.httpStatus?.let { it in 500..599 } == true) ||
         diagnostic.sessionCloseReason in setOf("expired", "connection_lost", "remote_hangup") ||
-        diagnostic.providerCode?.lowercase() in setOf("server_error", "internal_error", "service_unavailable", "rate_limit_exceeded")
+        diagnostic.providerType in setOf("server_error", "rate_limit_error") ||
+        diagnostic.providerCode?.lowercase() in setOf("server_error", "internal_error", "service_unavailable", "rate_limit_exceeded", "toomanyrequests", "session_expired", "session_timeout")
+}
+
+private fun ambiguousSessionRejection(failure: TranslationFailure): Boolean {
+    val diagnostic = failure.diagnostic ?: return false
+    val genericCodes = setOf("invalid_request_error", "invalid_request", "badrequest")
+    if (diagnostic.code != "PROVIDER_ERROR" || diagnostic.providerParam != null) return false
+    return diagnostic.providerCode?.lowercase() in genericCodes ||
+        (diagnostic.providerCode == null && diagnostic.providerType == "invalid_request_error")
 }
 
 /**
@@ -128,14 +173,17 @@ internal class RecoveringTranslationSession(
         settings: SessionSettings,
         audio: ReceiveChannel<ByteArray>,
         onReady: suspend () -> Unit,
-        onSnapshot: suspend (segment: Long, attempt: Int, events: List<TranscriptDelta>, complete: Boolean, publish: Boolean) -> Unit,
+        onSnapshot: suspend (segment: Long, attempt: Int, events: List<TranscriptDelta>, checkpoint: AudioWindowCheckpoint?, publish: Boolean) -> Unit,
         onNotice: suspend (TranslationNotice) -> Unit,
         onRetry: suspend (Int, TranslationFailure) -> Unit,
         onUsage: suspend (UsageSample) -> Unit,
         allowRetry: () -> Boolean,
         attemptId: () -> String,
         stopCapture: () -> Unit,
+        onAttempt: (Int, Long) -> Unit = { _, _ -> },
         contextForSegment: (Long) -> String = { "" },
+        recoverDeferred: Boolean = false,
+        onDeferred: (DeferredAudio) -> Unit = {},
     ) = coroutineScope {
         check(!journal.state.blocked) { "Content-filtered audio cannot be replayed" }
         val revision = MutableStateFlow(0L)
@@ -148,7 +196,7 @@ internal class RecoveringTranslationSession(
                 for (bytes in audio) {
                     try { journal.append(bytes) }
                     catch (cancelled: CancellationException) { throw cancelled }
-                    catch (_: Exception) { throw TranslationFailure("錄音無法寫入裝置，已停止收音。已保存的錄音與文字仍保留，請確認儲存空間。") }
+                    catch (failure: Exception) { throw TranslationFailure("錄音無法寫入裝置，已停止收音。已保存的錄音與文字仍保留，請確認儲存空間。", cause = failure) }
                     revision.value++
                 }
             } finally {
@@ -158,32 +206,55 @@ internal class RecoveringTranslationSession(
         } }
         var initial = true
         var retries = 0
+        var meetingWasReady = journal.state.committed > 0
+        // Only an explicit recovery run revisits previously deferred ranges.
+        val previousCursor = if (recoverDeferred) journal.state.committed else 0L
+        var deferredFloor = 0L
+        var audioRetryEnd: Long? = null
+        var retriedRejection = false
+        var omitRecentContext = false
         var attempt = 0
         var filtered = false
         try {
-            while (initial || !captureDone || journal.state.committed < journal.state.next) {
-                initial = false
+            while (true) {
                 currentCoroutineContext().ensureActive()
-                val start = journal.state.committed
-                val offset = journal.state.committedBytes
+                val state = journal.state
+                val deferred = state.deferred.firstOrNull { it.start >= deferredFloor && it.start < previousCursor }
+                if (!initial && captureDone && state.next == state.committed && deferred == null) break
+                initial = false
+                val start = deferred?.start ?: state.committed
+                val offset = deferred?.startBytes ?: state.committedBytes
                 // Drain an existing backlog promptly, rather than waiting for another full live window.
-                val replayEnd = if (replaying && journal.state.next > start) journal.state.next else Long.MAX_VALUE
-                val limit = if (replaying) minOf(windowBytes, 30L * 48_000) else windowBytes
+                val replayEnd = audioRetryEnd ?: deferred?.end ?: if (replaying && state.next > start) state.next else Long.MAX_VALUE
+                val limit = if (replaying || deferred != null) minOf(windowBytes, 30L * 48_000) else windowBytes
                 val queue = Channel<ByteArray>(1)
-                val events = mutableListOf<TranscriptDelta>()
+                var events: List<TranscriptDelta> = emptyList()
+                val publishLock = Mutex()
                 val currentAttempt = attempt++
+                onAttempt(currentAttempt, start)
                 val usagePrefix = attemptId()
                 transport.setUsageListener { onUsage(it.copy(id = "$usagePrefix:${it.id}")) }
                 var end = start
                 var endBytes = offset
                 var drained = false
+                val sessionSettings = if (omitRecentContext) settings else settings.withRecoveryContext(contextForSegment(start))
                 try {
                     coroutineScope {
+                        val paceReplay = audioRetryEnd != null || deferred != null
+                        val readyForReplay = CompletableDeferred<Unit>()
                         val feeder = launch {
+                            if (paceReplay) readyForReplay.await()
+                            var sentMillis = 0L
                             while (end < replayEnd && endBytes - offset < limit) {
                                 val observed = revision.value
                                 if (end < journal.state.next) {
                                     val bytes = journal.read(end)
+                                    if (paceReplay) {
+                                        // A fresh socket should not receive the rejected PCM in a single burst.
+                                        val audioMillis = (endBytes - offset) / 48
+                                        delay(audioMillis - sentMillis)
+                                        sentMillis = audioMillis
+                                    }
                                     queue.send(bytes)
                                     end++
                                     endBytes += bytes.size
@@ -194,16 +265,23 @@ internal class RecoveringTranslationSession(
                             queue.close()
                         }
                         try {
-                            transport.run(journal.state.connection, key, settings.withRecoveryContext(contextForSegment(start)), queue, onReady,
+                            transport.run(journal.state.connection, key, sessionSettings, queue, onReady = {
+                                onReady()
+                                meetingWasReady = true
+                                readyForReplay.complete(Unit)
+                            },
                                 onTranscript = { event ->
                                     if (event.startMs < 0 || event.endMs <= event.startMs || event.text.length > 65_536)
                                         throw TranslationFailure("服務回傳了無效的字幕時間或內容。")
                                     if (event.text.isNotEmpty()) {
-                                        events += event.copy(startMs = event.startMs + offset / 48, endMs = event.endMs + offset / 48)
+                                        // Source and translation workers may both emit while disk IO is suspended.
+                                        // Finish publishing each received delta before the next draft can replace it.
                                         withContext(NonCancellable) {
-                                            journal.saveDraft(events)
-                                            // Keep the previous received text visible while replay is incomplete.
-                                            onSnapshot(start, currentAttempt, events.toList(), false, !replaying)
+                                            publishLock.withLock {
+                                                events = events + event.copy(startMs = event.startMs + offset / 48, endMs = event.endMs + offset / 48)
+                                                journal.saveDraft(events)
+                                                onSnapshot(start, currentAttempt, events, null, !replaying && deferred == null)
+                                            }
                                         }
                                     }
                                 }, onNotice = { notice ->
@@ -217,19 +295,51 @@ internal class RecoveringTranslationSession(
                         } finally { feeder.cancelAndJoin() }
                     }
                     // Do not erase known text if the provider finishes a replay without returning it.
-                    onSnapshot(start, currentAttempt, events.toList(), true, true)
-                    if (end > start) journal.commit(end, endBytes)
+                    val checkpoint = AudioWindowCheckpoint(start, end, endBytes)
+                    onSnapshot(start, currentAttempt, events, checkpoint, true)
+                    if (end > start) journal.commit(checkpoint)
+                    audioRetryEnd = null
                     retries = 0
+                    retriedRejection = false
                     replaying = journal.state.bytes - journal.state.committedBytes > 5L * 48_000
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (failure: TranslationFailure) {
                     if (failure.diagnostic?.code in setOf("CONTENT_FILTER", "DISCONNECTED_AFTER_FILTER") ||
-                        failure.diagnostic?.sessionCloseReason == "content") {
+                        failure.diagnostic?.sessionCloseReason == "content" || isContentFilterCode(failure.diagnostic?.providerCode)) {
                         filtered = true
                         journal.blockReplay()
                     }
-                    if (filtered || !allowRetry() || !retryableTranslationFailure(failure)) throw failure
+                    if (filtered || !allowRetry()) throw failure
+                    val diagnostic = failure.diagnostic
+                    val audioRejected = meetingWasReady && end > start && diagnostic != null &&
+                        diagnostic.stage in setOf(FoundryStages.STREAM, FoundryStages.STOP) &&
+                        diagnostic.code == "PROVIDER_ERROR" && diagnostic.providerType == "invalid_request_error" &&
+                        diagnostic.providerParam == "audio" && diagnostic.providerCode in setOf(null, "invalid_request_error", "invalid_value", "invalid_parameter")
+                    if (audioRejected) {
+                        if (audioRetryEnd != null) {
+                            val range = deferred ?: DeferredAudio(start, offset, end, endBytes).also { journal.defer(it) }
+                            deferredFloor = range.end
+                            onDeferred(range)
+                            audioRetryEnd = null
+                            retriedRejection = false
+                            retries = 0
+                            replaying = journal.state.bytes - journal.state.committedBytes > 5L * 48_000
+                            continue
+                        }
+                        // Freeze the first attempted range. Audio captured during the retry belongs to the next window.
+                        audioRetryEnd = end
+                    } else if (!retryableTranslationFailure(failure)) {
+                        // A working meeting can lose its session mid-stream or during rollover. Never
+                        // continually resend the same rejected audio or retry an initial setup error.
+                        val addedContextRejected = sessionSettings != settings && diagnostic?.stage == FoundryStages.START &&
+                            (diagnostic.providerCode == "context_length_exceeded" ||
+                                (diagnostic.providerParam == "session.instructions" &&
+                                    diagnostic.providerType == "invalid_request_error"))
+                        if (!meetingWasReady || retriedRejection || !(ambiguousSessionRejection(failure) || addedContextRejected)) throw failure
+                        retriedRejection = true
+                        if (sessionSettings != settings && diagnostic?.stage == FoundryStages.START) omitRecentContext = true
+                    }
                     replaying = true
                     retries++
                     onRetry(retries, failure)

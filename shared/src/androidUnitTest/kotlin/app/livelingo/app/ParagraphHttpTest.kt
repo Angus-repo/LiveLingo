@@ -86,7 +86,7 @@ class ParagraphHttpTest {
                 val restored = unpunctuated.copy(paragraphLayouts = formatter.finish(connection, "isolated-test-secret", "my-text-model", unpunctuated))
                 val displayed = liveCaptionText(restored, TranscriptChannel.INPUT)
                 assertEquals("今天確認付款流程明天討論整合測試。\n\n最後決定部署時間。", displayed)
-                assertEquals("〔原文補充〕\n$displayed", liveCaptionText(restored, TranscriptChannel.OUTPUT))
+                assertEquals("", liveCaptionText(restored, TranscriptChannel.OUTPUT))
                 assertEquals(raw, restored.fragments.single().text)
                 val punctuationRequest = assertNotNull(server.takeRequest(2, TimeUnit.SECONDS)).body.readUtf8()
                 val punctuationPayload = WireJson.parseToJsonElement(punctuationRequest).jsonObject

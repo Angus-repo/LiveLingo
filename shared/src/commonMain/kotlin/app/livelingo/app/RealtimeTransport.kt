@@ -9,14 +9,43 @@ import kotlin.time.TimeSource
 
 class ModelTranslationTransport(clientFactory: () -> HttpClient) : TranslationTransport {
     private val live = KtorFoundryTransport(clientFactory())
-    private val realtime = RealtimeTransport(KtorFoundrySocketFactory(clientFactory()), HttpTextTranslator(clientFactory()))
+    private val translator = HttpTextTranslator(clientFactory())
+    private val realtime = RealtimeTransport(KtorFoundrySocketFactory(clientFactory()), translator)
     override fun setUsageListener(listener: suspend (UsageSample) -> Unit) {
         live.setUsageListener(listener); realtime.setUsageListener(listener)
     }
     private fun transport(connection: FoundryConnection): TranslationTransport = if (connection.speechModel == SpeechModel.GPT_LIVE) live else realtime
     override suspend fun run(connection: FoundryConnection, apiKey: String, settings: SessionSettings, audio: ReceiveChannel<ByteArray>,
-        onReady: suspend () -> Unit, onTranscript: suspend (TranscriptDelta) -> Unit, onNotice: suspend (TranslationNotice) -> Unit) =
-        transport(connection).run(connection, apiKey, settings, audio, onReady, onTranscript, onNotice)
+        onReady: suspend () -> Unit, onTranscript: suspend (TranscriptDelta) -> Unit, onNotice: suspend (TranslationNotice) -> Unit) {
+        val service = transport(connection)
+        if (connection.speechModel.transcribes) {
+            service.run(connection, apiKey, settings, audio, onReady, onTranscript, onNotice)
+            return
+        }
+        coroutineScope {
+            val missing = MissingVoiceTranslation()
+            val output = Channel<TranscriptDelta>(32)
+            launch {
+                deliverVoiceOutput(output, settings.targetLanguage,
+                    repair = { text -> translator.translate(connection, apiKey, settings, text, "") },
+                    emit = onTranscript)
+            }
+            try {
+                service.run(connection, apiKey, settings, audio, onReady, onTranscript = {
+                    missing.observe(it)
+                    if (it.channel == TranscriptChannel.INPUT) onTranscript(it) else output.send(it)
+                }, onNotice = { notice ->
+                    if (notice.diagnostic.code == "CONTENT_FILTER") missing.disable()
+                    onNotice(notice)
+                })
+                // Only after a normal drain can we tell whether this window had any output.
+                // The source and target timelines cannot establish coverage of individual clauses.
+                missing.finish { source ->
+                    onTranscript(source.translateOrDefer { translator.translate(connection, apiKey, settings, it, "") })
+                }
+            } finally { output.close() }
+        }
+    }
     override suspend fun probe(connection: FoundryConnection, apiKey: String) = transport(connection).probe(connection, apiKey)
     override fun close() { live.close(); realtime.close() }
 }
@@ -28,6 +57,7 @@ internal class CommittedTranscriptBuffer {
     private val completedIds = ArrayDeque<String>()
     private val partials = linkedMapOf<String, String>()
     private var committedEnd = 0L
+    val size: Int get() = turns.size
     val empty: Boolean get() = turns.isEmpty()
     fun commit(end: Long) {
         require(end > committedEnd)
@@ -152,7 +182,7 @@ internal class RealtimeTransport(
                 withTimeout(startupTimeoutMillis) {
                     active.send(realtimeStartPayload(connection, settings))
                     while (true) {
-                        val event = checked(active.receive() ?: throw TranslationFailure("服務在準備完成前中斷。"))
+                        val event = checked(active.receive() ?: throw TranslationFailure("服務在準備完成前中斷。", FoundryDiagnostic(stage, "CONNECTION_CLOSED")))
                         when (event.eventString("type")) {
                             "session.updated", "transcription_session.updated" -> {
                                 val id = (event["session"] as? JsonObject)?.eventString("id")
@@ -170,15 +200,23 @@ internal class RealtimeTransport(
                 checkpoint()
                 onReady()
                 val done = CompletableDeferred<Unit>()
-                val translations = Channel<TranscriptDelta>(12)
+                val turnSlots = kotlinx.coroutines.sync.Semaphore(12)
+                // A two-minute recovery window produces at most 41 three-second commits.
+                val translations = Channel<TranscriptDelta>(48)
                 val worker = if (transcribes) launch {
                     var context = ""
                     var previousOutput = ""
                     for (source in translations) {
                         if (connection.textDeployment.isBlank()) throw TranslationFailure("轉錄方案需要設定文字翻譯模型。")
-                        val output = translator.translate(connection, key, settings, source.text, context)
+                        val result = source.translateOrDefer { translator.translate(connection, key, settings, it, context) }
+                        if (result.translationPending) {
+                            onTranscript(result)
+                            context = (context + "\nOriginal: " + source.text).takeLast(2500)
+                            continue
+                        }
+                        val output = result.text
                         val separated = separatedTranscript(previousOutput, output)
-                        onTranscript(source.copy(channel = TranscriptChannel.OUTPUT, text = separated))
+                        onTranscript(result.copy(text = separated))
                         previousOutput = separated.takeLast(1)
                         context = (context + "\nOriginal: " + source.text + "\nTranslation: " + output).takeLast(2500)
                     }
@@ -205,9 +243,12 @@ internal class RealtimeTransport(
                             "input_audio_buffer.committed" -> pending.acknowledge(event.eventString("item_id"))
                             "conversation.item.input_audio_transcription.delta" -> if (transcribes) pending.partial(event)
                             "conversation.item.input_audio_transcription.completed" -> if (transcribes) {
-                                for (source in pending.complete(event)) {
+                                val before = pending.size
+                                val completed = pending.complete(event)
+                                repeat(before - pending.size) { turnSlots.release() }
+                                for (source in completed) {
                                     emitInput(source)
-                                    if (!translations.trySend(source).isSuccess) throw TranslationFailure("文字翻譯速度落後，已停止收音並保留原文；請選擇較快的文字模型。")
+                                    translations.send(source)
                                 }
                                 if (stopping && pending.empty) { done.complete(Unit); return@launch }
                             }
@@ -224,6 +265,8 @@ internal class RealtimeTransport(
                             val padding = ByteArray((4800 - uncommittedBytes).toInt())
                             active.sendBounded(realtimeAudioPayload(connection.speechModel, padding), stage); audioBytes += padding.size
                         }
+                        withTimeoutOrNull(drainTimeoutMillis) { turnSlots.acquire(); true }
+                            ?: throw TranslationFailure("等待轉錄進度逾時。", FoundryDiagnostic(stage, "TIMEOUT"))
                         pending.commit(audioBytes / 48)
                         active.sendBounded(TRANSCRIPTION_COMMIT_PAYLOAD, stage)
                         uncommittedBytes = 0
@@ -247,7 +290,7 @@ internal class RealtimeTransport(
                 withTimeout(drainTimeoutMillis + if (ahead > 5_000) ahead else 0) { done.await() }
                 receiver.cancelAndJoin()
                 translations.close()
-                withTimeout(60_000) { worker?.join() }
+                worker?.join()
             }
         } catch (cancelled: CancellationException) {
             if (cancelled is TimeoutCancellationException) {
@@ -262,7 +305,7 @@ internal class RealtimeTransport(
                 TranslationFailure(failure.message.orEmpty(), FoundryDiagnostic(stage, "PROTOCOL")) else classifyFoundryFailure(failure, stage)
             val code = withTimeoutOrNull(150) { runCatching { socket?.peerCloseCode() }.getOrNull() }
             throw TranslationFailure(safeDiagnosticField(safe.message.orEmpty(), key),
-                (safe.diagnostic ?: FoundryDiagnostic(stage, "SESSION_FAILURE")).copy(webSocketCloseCode = safeWebSocketCloseCode(code)))
+                (safe.diagnostic ?: FoundryDiagnostic(stage, "SESSION_FAILURE")).copy(webSocketCloseCode = safeWebSocketCloseCode(code)), cause = failure)
         } finally {
             withContext(NonCancellable) {
                 try { checkpoint() } finally { withTimeoutOrNull(2000) { runCatching { socket?.close() } }; socket?.cancel() }

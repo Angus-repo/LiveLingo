@@ -58,8 +58,8 @@ class LiveSubtitleDisplayTest {
         )
         val record = TranscriptRecord("rec", "會議", 1000, SessionSettings(), fragments)
         assertEquals(listOf("原文一", "原文二"), displayCues(record, TranscriptChannel.INPUT).map { it.text })
-        assertEquals(listOf("譯文一", "譯文二"), displayCues(record, TranscriptChannel.OUTPUT).filterNot { "原文補充" in it.text }.map { it.text })
-        assertTrue(liveCaptionText(record, TranscriptChannel.OUTPUT).contains("原文一原文二"))
+        assertEquals(listOf("譯文一", "譯文二"), displayCues(record, TranscriptChannel.OUTPUT).map { it.text })
+        assertEquals("譯文一譯文二", liveCaptionText(record, TranscriptChannel.OUTPUT))
     }
 
     @Test fun liveCueAggregationKeepsLastLineAndDoesNotTruncateHistory() {
@@ -71,8 +71,7 @@ class LiveSubtitleDisplayTest {
         assertEquals(11, cues.size)
         assertEquals("文字0", cues.first().text)
         assertEquals("文字10", cues.last().text)
-        assertTrue(liveCaptionText(record, TranscriptChannel.OUTPUT).contains("文字10"))
-        assertTrue(liveCaptionText(record, TranscriptChannel.OUTPUT).contains("原文補充"))
+        assertEquals("", liveCaptionText(record, TranscriptChannel.OUTPUT))
     }
 
     @Test fun adjacentDeltasAreMergedWithoutExtraSpaces() {

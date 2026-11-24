@@ -13,7 +13,8 @@ val WireJson: Json = Json {
 }
 
 @Serializable
-data class TranscriptDelta(val channel: TranscriptChannel, val text: String, val startMs: Long, val endMs: Long)
+data class TranscriptDelta(val channel: TranscriptChannel, val text: String, val startMs: Long, val endMs: Long,
+    val translationPending: Boolean = false)
 
 sealed interface FoundryEvent {
     data class Ready(val sessionId: String) : FoundryEvent

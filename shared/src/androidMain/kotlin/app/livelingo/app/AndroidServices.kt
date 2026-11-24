@@ -6,6 +6,17 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.AtomicFile
 import android.util.Base64
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.os.Build
+import android.widget.Toast
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContracts
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.activity.ComponentActivity
 import androidx.core.content.FileProvider
 import androidx.lifecycle.DefaultLifecycleObserver
@@ -31,6 +42,24 @@ class AndroidSessionHost internal constructor(context: Context) {
     private val mic = AndroidMicrophone(appContext)
     private val textExporter = AndroidTextExporter(appContext)
     val services: PlatformServices = object : PlatformServices {
+        override val diagnosticPlatform: String get() = "Android API ${Build.VERSION.SDK_INT}"
+        override fun diagnosticNetwork(): String {
+            val manager = appContext.getSystemService(ConnectivityManager::class.java) ?: return "unknown"
+            val active = manager.activeNetwork ?: return "offline"
+            val caps = manager.getNetworkCapabilities(active) ?: return "unknown"
+            val kind = when {
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) -> "vpn"
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
+                else -> "other"
+            }
+            return "$kind validated=${caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)}"
+        }
+        override fun diagnosticLocation(error: Throwable): String? = error.stackTrace.firstOrNull {
+            it.className.startsWith("app.livelingo.") && it.lineNumber > 0 &&
+                it.fileName?.matches(Regex("[A-Za-z0-9_]+\\.kt")) == true
+        }?.let { "${it.fileName}:${it.lineNumber}" }
         override val storage: LocalStorage = AndroidStorage(appContext)
         override val microphone: Microphone = mic
         override val exporter: TextExporter = textExporter
@@ -123,8 +152,47 @@ private class AndroidStorage(context: Context) : LocalStorage {
 private class AndroidTextExporter(private val appContext: Context) : TextExporter {
     @Volatile private var foregroundActivity: WeakReference<ComponentActivity>? = null
 
+    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val snapshot = File(appContext.cacheDir, "pending-diagnostic.txt")
+    private var saveLauncher: ActivityResultLauncher<String>? = null
+    private var saving = false
+
     fun attach(activity: ComponentActivity) {
         foregroundActivity = WeakReference(activity)
+        // A stable registry key and a private snapshot survive rotation / process recreation in the picker.
+        saveLauncher = activity.activityResultRegistry.register("livelingo.saveDiagnostic", activity,
+            ActivityResultContracts.CreateDocument("text/plain")) { uri ->
+            if (uri == null) {
+                snapshot.delete()
+                saving = false
+            } else ioScope.launch {
+                saving = true
+                val saved = withContext(Dispatchers.IO) {
+                    runCatching {
+                        snapshot.inputStream().use { input ->
+                            checkNotNull(appContext.contentResolver.openOutputStream(uri, "wt")).use { input.copyTo(it) }
+                        }
+                    }.isSuccess
+                }
+                snapshot.delete()
+                saving = false
+                Toast.makeText(appContext, if (saved) "診斷紀錄已儲存" else "診斷紀錄儲存失敗，請重新下載。", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    override fun saveDiagnostic(fileName: String, text: String) {
+        val launcher = checkNotNull(saveLauncher)
+        if (saving) return
+        saving = true
+        try {
+            snapshot.writeText(text, Charsets.UTF_8)
+            launcher.launch(fileName)
+        } catch (failure: Exception) {
+            saving = false
+            snapshot.delete()
+            throw failure
+        }
     }
 
     override fun export(fileName: String, mimeType: String, text: String) {

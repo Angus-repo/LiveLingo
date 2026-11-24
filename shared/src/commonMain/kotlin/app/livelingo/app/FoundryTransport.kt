@@ -14,7 +14,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlin.time.TimeSource
 import kotlinx.serialization.json.*
 
-class TranslationFailure(message: String, val diagnostic: FoundryDiagnostic? = null) : Exception(message)
+class TranslationFailure(message: String, val diagnostic: FoundryDiagnostic? = null, cause: Throwable? = null) : Exception(message, cause)
 data class TranslationNotice(val message: String, val diagnostic: FoundryDiagnostic, val sessionEnded: Boolean = false)
 
 interface TranslationTransport {
@@ -190,10 +190,10 @@ class KtorFoundryTransport internal constructor(
         var pendingFilter: FoundryDiagnostic? = null
         fun providerMessage(value: String): String =
             if (connection.provider == ModelProvider.OPENAI) value.replace("Foundry", "OpenAI").replace("部署", "模型") else value
-        fun redacted(failure: TranslationFailure): TranslationFailure {
+        fun redacted(failure: TranslationFailure, original: Throwable = failure): TranslationFailure {
             val diagnostic = failure.diagnostic
             return TranslationFailure(providerMessage(failure.message ?: "服務工作階段失敗。"), diagnostic?.copy(
-                requestId = safeRequestId(diagnostic.requestId, key), minimalProbe = minimalProbe))
+                requestId = safeRequestId(diagnostic.requestId, key), minimalProbe = minimalProbe), cause = original)
         }
         fun disconnectedAfterFilter(): TranslationFailure = TranslationFailure(
             "Foundry 在內容篩選通知後斷線，但未回報工作階段結束原因。已收到的字幕已保留；可開始下一段收取新的音訊。若持續發生，請將診斷交給資源管理者確認。",
@@ -328,10 +328,10 @@ class KtorFoundryTransport internal constructor(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: TranslationFailure) {
-            throw redacted(withCloseDetails(if (failure.diagnostic != null) failure else TranslationFailure(failure.message ?: "Foundry 工作階段失敗。", FoundryDiagnostic(stage, "SESSION_FAILURE"))))
+            throw redacted(withCloseDetails(if (failure.diagnostic != null) failure else TranslationFailure(failure.message ?: "Foundry 工作階段失敗。", FoundryDiagnostic(stage, "SESSION_FAILURE"))), original = failure)
         } catch (failure: Exception) {
             throw redacted(withCloseDetails(if (pendingFilter != null) disconnectedAfterFilter()
-            else classifyFoundryFailure(failure, stage)))
+            else classifyFoundryFailure(failure, stage)), original = failure)
         } finally {
             sender?.cancel()
             drainDeadline?.cancel()

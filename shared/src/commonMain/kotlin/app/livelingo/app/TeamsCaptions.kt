@@ -13,7 +13,7 @@ internal interface TeamsCaptionInput {
 }
 
 internal fun TranscriptRecord.pendingCaptions(): List<TranscriptFragment> {
-    if (settings.audioSource != AudioSource.TEAMS_CAPTIONS) return emptyList()
+    if (settings.audioSource != AudioSource.TEAMS_CAPTIONS) return pendingTranslations.sortedBy { it.startMs }
     val translated = fragments.filter { it.channel == TranscriptChannel.OUTPUT }.mapTo(mutableSetOf()) { it.id }
     return fragments.filter { it.channel == TranscriptChannel.INPUT && "translation-${it.id}" !in translated }
 }
@@ -65,6 +65,7 @@ internal suspend fun processTeamsCaptions(
     translate: suspend (TranscriptFragment) -> String,
     saveOutput: suspend (TranscriptFragment, String) -> Unit,
     onStatus: (String?) -> Unit,
+    onFailure: (Exception) -> Unit = {},
 ) = coroutineScope {
     val changed = Channel<Unit>(Channel.CONFLATED)
     if (incoming != null) launch {
@@ -72,21 +73,25 @@ internal suspend fun processTeamsCaptions(
             for (caption in incoming) { saveInput(caption); changed.trySend(Unit) }
         } finally { stop.complete(Unit); changed.close() }
     }
+    val deferred = mutableSetOf<String>()
     var backoff = 2_000L
     while (!stop.isCompleted) {
         val queue = pending()
-        val first = queue.firstOrNull()
+        val first = queue.firstOrNull { it.id !in deferred }
         if (first == null) {
-            onStatus(null)
+            onStatus(if (queue.isEmpty()) null else "另有 ${queue.size} 段保留待補譯。")
             if (incoming == null || changed.receiveCatching().isClosed) break
             continue
         }
         onStatus("等待補譯 ${queue.size} 段")
         val translated = try { translate(first) } catch (failure: Exception) {
             currentCoroutineContext().ensureActive()
-            val http = (failure as? TranslationFailure)?.diagnostic?.httpStatus
-            val permanent = if (http == null) failure is TranslationFailure
-                else http !in 500..599 && http !in setOf(408, 425, 429)
+            onFailure(failure)
+            if (failure is TranslationFailure && failure.targetLanguageMismatch) {
+                deferred += first.id
+                continue
+            }
+            val permanent = failure is TranslationFailure && !retryableTranslationFailure(failure)
             if (permanent) {
                 onStatus(failure.message ?: "文字服務拒絕請求。原文已保存，可停止後從逐字稿補譯。")
                 if (incoming != null) stop.await()

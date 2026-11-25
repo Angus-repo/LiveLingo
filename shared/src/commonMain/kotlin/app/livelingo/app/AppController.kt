@@ -560,7 +560,8 @@ class AppController(
                             // A replay may return an empty channel. Never remove text already received there.
                             val preserved = if (complete) existing.filter { old -> fragments.none { it.channel == old.channel } } else emptyList()
                             val changed = complete && existing.isNotEmpty() && existing.map { it.text } != fragments.map { it.text }
-                            val snapshotIds = fragments.map { it.id }.toSet()
+                            // Also evict superseded preview fragments from the draft of this replay attempt.
+                            val snapshotIds = events.indices.mapTo(mutableSetOf()) { "$transcriptAttemptId-$segment-$attempt-$it" }
                             val updated = if (!publish) current.copy(recoveredText =
                                 current.recoveredText.filterNot { it.id in snapshotIds } + fragments)
                             else current.copy(

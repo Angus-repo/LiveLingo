@@ -77,7 +77,7 @@ class TargetLanguageOutputTest {
             accept(TranscriptDelta(TranscriptChannel.INPUT, "現在開始。 Next point.", 0, 1000))
             accept(TranscriptDelta(TranscriptChannel.OUTPUT, "Starting now.", 0, 1200))
         }
-        assertEquals(listOf("Starting now.", "Next point."), output(events))
+        assertEquals("Starting now. Next point.", output(events).joinToString(""))
     }
 
     @Test fun repeatedChineseIsKeptForEachUtteranceAndMixedSentenceUsesTranslator() = runTest {
@@ -87,6 +87,19 @@ class TargetLanguageOutputTest {
             accept(TranscriptDelta(TranscriptChannel.OUTPUT, "收到。", 3000, 3800))
         }
         assertEquals(listOf("收到。", "收到。", "請檢查狀態。"), output(events))
+    }
+
+    @Test fun switchWithoutPunctuationAndDecimalSplitAcrossPacketsKeepTheirContents() = runTest {
+        val events = mutableListOf<TranscriptDelta>()
+        completeVoiceCaptions(Language.ZH_TW, { text ->
+            assertEquals("Amount is 3.14", text)
+            "金額為 3.14。"
+        }, { events += it }) { accept, _ ->
+            accept(TranscriptDelta(TranscriptChannel.INPUT, "Amount is 3.", 0, 300))
+            accept(TranscriptDelta(TranscriptChannel.INPUT, "14", 300, 600))
+            accept(TranscriptDelta(TranscriptChannel.INPUT, "接着说中文", 600, 1000))
+        }
+        assertEquals("金額為 3.14。接著說中文", output(events).joinToString(""))
     }
 
     @Test fun voiceRepairCanDeferAnUntranslatedSpanAndDeliverLaterSpeech() = runTest {

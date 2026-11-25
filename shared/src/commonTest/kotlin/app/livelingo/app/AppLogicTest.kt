@@ -198,6 +198,38 @@ class AppLogicTest {
         restored.dispose()
     }
 
+    @Test fun bilingualTranslationSurvivesStopReopenAndSubtitleExport() = runTest {
+        val services = configuredServices()
+        val repository = AppRepository(services.memory)
+        repository.savePreferences(repository.preferences().copy(aiParagraphs = false))
+        val transport = ScriptTransport { audio, ready, emit, _ ->
+            ready()
+            completeVoiceCaptions(Language.ZH_TW, { assertEquals("Morning.", it); "早安。" }, emit) { accept, _ ->
+                audio.receive()
+                accept(TranscriptDelta(TranscriptChannel.INPUT, "Morning.", 0, 700))
+                accept(TranscriptDelta(TranscriptChannel.OUTPUT, "早安。", 4000, 4500))
+                accept(TranscriptDelta(TranscriptChannel.INPUT, "开会吧。", 800, 1400))
+                accept(TranscriptDelta(TranscriptChannel.OUTPUT, "開始開會。", 5000, 5500))
+                for (chunk in audio) { /* wait for the user to stop */ }
+            }
+        }
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
+        controller.start(); runCurrent()
+        services.mic.emit(ByteArray(4800))
+        val expected = "早安。開會吧。"
+        controller.state.first { liveCaptionText(it.current, TranscriptChannel.OUTPUT) == expected }
+        controller.stop()
+        controller.state.first { it.phase == ConnectionPhase.IDLE }
+        controller.dispose()
+        val saved = AppRepository(services.memory).history().single()
+        assertEquals(expected, liveCaptionText(saved, TranscriptChannel.OUTPUT))
+        for (export in listOf(SubtitleExporter.srt(saved, TranscriptChannel.OUTPUT), SubtitleExporter.vtt(saved, TranscriptChannel.OUTPUT))) {
+            assertEquals(1, Regex("早安。").findAll(export).count())
+            assertEquals(1, Regex("開會吧。").findAll(export).count())
+            assertFalse("Morning" in export || "開始開會" in export)
+        }
+    }
+
     @Test fun outputWaitsForTheTranslationAndDisplaysItOnce() = runTest {
         val services = configuredServices()
         val transport = FakeTransport()

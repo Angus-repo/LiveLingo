@@ -78,7 +78,7 @@ internal suspend fun deliverVoiceOutput(
         }
         if (next == null) { flush(); continue }
         val delta = next.getOrNull() ?: break
-        if (pending?.voiceOrigin != delta.voiceOrigin) flush()
+        if (pending != null && pending?.voiceOrigin != delta.voiceOrigin) flush()
         val old = pending
         val span = old?.copy(text = old.text + delta.text, startMs = minOf(old.startMs, delta.startMs),
             endMs = maxOf(old.endMs, delta.endMs)) ?: delta
@@ -172,7 +172,7 @@ internal fun localChinese(text: String, target: Language): String? =
     if (target == Language.ZH_TW && text.any { it.han() } && text.none { it.isLetter() && !it.han() })
         TaiwanText.convert(text) else null
 
-private val sentenceEnd = Regex("""[。！？!?\n]+|\.(?=\s|$)""")
+private val sentenceEnd = Regex("""[。！？!?\n]+|\.(?=\s|[\u3400-\u9fff]|$)""")
 
 /** Split a single provider delta containing multiple sentences without inventing word timestamps. */
 internal fun sentencePieces(text: String): List<String> = buildList {
@@ -196,7 +196,8 @@ private suspend fun deliverSourceSentences(input: ReceiveChannel<TranscriptDelta
         if (source.text.isBlank()) return
         val result = source.translateOrDefer { localChinese(it, target) ?: translate(it) }
         val separated = if (result.translationPending) result else
-            result.copy(text = separatedTranscript(previousOutput, result.text)).also { previousOutput = it.text.takeLast(1) }
+            result.copy(text = if (previousOutput in listOf(".", "?", "!") && result.text.firstOrNull()?.latin() == true)
+                " " + result.text else separatedTranscript(previousOutput, result.text)).also { previousOutput = it.text.takeLast(1) }
         emit(separated.copy(voiceOrigin = VoiceOrigin.FROM_SOURCE))
     }
     while (true) {
@@ -207,11 +208,21 @@ private suspend fun deliverSourceSentences(input: ReceiveChannel<TranscriptDelta
         if (next == null) { flush(); continue }
         val delta = next.getOrNull() ?: break
         if (pending?.let { delta.startMs - it.endMs >= 1_500 } == true) flush()
+        val tail = pending?.text
+        if (tail != null && delta.text.isNotBlank()) {
+            val changesToChinese = target == Language.ZH_TW && tail.any { it.latin() } && !tail.any { it.han() } &&
+                localChinese(delta.text, target) != null
+            val decimalContinues = tail.endsWith('.') && tail.getOrNull(tail.lastIndex - 1)?.isDigit() == true &&
+                delta.text.first().isDigit()
+            if (changesToChinese || (tail.endsWith('.') && !decimalContinues)) flush()
+        }
         for (piece in sentencePieces(delta.text)) {
             val old = pending
             pending = if (old == null) delta.copy(text = piece) else old.copy(
                 text = old.text + piece, endMs = maxOf(old.endMs, delta.endMs))
-            if (sentenceEnd.find(piece)?.range?.last == piece.lastIndex || pending!!.text.length >= 1800) flush()
+            // A period at the end of a packet can be the first half of a decimal.
+            val possibleDecimal = piece.endsWith('.') && piece.getOrNull(piece.lastIndex - 1)?.isDigit() == true
+            if ((!possibleDecimal && sentenceEnd.containsMatchIn(piece)) || pending!!.text.length >= 1800) flush()
         }
     }
     flush()

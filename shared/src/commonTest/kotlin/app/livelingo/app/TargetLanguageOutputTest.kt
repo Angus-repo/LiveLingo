@@ -3,6 +3,9 @@ package app.livelingo.app
 import app.livelingo.core.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlin.test.*
 
 class TargetLanguageOutputTest {
@@ -21,19 +24,69 @@ class TargetLanguageOutputTest {
         assertFalse(needsTargetTranslation("API를 호출합니다.", Language.KOREAN))
     }
 
-    @Test fun inputOnlyWindowsRequestTranslationOnceAndLateOrFilteredOutputDoesNotTriggerFallback() = runTest {
-        val original = TranscriptDelta(TranscriptChannel.INPUT, "Call ", 0, 500)
-        val rest = original.copy(text = "again.", startMs = 500, endMs = 900)
-        for (mode in listOf("missing", "arrived", "filtered")) {
-            val window = MissingVoiceTranslation()
-            window.observe(original)
-            window.observe(rest)
-            if (mode == "arrived") window.observe(rest.copy(channel = TranscriptChannel.OUTPUT, text = "再打一次。"))
-            if (mode == "filtered") window.disable()
-            val submitted = mutableListOf<TranscriptDelta>()
-            window.finish { submitted += it }
-            assertEquals(if (mode == "missing") listOf(original.copy(text = "Call again.", endMs = 900)) else emptyList(), submitted)
+    @Test fun sourceOnlyForeignSpeechIsTranslatedOnceAndNativeOnlyRemainsAvailable() = runTest {
+        for (mode in listOf("missing", "native", "output only", "filtered")) {
+            val events = mutableListOf<TranscriptDelta>()
+            var calls = 0
+            completeVoiceCaptions(Language.ZH_TW, { assertEquals("Call again.", it); calls++; "再打一次。" }, { events += it }) { accept, filtered ->
+                if (mode != "output only") {
+                    accept(TranscriptDelta(TranscriptChannel.INPUT, "Call ", 0, 500))
+                    accept(TranscriptDelta(TranscriptChannel.INPUT, "again.", 500, 900))
+                }
+                if (mode == "native" || mode == "output only") accept(TranscriptDelta(TranscriptChannel.OUTPUT, "再打一次。", 6000, 6600))
+                if (mode == "filtered") filtered()
+            }
+            assertEquals(if (mode == "missing") 1 else 0, calls)
+            assertEquals(if (mode == "filtered") emptyList() else listOf("再打一次。"), output(events))
         }
+    }
+
+    private fun output(events: List<TranscriptDelta>) = events.visibleVoiceEvents().map { it.value }
+        .filter { it.channel == TranscriptChannel.OUTPUT }.map { it.text }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test fun englishThenChineseThenEnglishIsCompleteLiveAndAfterLateNativeOutput() = runTest {
+        val events = mutableListOf<TranscriptDelta>()
+        val requested = mutableListOf<String>()
+        completeVoiceCaptions(Language.ZH_TW, { text ->
+            requested += text
+            when (text.trim()) { "First." -> "首先。"; "Last." -> "最後。"; else -> error(text) }
+        }, { events += it }) { accept, _ ->
+            accept(TranscriptDelta(TranscriptChannel.INPUT, "First.", 0, 600))
+            accept(TranscriptDelta(TranscriptChannel.OUTPUT, "首先。", 8000, 8600))
+            runCurrent()
+            assertEquals(listOf("首先。"), output(events))
+            accept(TranscriptDelta(TranscriptChannel.INPUT, "请检查", 700, 1200))
+            accept(TranscriptDelta(TranscriptChannel.INPUT, "网络", 1200, 1500))
+            advanceTimeBy(1501); runCurrent()
+            assertEquals(listOf("首先。", "請檢查網路"), output(events))
+            accept(TranscriptDelta(TranscriptChannel.OUTPUT, "請檢查網路。", 9000, 9500))
+            accept(TranscriptDelta(TranscriptChannel.INPUT, "Last.", 2000, 2600))
+        }
+        assertEquals(listOf("首先。", "請檢查網路", "最後。"), output(events))
+        assertEquals(listOf("First.", "Last."), requested)
+        assertEquals(listOf(0L, 700L, 2000L), events.filter { it.voiceOrigin == VoiceOrigin.FROM_SOURCE }.map { it.startMs })
+        assertEquals(4, events.visibleVoiceEvents().count { it.value.channel == TranscriptChannel.INPUT })
+    }
+
+    @Test fun targetEnglishReceivesBothLanguagesAndHandlesOneMixedSourceEvent() = runTest {
+        val events = mutableListOf<TranscriptDelta>()
+        completeVoiceCaptions(Language.ENGLISH, { text ->
+            when (text.trim()) { "現在開始。" -> "Starting now."; "Next point." -> "Next point."; else -> error(text) }
+        }, { events += it }) { accept, _ ->
+            accept(TranscriptDelta(TranscriptChannel.INPUT, "現在開始。 Next point.", 0, 1000))
+            accept(TranscriptDelta(TranscriptChannel.OUTPUT, "Starting now.", 0, 1200))
+        }
+        assertEquals(listOf("Starting now.", "Next point."), output(events))
+    }
+
+    @Test fun repeatedChineseIsKeptForEachUtteranceAndMixedSentenceUsesTranslator() = runTest {
+        val events = mutableListOf<TranscriptDelta>()
+        completeVoiceCaptions(Language.ZH_TW, { text -> assertEquals("請 check status。", text); "請檢查狀態。" }, { events += it }) { accept, _ ->
+            accept(TranscriptDelta(TranscriptChannel.INPUT, "收到。收到。請 check status。", 0, 2000))
+            accept(TranscriptDelta(TranscriptChannel.OUTPUT, "收到。", 3000, 3800))
+        }
+        assertEquals(listOf("收到。", "收到。", "請檢查狀態。"), output(events))
     }
 
     @Test fun voiceRepairCanDeferAnUntranslatedSpanAndDeliverLaterSpeech() = runTest {

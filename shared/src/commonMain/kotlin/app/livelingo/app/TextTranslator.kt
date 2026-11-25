@@ -43,6 +43,20 @@ internal class HttpTextTranslator(private val original: HttpClient) : TextTransl
         install(HttpTimeout) { requestTimeoutMillis = 20_000; socketTimeoutMillis = 20_000 }
     }
     override suspend fun translate(connection: FoundryConnection, key: String, settings: SessionSettings, text: String, context: String): String {
+        localChinese(text, settings.targetLanguage)?.let { return it }
+        val pieces = sentencePieces(text)
+        if (pieces.size > 1 && pieces.any { localChinese(it, settings.targetLanguage) != null }) {
+            return buildString {
+                for (piece in pieces) {
+                    if (piece.isBlank()) append(piece)
+                    else append(localChinese(piece, settings.targetLanguage) ?: translated(connection, key, settings, piece, context))
+                }
+            }
+        }
+        return translated(connection, key, settings, text, context)
+    }
+
+    private suspend fun translated(connection: FoundryConnection, key: String, settings: SessionSettings, text: String, context: String): String {
         val first = request(connection, key, settings, text, context, retry = false)
         if (!needsTargetTranslation(first, settings.targetLanguage)) return first
         val revised = request(connection, key, settings, text, context, retry = true)

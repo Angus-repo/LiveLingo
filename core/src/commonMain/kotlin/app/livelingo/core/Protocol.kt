@@ -14,7 +14,16 @@ val WireJson: Json = Json {
 
 @Serializable
 data class TranscriptDelta(val channel: TranscriptChannel, val text: String, val startMs: Long, val endMs: Long,
-    val translationPending: Boolean = false)
+    val translationPending: Boolean = false, val voiceOrigin: VoiceOrigin = VoiceOrigin.STANDARD)
+
+@Serializable
+enum class VoiceOrigin { STANDARD, NATIVE_PREVIEW, FROM_SOURCE }
+
+/** Keep the original indices: they are used for durable fragment identities during replay. */
+fun List<TranscriptDelta>.visibleVoiceEvents(): List<IndexedValue<TranscriptDelta>> {
+    val hasSourceResult = any { it.voiceOrigin == VoiceOrigin.FROM_SOURCE }
+    return withIndex().filter { !hasSourceResult || it.value.voiceOrigin != VoiceOrigin.NATIVE_PREVIEW }
+}
 
 sealed interface FoundryEvent {
     data class Ready(val sessionId: String) : FoundryEvent

@@ -1,6 +1,10 @@
 package app.livelingo.app
 
 import app.livelingo.core.*
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.selects.onTimeout
@@ -53,37 +57,6 @@ internal suspend fun TranscriptDelta.translateOrDefer(translate: suspend (String
         copy(channel = TranscriptChannel.INPUT, translationPending = true)
     }
 
-/** A successful window with only a source track still needs an actual translation. */
-internal class MissingVoiceTranslation {
-    private val inputs = mutableListOf<TranscriptDelta>()
-    private var eligible = true
-
-    fun observe(delta: TranscriptDelta) {
-        if (!eligible) return
-        if (delta.channel == TranscriptChannel.INPUT) inputs += delta
-        else if (delta.text.isNotBlank()) disable()
-    }
-
-    fun disable() {
-        eligible = false
-        inputs.clear()
-    }
-
-    suspend fun finish(translate: suspend (TranscriptDelta) -> Unit) {
-        var group: TranscriptDelta? = null
-        for (input in inputs.sortedBy { it.startMs }) {
-            val previous = group
-            group = if (previous != null && previous.text.length + input.text.length <= 1800) {
-                previous.copy(text = previous.text + input.text, endMs = maxOf(previous.endMs, input.endMs))
-            } else {
-                if (previous != null && previous.text.isNotBlank()) translate(previous)
-                input
-            }
-        }
-        group?.takeIf { it.text.isNotBlank() }?.let { translate(it) }
-    }
-}
-
 /** Native speech models send word pieces, so evaluate foreign runs together before publishing them. */
 @OptIn(ExperimentalCoroutinesApi::class)
 internal suspend fun deliverVoiceOutput(
@@ -105,6 +78,7 @@ internal suspend fun deliverVoiceOutput(
         }
         if (next == null) { flush(); continue }
         val delta = next.getOrNull() ?: break
+        if (pending?.voiceOrigin != delta.voiceOrigin) flush()
         val old = pending
         val span = old?.copy(text = old.text + delta.text, startMs = minOf(old.startMs, delta.startMs),
             endMs = maxOf(old.endMs, delta.endMs)) ?: delta
@@ -119,6 +93,126 @@ internal suspend fun deliverVoiceOutput(
         }
         if (native || text.lastOrNull() in listOf('。','！','？','!','?','\n') ||
             text.endsWith(". ") || text.length >= 512) flush()
+    }
+    flush()
+}
+
+private enum class SpeechScript { LATIN, HAN, KANA, HANGUL }
+
+private fun Char.speechScript(): SpeechScript? = when {
+    han() -> SpeechScript.HAN
+    kana() -> SpeechScript.KANA
+    hangul() -> SpeechScript.HANGUL
+    latin() -> SpeechScript.LATIN
+    else -> null
+}
+
+private fun SpeechScript.usedBy(target: Language) = when (target) {
+    Language.ENGLISH, Language.INDIAN_ENGLISH -> this == SpeechScript.LATIN
+    Language.ZH_TW -> this == SpeechScript.HAN
+    Language.JAPANESE -> this == SpeechScript.HAN || this == SpeechScript.KANA
+    Language.KOREAN -> this == SpeechScript.HANGUL
+    Language.AUTO -> false
+}
+
+/**
+ * Native input and output clocks are independent. When source speech switches scripts or is
+ * already in the target script, build one ordered output from the source for this audio window.
+ * Keep native output live until the first source-based result is ready. A window with no source
+ * events (including a disabled transcription model) continues to use the native output.
+ */
+internal suspend fun completeVoiceCaptions(
+    target: Language,
+    repair: suspend (String) -> String,
+    emit: suspend (TranscriptDelta) -> Unit,
+    collect: suspend (suspend (TranscriptDelta) -> Unit, suspend () -> Unit) -> Unit,
+) = coroutineScope {
+    val native = Channel<TranscriptDelta>(32)
+    val sources = Channel<TranscriptDelta>(48)
+    val backlog = mutableListOf<TranscriptDelta>()
+    val scripts = mutableSetOf<SpeechScript>()
+    var sourceLed = false
+    var sawNative = false
+    var blocked = false
+    launch { deliverVoiceOutput(native, target, repair, emit) }
+    val sourceJob = launch { deliverSourceSentences(sources, target, repair, emit) }
+    suspend fun useSource() {
+        sourceLed = true
+        for (delta in backlog.sortedBy { it.startMs }) sources.send(delta)
+        backlog.clear()
+    }
+    collect({ delta ->
+        if (delta.channel == TranscriptChannel.INPUT) {
+            emit(delta)
+            if (!blocked) {
+                if (sourceLed) sources.send(delta)
+                else {
+                    backlog += delta
+                    delta.text.mapNotNullTo(scripts) { it.speechScript() }
+                    if (scripts.size > 1 || scripts.any { it.usedBy(target) }) useSource()
+                }
+            }
+        } else if (!sourceLed || blocked) {
+            if (delta.text.isNotBlank()) sawNative = true
+            native.send(delta.copy(voiceOrigin = if (blocked) VoiceOrigin.STANDARD else VoiceOrigin.NATIVE_PREVIEW))
+        }
+    }, {
+        blocked = true
+        backlog.clear()
+        sourceJob.cancelAndJoin()
+    })
+    if (!blocked && !sourceLed && !sawNative) useSource()
+    sources.close()
+    native.close()
+}
+
+// Do not send clearly Chinese speech back through a text model. Mixed or ambiguous text is
+// translated normally. Preserve punctuation, numbers and the user's Taiwan script preference.
+internal fun localChinese(text: String, target: Language): String? =
+    if (target == Language.ZH_TW && text.any { it.han() } && text.none { it.isLetter() && !it.han() })
+        TaiwanText.convert(text) else null
+
+private val sentenceEnd = Regex("""[。！？!?\n]+|\.(?=\s|$)""")
+
+/** Split a single provider delta containing multiple sentences without inventing word timestamps. */
+internal fun sentencePieces(text: String): List<String> = buildList {
+    var from = 0
+    for (mark in sentenceEnd.findAll(text)) {
+        val end = mark.range.last + 1
+        add(text.substring(from, end))
+        from = end
+    }
+    if (from < text.length) add(text.substring(from))
+}
+
+@OptIn(ExperimentalCoroutinesApi::class)
+private suspend fun deliverSourceSentences(input: ReceiveChannel<TranscriptDelta>, target: Language,
+    translate: suspend (String) -> String, emit: suspend (TranscriptDelta) -> Unit) {
+    var pending: TranscriptDelta? = null
+    var previousOutput = ""
+    suspend fun flush() {
+        val source = pending ?: return
+        pending = null
+        if (source.text.isBlank()) return
+        val result = source.translateOrDefer { localChinese(it, target) ?: translate(it) }
+        val separated = if (result.translationPending) result else
+            result.copy(text = separatedTranscript(previousOutput, result.text)).also { previousOutput = it.text.takeLast(1) }
+        emit(separated.copy(voiceOrigin = VoiceOrigin.FROM_SOURCE))
+    }
+    while (true) {
+        val next = if (pending == null) input.receiveCatching() else select<kotlinx.coroutines.channels.ChannelResult<TranscriptDelta>?> {
+            input.onReceiveCatching { it }
+            onTimeout(1_500) { null }
+        }
+        if (next == null) { flush(); continue }
+        val delta = next.getOrNull() ?: break
+        if (pending?.let { delta.startMs - it.endMs >= 1_500 } == true) flush()
+        for (piece in sentencePieces(delta.text)) {
+            val old = pending
+            pending = if (old == null) delta.copy(text = piece) else old.copy(
+                text = old.text + piece, endMs = maxOf(old.endMs, delta.endMs))
+            if (sentenceEnd.find(piece)?.range?.last == piece.lastIndex || pending!!.text.length >= 1800) flush()
+        }
     }
     flush()
 }

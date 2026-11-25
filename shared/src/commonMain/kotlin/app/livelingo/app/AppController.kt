@@ -547,11 +547,11 @@ class AppController(
                             val existing = current.fragments.filter { it.recoverySegment == segment }
                             val label = mutable.value.speaker.takeUnless { it == "未標記" }
                             val pending = mutableListOf<TranscriptFragment>()
-                            val fragments = events.mapIndexedNotNull { index, event ->
+                            val fragments = events.visibleVoiceEvents().mapNotNull { (index, event) ->
                                 if (event.translationPending) {
                                     pending += TranscriptFragment("pending-$transcriptAttemptId-$segment-$attempt-$index",
                                         TranscriptChannel.INPUT, event.startMs, event.endMs, event.text, recoverySegment = segment)
-                                    return@mapIndexedNotNull null
+                                    return@mapNotNull null
                                 }
                                 val id = "$transcriptAttemptId-$segment-$attempt-$index"
                                 (existing + current.recoveredText).find { it.id == id } ?: TranscriptFragment(id, event.channel, event.startMs, event.endMs,

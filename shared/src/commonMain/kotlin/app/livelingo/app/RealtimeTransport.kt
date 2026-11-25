@@ -22,28 +22,13 @@ class ModelTranslationTransport(clientFactory: () -> HttpClient) : TranslationTr
             service.run(connection, apiKey, settings, audio, onReady, onTranscript, onNotice)
             return
         }
-        coroutineScope {
-            val missing = MissingVoiceTranslation()
-            val output = Channel<TranscriptDelta>(32)
-            launch {
-                deliverVoiceOutput(output, settings.targetLanguage,
-                    repair = { text -> translator.translate(connection, apiKey, settings, text, "") },
-                    emit = onTranscript)
-            }
-            try {
-                service.run(connection, apiKey, settings, audio, onReady, onTranscript = {
-                    missing.observe(it)
-                    if (it.channel == TranscriptChannel.INPUT) onTranscript(it) else output.send(it)
-                }, onNotice = { notice ->
-                    if (notice.diagnostic.code == "CONTENT_FILTER") missing.disable()
-                    onNotice(notice)
-                })
-                // Only after a normal drain can we tell whether this window had any output.
-                // The source and target timelines cannot establish coverage of individual clauses.
-                missing.finish { source ->
-                    onTranscript(source.translateOrDefer { translator.translate(connection, apiKey, settings, it, "") })
-                }
-            } finally { output.close() }
+        completeVoiceCaptions(settings.targetLanguage, repair = { text ->
+            translator.translate(connection, apiKey, settings, text, "")
+        }, emit = onTranscript) { receive, filtered ->
+            service.run(connection, apiKey, settings, audio, onReady, receive, onNotice = { notice ->
+                if (notice.diagnostic.code == "CONTENT_FILTER") filtered()
+                onNotice(notice)
+            })
         }
     }
     override suspend fun probe(connection: FoundryConnection, apiKey: String) = transport(connection).probe(connection, apiKey)

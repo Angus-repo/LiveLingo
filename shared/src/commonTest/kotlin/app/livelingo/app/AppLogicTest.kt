@@ -214,12 +214,20 @@ class AppLogicTest {
             }
         }
         val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
-        controller.start(); runCurrent()
+        controller.start()
+        val ready = controller.state.first { it.phase == ConnectionPhase.LISTENING || it.phase == ConnectionPhase.ERROR }
+        assertEquals(ConnectionPhase.LISTENING, ready.phase, ready.sessionIssue)
         services.mic.emit(ByteArray(4800))
         val expected = "早安。開會吧。"
-        controller.state.first { liveCaptionText(it.current, TranscriptChannel.OUTPUT) == expected }
+        val live = controller.state.first { state ->
+            state.phase == ConnectionPhase.ERROR || state.current?.fragments.orEmpty().any {
+                it.channel == TranscriptChannel.OUTPUT && "開會" in it.text
+            }
+        }
+        assertEquals(expected, liveCaptionText(live.current, TranscriptChannel.OUTPUT), live.sessionIssue)
         controller.stop()
-        controller.state.first { it.phase == ConnectionPhase.IDLE }
+        val stopped = controller.state.first { it.phase == ConnectionPhase.IDLE || it.phase == ConnectionPhase.ERROR }
+        assertEquals(ConnectionPhase.IDLE, stopped.phase, stopped.sessionIssue)
         controller.dispose()
         val saved = AppRepository(services.memory).history().single()
         assertEquals(expected, liveCaptionText(saved, TranscriptChannel.OUTPUT))

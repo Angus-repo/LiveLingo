@@ -79,6 +79,14 @@ class TextTranslatorHttpTest {
                 }
                 assertEquals("TARGET_LANGUAGE_MISMATCH", rejected.diagnostic?.code)
                 assertEquals(8, usages.map { it.id }.distinct().size)
+                enqueue("stop", " ")
+                enqueue("stop", "請繼續。")
+                assertEquals("請繼續。", translator.translate(connection, "test-secret", SessionSettings(), "Please continue.", ""))
+                enqueue("stop", "")
+                enqueue("stop", " ")
+                assertTrue(assertFailsWith<TranslationFailure> {
+                    translator.translate(connection, "test-secret", SessionSettings(), "Please continue.", "")
+                }.targetLanguageMismatch)
             } finally { translator.close(); server.shutdown() }
         }
     }

@@ -53,7 +53,7 @@ internal suspend fun TranscriptDelta.translateOrDefer(translate: suspend (String
     try {
         copy(channel = TranscriptChannel.OUTPUT, text = translate(text))
     } catch (failure: TranslationFailure) {
-        if (!failure.targetLanguageMismatch) throw failure
+        if (!failure.targetLanguageMismatch && failure.diagnostic?.code != "TEXT_MODEL_REQUIRED") throw failure
         copy(channel = TranscriptChannel.INPUT, translationPending = true)
     }
 
@@ -125,6 +125,7 @@ internal suspend fun completeVoiceCaptions(
     target: Language,
     repair: suspend (String) -> String,
     emit: suspend (TranscriptDelta) -> Unit,
+    sourceLanguage: Language = Language.AUTO,
     collect: suspend (suspend (TranscriptDelta) -> Unit, suspend () -> Unit) -> Unit,
 ) = coroutineScope {
     val native = Channel<TranscriptDelta>(32)
@@ -135,7 +136,7 @@ internal suspend fun completeVoiceCaptions(
     var sawNative = false
     var blocked = false
     launch { deliverVoiceOutput(native, target, repair, emit) }
-    val sourceJob = launch { deliverSourceSentences(sources, target, repair, emit) }
+    val sourceJob = launch { deliverSourceSentences(sources, target, sourceLanguage, repair, emit) }
     suspend fun useSource() {
         sourceLed = true
         for (delta in backlog.sortedBy { it.startMs }) sources.send(delta)
@@ -168,8 +169,8 @@ internal suspend fun completeVoiceCaptions(
 
 // Do not send clearly Chinese speech back through a text model. Mixed or ambiguous text is
 // translated normally. Preserve punctuation, numbers and the user's Taiwan script preference.
-internal fun localChinese(text: String, target: Language): String? =
-    if (target == Language.ZH_TW && text.any { it.han() } && text.none { it.isLetter() && !it.han() })
+internal fun localChinese(text: String, target: Language, source: Language): String? =
+    if (target == Language.ZH_TW && source != Language.JAPANESE && source != Language.KOREAN && text.any { it.han() } && text.none { it.isLetter() && !it.han() })
         TaiwanText.convert(text) else null
 
 private val sentenceEnd = Regex("""[。！？!?\n]+|\.(?=\s|[\u3400-\u9fff]|$)""")
@@ -186,7 +187,7 @@ internal fun sentencePieces(text: String): List<String> = buildList {
 }
 
 @OptIn(ExperimentalCoroutinesApi::class)
-private suspend fun deliverSourceSentences(input: ReceiveChannel<TranscriptDelta>, target: Language,
+private suspend fun deliverSourceSentences(input: ReceiveChannel<TranscriptDelta>, target: Language, sourceLanguage: Language,
     translate: suspend (String) -> String, emit: suspend (TranscriptDelta) -> Unit) {
     var pending: TranscriptDelta? = null
     var previousOutput = ""
@@ -194,7 +195,9 @@ private suspend fun deliverSourceSentences(input: ReceiveChannel<TranscriptDelta
         val source = pending ?: return
         pending = null
         if (source.text.isBlank()) return
-        val result = source.translateOrDefer { localChinese(it, target) ?: translate(it) }
+        val result = source.translateOrDefer {
+            if (it.none(Char::isLetter)) it else localChinese(it, target, sourceLanguage) ?: translate(it)
+        }
         val separated = if (result.translationPending) result else
             result.copy(text = if (previousOutput in listOf(".", "?", "!") && result.text.firstOrNull()?.latin() == true)
                 " " + result.text else separatedTranscript(previousOutput, result.text)).also { previousOutput = it.text.takeLast(1) }
@@ -211,7 +214,7 @@ private suspend fun deliverSourceSentences(input: ReceiveChannel<TranscriptDelta
         val tail = pending?.text
         if (tail != null && delta.text.isNotBlank()) {
             val changesToChinese = target == Language.ZH_TW && tail.any { it.latin() } && !tail.any { it.han() } &&
-                localChinese(delta.text, target) != null
+                localChinese(delta.text, target, sourceLanguage) != null
             val decimalContinues = tail.endsWith('.') && tail.getOrNull(tail.lastIndex - 1)?.isDigit() == true &&
                 delta.text.first().isDigit()
             if (changesToChinese || (tail.endsWith('.') && !decimalContinues)) flush()

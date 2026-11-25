@@ -24,7 +24,7 @@ class ModelTranslationTransport(clientFactory: () -> HttpClient) : TranslationTr
         }
         completeVoiceCaptions(settings.targetLanguage, repair = { text ->
             translator.translate(connection, apiKey, settings, text, "")
-        }, emit = onTranscript) { receive, filtered ->
+        }, emit = onTranscript, sourceLanguage = settings.sourceLanguage) { receive, filtered ->
             service.run(connection, apiKey, settings, audio, onReady, receive, onNotice = { notice ->
                 if (notice.diagnostic.code == "CONTENT_FILTER") filtered()
                 onNotice(notice)

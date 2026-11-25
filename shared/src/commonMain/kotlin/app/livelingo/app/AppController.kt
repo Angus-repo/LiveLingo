@@ -368,8 +368,16 @@ class AppController(
         val state = mutable.value
         if (state.busy || !state.storageAvailable || !state.transcriptSaved) return
         val record = state.history.find { it.id == id } ?: return
-        val connection = record.captionConnection ?: return
+        val saved = record.captionConnection ?: return
         if (record.pendingCaptions().isEmpty()) return
+        val connection = if (saved.textDeployment.isBlank()) {
+            val configured = state.preferences.copy(provider = saved.provider).connection()
+            if (configured.textDeployment.isBlank()) {
+                inform("請先在設定選擇這場會議使用的文字模型，再補譯。")
+                return
+            }
+            saved.copy(textDeployment = configured.textDeployment, textModelKind = configured.textModelKind)
+        } else saved
         connection.validationError()?.let { inform(it); return }
         val key = runCatching { repository.apiKey(connection.credentialEndpoint()) }.getOrNull()
         if (key.isNullOrBlank()) { inform("請先設定這場會議原本使用的翻譯服務與 API key，再補譯。"); return }

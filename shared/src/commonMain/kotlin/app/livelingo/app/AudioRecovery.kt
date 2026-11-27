@@ -184,10 +184,12 @@ internal class RecoveringTranslationSession(
         contextForSegment: (Long) -> String = { "" },
         recoverDeferred: Boolean = false,
         onDeferred: (DeferredAudio) -> Unit = {},
+        onVoicePreview: (TranscriptDelta) -> Unit = {},
     ) = coroutineScope {
         check(!journal.state.blocked) { "Content-filtered audio cannot be replayed" }
         val revision = MutableStateFlow(0L)
-        var replaying = journal.state.next > journal.state.committed
+        val savedAudioEnd = journal.state.next
+        var replaying = savedAudioEnd > journal.state.committed
         var captureDone = false
         // A cancelled receive can discard a frame already handed directly to a suspended receiver.
         // Keep the entire receive/write loop alive until stopCapture closes the input, then join it.
@@ -230,6 +232,10 @@ internal class RecoveringTranslationSession(
                 val queue = Channel<ByteArray>(1)
                 var events: List<TranscriptDelta> = emptyList()
                 val publishLock = Mutex()
+                // A healthy socket rollover may have queued several seconds of new audio.
+                // Its first captions are safe to show, even while the feeder catches up.
+                val publishLive = deferred == null && (!replaying ||
+                    (!recoverDeferred && retries == 0 && audioRetryEnd == null && start >= savedAudioEnd))
                 val currentAttempt = attempt++
                 onAttempt(currentAttempt, start)
                 val usagePrefix = attemptId()
@@ -273,14 +279,17 @@ internal class RecoveringTranslationSession(
                                 onTranscript = { event ->
                                     if (event.startMs < 0 || event.endMs <= event.startMs || event.text.length > 65_536)
                                         throw TranslationFailure("服務回傳了無效的字幕時間或內容。")
-                                    if (event.text.isNotEmpty()) {
+                                    if (event.previewOnly) {
+                                        if (publishLive) onVoicePreview(event.copy(
+                                            startMs = event.startMs + offset / 48, endMs = event.endMs + offset / 48))
+                                    } else if (event.text.isNotEmpty()) {
                                         // Source and translation workers may both emit while disk IO is suspended.
                                         // Finish publishing each received delta before the next draft can replace it.
                                         withContext(NonCancellable) {
                                             publishLock.withLock {
                                                 events = events + event.copy(startMs = event.startMs + offset / 48, endMs = event.endMs + offset / 48)
                                                 journal.saveDraft(events)
-                                                onSnapshot(start, currentAttempt, events, null, !replaying && deferred == null)
+                                                onSnapshot(start, currentAttempt, events, null, publishLive)
                                             }
                                         }
                                     }

@@ -22,28 +22,14 @@ class ModelTranslationTransport(clientFactory: () -> HttpClient) : TranslationTr
             service.run(connection, apiKey, settings, audio, onReady, onTranscript, onNotice)
             return
         }
-        coroutineScope {
-            val missing = MissingVoiceTranslation()
-            val output = Channel<TranscriptDelta>(32)
-            launch {
-                deliverVoiceOutput(output, settings.targetLanguage,
-                    repair = { text -> translator.translate(connection, apiKey, settings, text, "") },
-                    emit = onTranscript)
-            }
-            try {
-                service.run(connection, apiKey, settings, audio, onReady, onTranscript = {
-                    missing.observe(it)
-                    if (it.channel == TranscriptChannel.INPUT) onTranscript(it) else output.send(it)
-                }, onNotice = { notice ->
-                    if (notice.diagnostic.code == "CONTENT_FILTER") missing.disable()
-                    onNotice(notice)
-                })
-                // Only after a normal drain can we tell whether this window had any output.
-                // The source and target timelines cannot establish coverage of individual clauses.
-                missing.finish { source ->
-                    onTranscript(source.translateOrDefer { translator.translate(connection, apiKey, settings, it, "") })
-                }
-            } finally { output.close() }
+        completeVoiceCaptions(settings.targetLanguage, repair = { text ->
+            translator.translate(connection, apiKey, settings, text, "")
+        }, emit = onTranscript, sourceLanguage = settings.sourceLanguage,
+            stream = { text, preview -> translator.stream(connection, apiKey, settings, text, "", preview) }) { receive, filtered ->
+            service.run(connection, apiKey, settings, audio, onReady, receive, onNotice = { notice ->
+                if (notice.diagnostic.code == "CONTENT_FILTER") filtered()
+                onNotice(notice)
+            })
         }
     }
     override suspend fun probe(connection: FoundryConnection, apiKey: String) = transport(connection).probe(connection, apiKey)
@@ -206,9 +192,15 @@ internal class RealtimeTransport(
                 val worker = if (transcribes) launch {
                     var context = ""
                     var previousOutput = ""
+                    var slot = 0
                     for (source in translations) {
                         if (connection.textDeployment.isBlank()) throw TranslationFailure("轉錄方案需要設定文字翻譯模型。")
-                        val result = source.translateOrDefer { translator.translate(connection, key, settings, it, context) }
+                        val turn = source.copy(voiceSlot = slot++)
+                        val result = turn.translateOrDefer { text ->
+                            translator.stream(connection, key, settings, text, context) { draft ->
+                                onTranscript(turn.copy(channel = TranscriptChannel.OUTPUT, text = separatedTranscript(previousOutput, draft), previewOnly = true))
+                            }
+                        }
                         if (result.translationPending) {
                             onTranscript(result)
                             context = (context + "\nOriginal: " + source.text).takeLast(2500)

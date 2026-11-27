@@ -21,6 +21,10 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.foundation.Canvas as DrawCanvas
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -30,6 +34,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import app.livelingo.core.*
 import kotlin.time.ExperimentalTime
 import kotlin.time.Instant
@@ -196,6 +202,8 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
     var audioHelp by rememberSaveable { mutableStateOf(false) }
     var speakerOptions by rememberSaveable { mutableStateOf(false) }
     var editSetup by remember(state.current?.id) { mutableStateOf(false) }
+    var translationSize by rememberSaveable { mutableIntStateOf(1) }
+    var fullTranslation by rememberSaveable { mutableStateOf(false) }
     val source = state.preferences.source
     val target = state.preferences.target
     val knowledge = state.knowledge.find { it.id == state.preferences.knowledgeId }
@@ -204,6 +212,39 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
     val realtimeAudio = !captions && state.preferences.connection().speechModel == SpeechModel.REALTIME_TRANSLATE
     val audioUnavailable = controller.audioSourceUnavailableReason()
     val needsConnection = !state.hasApiKey || state.preferences.connection().validationError() != null
+    val actionEnabled = state.phase != ConnectionPhase.STOPPING && state.storageAvailable && !state.connectionTesting &&
+        (state.active || (state.transcriptSaved && audioUnavailable == null))
+    val actionLabel = if (state.connectionTesting) "連線測試進行中…" else when (state.phase) {
+        ConnectionPhase.CONNECTING -> "取消連線／音源授權"
+        ConnectionPhase.RECONNECTING -> "停止並保留待處理錄音"
+        ConnectionPhase.LISTENING -> if (state.replayingSavedAudio) "暫停補處理" else "停止並儲存"
+        ConnectionPhase.STOPPING -> "接收最後的字幕…"
+        else -> if (needsConnection) "先設定翻譯服務" else if (state.current == null) "開始即時翻譯" else "開始下一段"
+    }
+    val onSessionAction: () -> Unit = {
+        if (state.active) controller.stop()
+        else if (needsConnection) { fullTranslation = false; onSettings() }
+        else controller.start()
+    }
+    val current = state.current
+    val liveSource = current?.settings?.sourceLanguage ?: source
+    val sourceLabel = remember(liveSource, current?.fragments, current?.paragraphLayouts) { liveSourceLanguageLabel(liveSource, current) }
+    val outputs = remember(current?.fragments) { current?.fragments.orEmpty().filter { it.channel == TranscriptChannel.OUTPUT } }
+    val outputRecord = remember(current?.id, current?.settings, current?.paragraphLayouts, outputs) { current?.copy(fragments = outputs) }
+    val committedText = remember(outputRecord) { liveCaptionText(outputRecord, TranscriptChannel.OUTPUT) }
+    val lastOutput = remember(outputs) { outputs.maxByOrNull { it.startMs } }
+    val outputText = remember(outputRecord, state.translationDrafts) {
+        val drafts = state.translationDrafts.values.sortedBy { it.startMs }
+        when {
+            outputRecord == null || drafts.isEmpty() -> committedText
+            lastOutput == null || drafts.first().startMs >= lastOutput.startMs -> {
+                val tail = drafts.joinToString("") { it.text }
+                val separator = if (lastOutput?.text?.lastOrNull()?.isWhitespace() == true && tail.firstOrNull()?.isWhitespace() == false) " " else ""
+                committedText + separator + outputRecord.localizedText(tail, TranscriptChannel.OUTPUT)
+            }
+            else -> liveCaptionText(outputRecord.copy(fragments = outputs + drafts), TranscriptChannel.OUTPUT)
+        }
+    }
     val listState = rememberLazyListState()
     LaunchedEffect(state.active) { if (state.active) listState.scrollToItem(0) }
     Column(Modifier.fillMaxSize()) {
@@ -275,7 +316,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                 SectionCard {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text("${if (state.active) liveSourceLanguageLabel(source, state.current) else source.label} → ${target.label}", fontWeight = FontWeight.SemiBold)
+                            Text("${if (state.active) sourceLabel else source.label} → ${target.label}", fontWeight = FontWeight.SemiBold)
                             Text("${audioSource.label} · ${state.preferences.provider.label}", style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971))
                         }
                         if (!state.active) TextButton(onClick = { editSetup = true }, enabled = !state.busy) { Text("調整設定") }
@@ -333,8 +374,11 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                             style = MaterialTheme.typography.labelMedium, color = Mint)
                     }
                 }
-                item { TranscriptPanel("譯文", state.current.settings.targetLanguage.label, state.current, TranscriptChannel.OUTPUT, Purple) }
-                item { TranscriptPanel("原文", liveSourceLanguageLabel(state.current.settings.sourceLanguage, state.current), state.current, TranscriptChannel.INPUT, Mint) }
+                item {
+                    TranscriptPanel("譯文", state.current.settings.targetLanguage.label, state.current, TranscriptChannel.OUTPUT,
+                        Purple, displayText = outputText, size = translationSize, onSize = { translationSize = it }, onExpand = { fullTranslation = true })
+                }
+                item { TranscriptPanel("原文", sourceLabel, state.current, TranscriptChannel.INPUT, Mint) }
                 state.paragraphStatus?.let { status -> item { Text(status, style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971)) } }
                 if (state.active) item {
                     SectionCard {
@@ -358,23 +402,38 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
             Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 if (!state.active) Text("${if (captions) "框內辨識出的文字" else "音訊"}${if (knowledge != null) "與所選背景知識" else ""}會傳至 ${state.preferences.provider.label}。",
                     style = MaterialTheme.typography.labelSmall, color = Color(0xFF657971))
-                Button(onClick = { if (state.active) controller.stop() else if (needsConnection) onSettings() else controller.start() },
-                    enabled = state.phase != ConnectionPhase.STOPPING && state.storageAvailable && !state.connectionTesting &&
-                        (state.active || (state.transcriptSaved && audioUnavailable == null)),
+                if (state.current == null) TextButton(onClick = { fullTranslation = true }) { Text("全螢幕譯文") }
+                Button(onClick = onSessionAction, enabled = actionEnabled,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp), shape = RoundedCornerShape(14.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = if (state.active) Color(0xFF9A473E) else Mint)) {
                     if (state.phase in setOf(ConnectionPhase.CONNECTING, ConnectionPhase.STOPPING)) {
                         CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = Color.White)
                         Spacer(Modifier.width(10.dp))
                     }
-                    Text(if (state.connectionTesting) "連線測試進行中…" else when (state.phase) {
-                        ConnectionPhase.CONNECTING -> "取消連線／音源授權"
-                        ConnectionPhase.RECONNECTING -> "■  停止並保留待處理錄音"
-                        ConnectionPhase.LISTENING -> if (state.replayingSavedAudio) "■  暫停補處理" else "■  停止並儲存"
-                        ConnectionPhase.STOPPING -> "接收最後的字幕…"
-                        else -> if (needsConnection) "先設定翻譯服務 →" else if (state.current == null) "開始即時翻譯" else "開始下一段"
-                    }, fontWeight = FontWeight.SemiBold)
+                    Text(actionLabel, fontWeight = FontWeight.SemiBold)
                 }
+            }
+        }
+    }
+    if (fullTranslation) {
+        Dialog(onDismissRequest = { fullTranslation = false }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+            Surface(Modifier.fillMaxSize(), color = Color.White) {
+                TranscriptPanel("譯文", state.current?.settings?.targetLanguage?.label ?: target.label, state.current, TranscriptChannel.OUTPUT,
+                    Purple, displayText = outputText, size = translationSize, onSize = { translationSize = it },
+                    onExpand = { fullTranslation = false }, fullScreen = true, sessionAction = {
+                        IconButton(onClick = onSessionAction, enabled = actionEnabled,
+                            modifier = Modifier.semantics { contentDescription = actionLabel }) {
+                            if (state.phase == ConnectionPhase.STOPPING) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                            else {
+                                val tint = if (!actionEnabled) Color.Gray else if (state.active) Color(0xFF9A473E) else Mint
+                                DrawCanvas(Modifier.size(22.dp)) {
+                                    if (state.active) drawRect(tint)
+                                    else drawPath(Path().apply { moveTo(size.width * 0.16f, 0f); lineTo(size.width, size.height / 2)
+                                        lineTo(size.width * 0.16f, size.height); close() }, tint)
+                                }
+                            }
+                        }
+                    })
             }
         }
     }
@@ -384,26 +443,39 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
         dismissButton = { TextButton(onClick = { customSpeaker = false }) { Text("取消") } })
 }
 
-@Composable private fun TranscriptPanel(title: String, language: String, record: TranscriptRecord?, channel: TranscriptChannel, color: Color) {
-    // Join split words first, then preserve model/AI paragraph boundaries.
-    val text = liveCaptionText(record, channel)
+private val captionFontSizes = listOf(15, 18, 22, 28, 36, 48)
+private val captionPanelHeights = listOf(160, 230, 280, 330, 380, 430)
+
+@Composable private fun TranscriptPanel(title: String, language: String, record: TranscriptRecord?, channel: TranscriptChannel,
+    color: Color, displayText: String? = null, size: Int = 1, onSize: (Int) -> Unit = {}, onExpand: () -> Unit = {}, fullScreen: Boolean = false, sessionAction: (@Composable () -> Unit)? = null) {
+    val text = displayText ?: remember(record?.fragments, record?.paragraphLayouts, record?.settings, channel) { liveCaptionText(record, channel) }
     val scroll = rememberScrollState()
-    LaunchedEffect(record?.id, text, scroll.maxValue) {
-        // maxValue updates after text layout; following it keeps the newest character visible.
-        scroll.scrollTo(scroll.maxValue)
-    }
-    SectionCard {
+    LaunchedEffect(record?.id, text, scroll.maxValue) { scroll.scrollTo(scroll.maxValue) }
+    Column((if (fullScreen) Modifier.fillMaxSize().safeDrawingPadding() else
+        Modifier.fillMaxWidth().background(Color.White, RoundedCornerShape(22.dp))).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text(title, color = color, fontWeight = FontWeight.Bold)
-            Text(language, color = Color(0xFF657971), style = MaterialTheme.typography.labelMedium)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(language, color = Color(0xFF657971), style = MaterialTheme.typography.labelMedium)
+                sessionAction?.invoke()
+            }
+        }
+        if (channel == TranscriptChannel.OUTPUT) {
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = { onSize(size - 1) }, enabled = size > 0) { Text("縮小") }
+                TextButton(onClick = { onSize(size + 1) }, enabled = size < captionFontSizes.lastIndex) { Text("放大") }
+                TextButton(onClick = onExpand) { Text(if (fullScreen) "退出全螢幕" else "全螢幕") }
+            }
         }
         if (text.isEmpty()) {
             Text(if (channel == TranscriptChannel.OUTPUT) "開始說話後，翻譯會出現在這裡。" else "原始語音的辨識文字會保留在這裡。",
                 color = Color(0xFF8C9A92), modifier = Modifier.padding(vertical = 18.dp))
         } else {
-            Box(Modifier.fillMaxWidth().height(230.dp).verticalScroll(scroll)) {
+            val area = if (fullScreen) Modifier.weight(1f) else Modifier.height(captionPanelHeights[size].dp)
+            Box(area.fillMaxWidth().verticalScroll(scroll)) {
                 SelectionContainer {
-                    Text(text, fontSize = 18.sp, lineHeight = 29.sp, softWrap = true)
+                    Text(text, fontSize = captionFontSizes[size].sp, lineHeight = (captionFontSizes[size] * 1.55f).sp)
                 }
             }
         }
@@ -632,7 +704,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
             TextButton(onClick = { runCatching { uriHandler.openUri(textKind.price(provider).sourceUrl) }.onFailure { controller.inform("無法開啟定價網頁。") } }) { Text("文字費用來源 ↗") }
             if (speechKind.transcribes) Text("每約 3 秒完成一段原文轉錄，再由文字模型翻譯；即使關閉 AI 分段，文字翻譯仍會執行並計費。", style = MaterialTheme.typography.bodySmall)
             if (state.preferences.aiParagraphs) Text("收音時定期整理新字幕的標點與段落，停止時完成最後一段，譯文依原文分段。只補標點與換行，不改寫文字或數字。此功能會使用所選文字模型並計費，需有可用部署與配額。", style = MaterialTheme.typography.bodySmall)
-            Text("偵測到未譯句子，或整段口譯只收到原文時，會使用此文字模型補譯，依文字用量計費。", style = MaterialTheme.typography.bodySmall)
+            Text("口譯遇到中英切換時，依已辨識的原文逐句產生譯文。目標為繁中時，純中文可在裝置上轉為台灣繁體；其他需要翻譯的句子使用此文字模型，依文字用量計費。", style = MaterialTheme.typography.bodySmall)
             Text("費用為美元公開參考價，查核：$PRICE_CHECKED_DATE；非帳單即時報價。實際費用依用量、部署與合約而定。", style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971))
             if (!isOpenAi) TextButton(onClick = { runCatching { uriHandler.openUri(FOUNDRY_PRICING_URL) }.onFailure { controller.inform("無法開啟定價網頁。") } }) { Text("查看 Azure 官方定價 ↗") }
             webSocketPreview?.let { preview ->

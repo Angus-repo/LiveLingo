@@ -14,7 +14,23 @@ val WireJson: Json = Json {
 
 @Serializable
 data class TranscriptDelta(val channel: TranscriptChannel, val text: String, val startMs: Long, val endMs: Long,
-    val translationPending: Boolean = false)
+    val translationPending: Boolean = false, val voiceOrigin: VoiceOrigin = VoiceOrigin.STANDARD,
+    @kotlinx.serialization.Transient val voiceSlot: Int = -1, @kotlinx.serialization.Transient val previewOnly: Boolean = false)
+
+@Serializable
+enum class VoiceOrigin { STANDARD, NATIVE_PREVIEW, FROM_SOURCE, PREFIX_PREVIEW, PREFIX_PART, PREFIX_END }
+
+/** Keep the original indices: they are used for durable fragment identities during replay. */
+fun List<TranscriptDelta>.visibleVoiceEvents(): List<IndexedValue<TranscriptDelta>> {
+    val prefixDone = any { it.voiceOrigin == VoiceOrigin.PREFIX_END }
+    val useSource = prefixDone || any { !it.previewOnly && (it.voiceOrigin == VoiceOrigin.FROM_SOURCE || it.voiceOrigin == VoiceOrigin.PREFIX_PREVIEW) }
+    return withIndex().filter { (_, event) -> !event.previewOnly && when (event.voiceOrigin) {
+        VoiceOrigin.NATIVE_PREVIEW -> !useSource
+        VoiceOrigin.PREFIX_PREVIEW -> !prefixDone
+        VoiceOrigin.PREFIX_PART -> prefixDone
+        else -> true
+    } }
+}
 
 sealed interface FoundryEvent {
     data class Ready(val sessionId: String) : FoundryEvent

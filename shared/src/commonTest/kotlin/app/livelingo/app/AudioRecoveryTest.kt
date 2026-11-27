@@ -79,6 +79,35 @@ class AudioRecoveryTest {
         assertEquals(3, usage.map { it.id }.distinct().size)
     }
 
+    @Test fun healthyRolloverShowsNewAudioWhileCatchingUpBeforeItsCheckpoint() = runTest {
+        val journal = AudioJournal(RecoveryStorage(), "backlog", connection, StandardTestDispatcher(testScheduler))
+        val capture = Channel<ByteArray>(Channel.UNLIMITED)
+        repeat(8) { capture.trySend(ByteArray(48_000)) }
+        capture.close()
+        var windows = 0
+        val visible = mutableListOf<Long>()
+        val drafts = mutableListOf<Long>()
+        val transport = ScriptTransport { audio, ready, transcript, _ ->
+            ready()
+            for (chunk in audio) {
+                val line = TranscriptDelta(TranscriptChannel.OUTPUT, "現在", 0, 100)
+                transcript(line.copy(voiceSlot = 0, previewOnly = true))
+                transcript(line.copy(voiceSlot = 0))
+                if (windows == 1) {
+                    assertEquals(1000L, drafts.last())
+                    assertEquals(1000L, visible.last())
+                }
+            }
+        }
+        RecoveringTranslationSession(journal, transport, windowBytes = 48_000).run("key", settings, capture,
+            {}, { _, _, events, checkpoint, publish ->
+                if (checkpoint != null) windows++ else if (publish) visible += events.last().startMs
+            }, {}, { _, _ -> fail("Healthy rollover") }, {}, { true }, { "attempt" }, {},
+            onVoicePreview = { drafts += it.startMs })
+        assertEquals(8, windows)
+        assertEquals(8, drafts.size)
+    }
+
     @Test fun overlappingSourceAndTranslationAfterRolloverPublishDurablePrefixesInOrder() = runTest {
         val storage = RecoveryStorage()
         val journal = AudioJournal(storage, "overlap", connection, StandardTestDispatcher(testScheduler))

@@ -11,6 +11,49 @@ import java.util.concurrent.TimeUnit
 import kotlin.test.*
 
 class TextTranslatorHttpTest {
+    @Test fun streamingPublishesTheFirstTokenBeforeTheServerCanFinishAndCountsUsageOnce() = runBlocking {
+        val gate = java.util.concurrent.CountDownLatch(1)
+        val observed = java.util.concurrent.atomic.AtomicBoolean()
+        val server = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)
+        lateinit var request: JsonObject
+        server.createContext("/") { exchange ->
+            request = WireJson.parseToJsonElement(exchange.requestBody.bufferedReader().use { it.readText() }).jsonObject
+            exchange.responseHeaders.add("Content-Type", "text/event-stream")
+            exchange.sendResponseHeaders(200, 0)
+            exchange.responseBody.bufferedWriter().use { writer ->
+                fun frame(json: String) { writer.write("data: $json\n\n"); writer.flush() }
+                frame("""{"choices":[{"delta":{"content":"請"}}]}""")
+                observed.set(gate.await(8, TimeUnit.SECONDS))
+                frame("""{"choices":[{"delta":{"content":"繼續。"},"finish_reason":"stop"}]}""")
+                frame("""{"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":3}}""")
+                frame("[DONE]")
+            }
+        }
+        server.start()
+        val translator = HttpTextTranslator(createAndroidFoundryHttpClient {
+            addInterceptor { chain ->
+                chain.proceed(chain.request().newBuilder().url("http://127.0.0.1:${server.address.port}/").build())
+            }
+        })
+        val samples = mutableListOf<UsageSample>()
+        translator.setUsageListener { samples += it }
+        try {
+            val connection = FoundryConnection("https://api.openai.com", "voice", ModelProvider.OPENAI,
+                SpeechModel.GPT_LIVE, TextModel.GPT6_LUNA, "my-luna")
+            val drafts = mutableListOf<String>()
+            val result = translator.stream(connection, "test-key", SessionSettings(), "Please continue.", "") {
+                drafts += it
+                if (it == "請") gate.countDown()
+            }
+            assertTrue(observed.get(), "The first token should render while the remaining response is withheld")
+            assertEquals(listOf("請", "請繼續。"), drafts)
+            assertEquals("請繼續。", result)
+            assertEquals(true, request["stream"]?.jsonPrimitive?.boolean)
+            assertEquals(true, request["stream_options"]?.jsonObject?.get("include_usage")?.jsonPrimitive?.boolean)
+            assertEquals(3L, samples.single { it.final }.outputTokens)
+        } finally { gate.countDown(); translator.close(); server.stop(0) }
+    }
+
     @Test fun textTranslationUsesLunaWithProviderCredentialsAndRejectsIncompleteOrRedirectedResults() = runBlocking {
         for (provider in ModelProvider.entries) {
             val server = MockWebServer()
@@ -79,6 +122,14 @@ class TextTranslatorHttpTest {
                 }
                 assertEquals("TARGET_LANGUAGE_MISMATCH", rejected.diagnostic?.code)
                 assertEquals(8, usages.map { it.id }.distinct().size)
+                enqueue("stop", " ")
+                enqueue("stop", "請繼續。")
+                assertEquals("請繼續。", translator.translate(connection, "test-secret", SessionSettings(), "Please continue.", ""))
+                enqueue("stop", "")
+                enqueue("stop", " ")
+                assertTrue(assertFailsWith<TranslationFailure> {
+                    translator.translate(connection, "test-secret", SessionSettings(), "Please continue.", "")
+                }.targetLanguageMismatch)
             } finally { translator.close(); server.shutdown() }
         }
     }

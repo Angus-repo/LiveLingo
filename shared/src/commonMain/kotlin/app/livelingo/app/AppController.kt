@@ -32,6 +32,7 @@ data class AppState(
     val showReportInMessage: Boolean = false,
     val paragraphStatus: String? = null,
     val pendingInWindow: Int = 0,
+    val translationDrafts: Map<Int, TranscriptFragment> = emptyMap(),
     val audioInputStatus: AudioInputStatus = AudioInputStatus(),
     val streamNotice: String? = null,
     val sessionIssue: String? = null,
@@ -368,8 +369,16 @@ class AppController(
         val state = mutable.value
         if (state.busy || !state.storageAvailable || !state.transcriptSaved) return
         val record = state.history.find { it.id == id } ?: return
-        val connection = record.captionConnection ?: return
+        val saved = record.captionConnection ?: return
         if (record.pendingCaptions().isEmpty()) return
+        val connection = if (saved.textDeployment.isBlank()) {
+            val configured = state.preferences.copy(provider = saved.provider).connection()
+            if (configured.textDeployment.isBlank()) {
+                inform("請先在設定選擇這場會議使用的文字模型，再補譯。")
+                return
+            }
+            saved.copy(textDeployment = configured.textDeployment, textModelKind = configured.textModelKind)
+        } else saved
         connection.validationError()?.let { inform(it); return }
         val key = runCatching { repository.apiKey(connection.credentialEndpoint()) }.getOrNull()
         if (key.isNullOrBlank()) { inform("請先設定這場會議原本使用的翻譯服務與 API key，再補譯。"); return }
@@ -420,7 +429,7 @@ class AppController(
             captionHint = null,
             paragraphStatus = if (captions) null else if (paragraphModel.isBlank()) "基本分段；AI 語意分段可至設定指定文字模型。" else "AI 語意分段：等待可分段內容",
             audioInputStatus = AudioInputStatus(), streamNotice = null, sessionIssue = null, recoveryStatus = null,
-            replayingSavedAudio = replayOnly, pendingInWindow = 0)
+            replayingSavedAudio = replayOnly, pendingInWindow = 0, translationDrafts = emptyMap())
         sessionJob = scope.launch {
             var listeningStarted = false
             var stage = "prepare_input"
@@ -474,7 +483,10 @@ class AppController(
                                 val previous = if (captions) fragments.takeWhile { it.id != line.id }
                                     else fragments.filter { it.endMs <= line.startMs }.sortedBy { it.startMs }
                                 val context = previous.filter { it.channel == TranscriptChannel.INPUT }.takeLast(3).joinToString(" ") { it.text }
-                                translator.translate(connection, sessionApiKey, settings, line.text, context)
+                                if (replayOnly) translator.translate(connection, sessionApiKey, settings, line.text, context)
+                                else translator.stream(connection, sessionApiKey, settings, line.text, context) { draft ->
+                                    showVoiceDraft(TranscriptDelta(TranscriptChannel.OUTPUT, draft, line.startMs, line.endMs, voiceSlot = 0))
+                                }
                             },
                             saveOutput = { line, text ->
                                 appendCaption(record.id, line.copy(id = "translation-${line.id}", channel = TranscriptChannel.OUTPUT,
@@ -482,6 +494,7 @@ class AppController(
                             },
                             onStatus = { mutable.value = mutable.value.copy(recoveryStatus = it) },
                             onFailure = { failure ->
+                                mutable.value = mutable.value.copy(translationDrafts = emptyMap())
                                 trace("text_failure", diagnostics.safeFields(failure, (failure as? TranslationFailure)?.diagnostic, sessionApiKey))
                             })
                     } finally { translator.close(); captionStop = null }
@@ -499,7 +512,9 @@ class AppController(
                         trace("audio_deferred", "from_ms=${range.startBytes / 48} to_ms=${range.endBytes / 48}")
                         mutable.value = mutable.value.copy(recoveryStatus = "服務再次拒絕這段錄音，已保留供稍後補回。")
                     },
+                    onVoicePreview = ::showVoiceDraft,
                     onAttempt = { index, _ ->
+                        mutable.value = mutable.value.copy(translationDrafts = emptyMap())
                         attempt = index + 1
                         stage = "connect"
                         trace("connection_attempt")
@@ -547,20 +562,22 @@ class AppController(
                             val existing = current.fragments.filter { it.recoverySegment == segment }
                             val label = mutable.value.speaker.takeUnless { it == "未標記" }
                             val pending = mutableListOf<TranscriptFragment>()
-                            val fragments = events.mapIndexedNotNull { index, event ->
+                            val byId = (current.recoveredText + existing).associateBy { it.id }
+                            val fragments = events.visibleVoiceEvents().mapNotNull { (index, event) ->
                                 if (event.translationPending) {
                                     pending += TranscriptFragment("pending-$transcriptAttemptId-$segment-$attempt-$index",
                                         TranscriptChannel.INPUT, event.startMs, event.endMs, event.text, recoverySegment = segment)
-                                    return@mapIndexedNotNull null
+                                    return@mapNotNull null
                                 }
                                 val id = "$transcriptAttemptId-$segment-$attempt-$index"
-                                (existing + current.recoveredText).find { it.id == id } ?: TranscriptFragment(id, event.channel, event.startMs, event.endMs,
+                                byId[id] ?: TranscriptFragment(id, event.channel, event.startMs, event.endMs,
                                     event.text, if (event.channel == TranscriptChannel.INPUT) label else null, recoverySegment = segment)
                             }
                             // A replay may return an empty channel. Never remove text already received there.
                             val preserved = if (complete) existing.filter { old -> fragments.none { it.channel == old.channel } } else emptyList()
                             val changed = complete && existing.isNotEmpty() && existing.map { it.text } != fragments.map { it.text }
-                            val snapshotIds = fragments.map { it.id }.toSet()
+                            // Also evict superseded preview fragments from the draft of this replay attempt.
+                            val snapshotIds = events.indices.mapTo(mutableSetOf()) { "$transcriptAttemptId-$segment-$attempt-$it" }
                             val updated = if (!publish) current.copy(recoveredText =
                                 current.recoveredText.filterNot { it.id in snapshotIds } + fragments)
                             else current.copy(
@@ -576,7 +593,7 @@ class AppController(
                                 captionConnection = updated.captionConnection ?: connection.takeIf { pending.isNotEmpty() })
                             else updated
                             if (complete && pending.isNotEmpty()) trace("translation_deferred", "count=${pending.size}")
-                            replaceRecord(next)
+                            replaceRecord(next, if (publish) events.last().voiceSlot else -1)
                             if (publish) mutable.value = mutable.value.copy(pendingInWindow = if (complete) 0 else pending.size)
                             if (publish && next.contentFilterCount > 0) mutable.value = mutable.value.copy(
                                 streamNotice = "後續字幕已繼續更新。本次收到 ${next.contentFilterCount} 次內容安全篩選通知，被阻擋的片段可能不完整。")
@@ -594,6 +611,7 @@ class AppController(
                         }
                     },
                     onRetry = { retry, failure ->
+                        mutable.value = mutable.value.copy(translationDrafts = emptyMap())
                         trace("retry", "retry=$retry " + diagnostics.safeFields(failure, failure.diagnostic, sessionApiKey))
                         recordDiagnostic(connection, sessionApiKey, failure.diagnostic ?: FoundryDiagnostic(FoundryStages.STREAM, "TIMEOUT"),
                             failure.message.orEmpty(), success = false, showDialog = false)
@@ -610,6 +628,7 @@ class AppController(
                     attemptId = services::uniqueId,
                     stopCapture = { try { services.microphone.stop() } finally { queue.close() } },
                     onNotice = { notice ->
+                        if (notice.diagnostic.code == "CONTENT_FILTER") mutable.value = mutable.value.copy(translationDrafts = emptyMap())
                         trace("service_notice", diagnostics.safeFields(null, notice.diagnostic, sessionApiKey))
                         val current = mutable.value.current?.takeIf { it.id == record.id }
                         if (current != null && notice.diagnostic.code == "CONTENT_FILTER") {
@@ -643,6 +662,7 @@ class AppController(
                     recordDiagnostic(connection, sessionApiKey, diagnostic, sessionFailure.orEmpty(), success = false, showDialog = !listeningStarted)
                 }
             } finally {
+                mutable.value = mutable.value.copy(translationDrafts = emptyMap())
                 captionStop = null
                 runCatching { services.microphone.stop() }
                 queue.cancel()
@@ -710,7 +730,7 @@ class AppController(
             fragment.copy(text = if (separatedTranscript(text, after) != after) "$text " else text)
         }
         replaceRecord(record.copy(fragments = record.fragments + formatted,
-            pendingTranslations = record.pendingTranslations.filterNot { it.id == completedPendingId }))
+            pendingTranslations = record.pendingTranslations.filterNot { it.id == completedPendingId }), if (fragment.channel == TranscriptChannel.OUTPUT) 0 else -1)
         mutable.value = mutable.value.copy(transcriptSaved = false)
         try { persistCurrentTranscript(id) }
         catch (e: CancellationException) { throw e }
@@ -846,8 +866,16 @@ class AppController(
         }
     }
 
-    private fun replaceRecord(record: TranscriptRecord) {
+    private fun showVoiceDraft(event: TranscriptDelta) {
+        val drafts = mutable.value.translationDrafts
+        val next = if (event.text.isEmpty()) drafts - event.voiceSlot else drafts + (event.voiceSlot to
+            TranscriptFragment("live-draft-${event.voiceSlot}", TranscriptChannel.OUTPUT, event.startMs, event.endMs, event.text))
+        mutable.value = mutable.value.copy(translationDrafts = next)
+    }
+
+    private fun replaceRecord(record: TranscriptRecord, settledSlot: Int = -1) {
         mutable.value = mutable.value.copy(
+            translationDrafts = if (settledSlot < 0) mutable.value.translationDrafts else mutable.value.translationDrafts - settledSlot,
             current = if (mutable.value.current?.id == record.id) record else mutable.value.current,
             meetingCosts = record.usage?.let { usage ->
                 (mutable.value.meetingCosts.filterNot { it.id == record.id } + usage.copy(title = record.title)).sortedByDescending { it.startedAtMs }

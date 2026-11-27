@@ -227,6 +227,8 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
         else controller.start()
     }
     val current = state.current
+    val liveSource = current?.settings?.sourceLanguage ?: source
+    val sourceLabel = remember(liveSource, current?.fragments, current?.paragraphLayouts) { liveSourceLanguageLabel(liveSource, current) }
     val outputs = remember(current?.fragments) { current?.fragments.orEmpty().filter { it.channel == TranscriptChannel.OUTPUT } }
     val outputRecord = remember(current?.id, current?.settings, current?.paragraphLayouts, outputs) { current?.copy(fragments = outputs) }
     val committedText = remember(outputRecord) { liveCaptionText(outputRecord, TranscriptChannel.OUTPUT) }
@@ -314,7 +316,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                 SectionCard {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text("${if (state.active) liveSourceLanguageLabel(source, state.current) else source.label} → ${target.label}", fontWeight = FontWeight.SemiBold)
+                            Text("${if (state.active) sourceLabel else source.label} → ${target.label}", fontWeight = FontWeight.SemiBold)
                             Text("${audioSource.label} · ${state.preferences.provider.label}", style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971))
                         }
                         if (!state.active) TextButton(onClick = { editSetup = true }, enabled = !state.busy) { Text("調整設定") }
@@ -376,7 +378,7 @@ fun LiveLingoApp(services: PlatformServices, retainedController: AppController? 
                     TranscriptPanel("譯文", state.current.settings.targetLanguage.label, state.current, TranscriptChannel.OUTPUT,
                         Purple, displayText = outputText, size = translationSize, onSize = { translationSize = it }, onExpand = { fullTranslation = true })
                 }
-                item { TranscriptPanel("原文", liveSourceLanguageLabel(state.current.settings.sourceLanguage, state.current), state.current, TranscriptChannel.INPUT, Mint) }
+                item { TranscriptPanel("原文", sourceLabel, state.current, TranscriptChannel.INPUT, Mint) }
                 state.paragraphStatus?.let { status -> item { Text(status, style = MaterialTheme.typography.bodySmall, color = Color(0xFF657971)) } }
                 if (state.active) item {
                     SectionCard {

@@ -198,6 +198,27 @@ class AppLogicTest {
         restored.dispose()
     }
 
+    @Test fun previewUpdatesInPlaceAndOnlyTheFinalTranslationIsSaved() = runTest {
+        val services = configuredServices()
+        val transport = FakeTransport()
+        val controller = AppController(services, transport, StandardTestDispatcher(testScheduler))
+        controller.setAiParagraphs(false)
+        controller.start()
+        controller.state.first { it.phase == ConnectionPhase.LISTENING }
+        val base = TranscriptDelta(TranscriptChannel.OUTPUT, "早", 0, 500, voiceSlot = 3, previewOnly = true)
+        transport.receiver!!(base)
+        assertEquals("早", controller.state.value.translationDrafts.getValue(3).text)
+        transport.receiver!!(base.copy(text = "早安"))
+        assertEquals(listOf("早安"), controller.state.value.translationDrafts.values.map { it.text })
+        assertTrue(AppRepository(services.memory).history().single().fragments.isEmpty())
+        transport.receiver!!(base.copy(text = "早安。", previewOnly = false, voiceOrigin = VoiceOrigin.FROM_SOURCE))
+        assertTrue(controller.state.value.translationDrafts.isEmpty())
+        controller.stop()
+        controller.state.first { it.phase == ConnectionPhase.IDLE }
+        assertEquals(listOf("早安。"), AppRepository(services.memory).history().single().fragments.map { it.text })
+        controller.dispose()
+    }
+
     @Test fun bilingualTranslationSurvivesStopReopenAndSubtitleExport() = runTest {
         val services = configuredServices()
         val repository = AppRepository(services.memory)
@@ -220,9 +241,7 @@ class AppLogicTest {
         services.mic.emit(ByteArray(4800))
         val expected = "早安。開會吧。"
         val live = controller.state.first { state ->
-            state.phase == ConnectionPhase.ERROR || state.current?.fragments.orEmpty().any {
-                it.channel == TranscriptChannel.OUTPUT && "開會" in it.text
-            }
+            state.phase == ConnectionPhase.ERROR || liveCaptionText(state.current, TranscriptChannel.OUTPUT) == expected
         }
         assertEquals(expected, liveCaptionText(live.current, TranscriptChannel.OUTPUT), live.sessionIssue)
         controller.stop()

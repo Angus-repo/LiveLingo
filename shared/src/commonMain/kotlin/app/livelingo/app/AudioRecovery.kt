@@ -184,6 +184,7 @@ internal class RecoveringTranslationSession(
         contextForSegment: (Long) -> String = { "" },
         recoverDeferred: Boolean = false,
         onDeferred: (DeferredAudio) -> Unit = {},
+        onVoicePreview: (TranscriptDelta) -> Unit = {},
     ) = coroutineScope {
         check(!journal.state.blocked) { "Content-filtered audio cannot be replayed" }
         val revision = MutableStateFlow(0L)
@@ -273,7 +274,10 @@ internal class RecoveringTranslationSession(
                                 onTranscript = { event ->
                                     if (event.startMs < 0 || event.endMs <= event.startMs || event.text.length > 65_536)
                                         throw TranslationFailure("服務回傳了無效的字幕時間或內容。")
-                                    if (event.text.isNotEmpty()) {
+                                    if (event.previewOnly) {
+                                        if (!replaying && deferred == null) onVoicePreview(event.copy(
+                                            startMs = event.startMs + offset / 48, endMs = event.endMs + offset / 48))
+                                    } else if (event.text.isNotEmpty()) {
                                         // Source and translation workers may both emit while disk IO is suspended.
                                         // Finish publishing each received delta before the next draft can replace it.
                                         withContext(NonCancellable) {

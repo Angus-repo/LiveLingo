@@ -24,7 +24,8 @@ class ModelTranslationTransport(clientFactory: () -> HttpClient) : TranslationTr
         }
         completeVoiceCaptions(settings.targetLanguage, repair = { text ->
             translator.translate(connection, apiKey, settings, text, "")
-        }, emit = onTranscript, sourceLanguage = settings.sourceLanguage) { receive, filtered ->
+        }, emit = onTranscript, sourceLanguage = settings.sourceLanguage,
+            stream = { text, preview -> translator.stream(connection, apiKey, settings, text, "", preview) }) { receive, filtered ->
             service.run(connection, apiKey, settings, audio, onReady, receive, onNotice = { notice ->
                 if (notice.diagnostic.code == "CONTENT_FILTER") filtered()
                 onNotice(notice)
@@ -191,9 +192,15 @@ internal class RealtimeTransport(
                 val worker = if (transcribes) launch {
                     var context = ""
                     var previousOutput = ""
+                    var slot = 0
                     for (source in translations) {
                         if (connection.textDeployment.isBlank()) throw TranslationFailure("轉錄方案需要設定文字翻譯模型。")
-                        val result = source.translateOrDefer { translator.translate(connection, key, settings, it, context) }
+                        val turn = source.copy(voiceSlot = slot++)
+                        val result = turn.translateOrDefer { text ->
+                            translator.stream(connection, key, settings, text, context) { draft ->
+                                onTranscript(turn.copy(channel = TranscriptChannel.OUTPUT, text = separatedTranscript(previousOutput, draft), previewOnly = true))
+                            }
+                        }
                         if (result.translationPending) {
                             onTranscript(result)
                             context = (context + "\nOriginal: " + source.text).takeLast(2500)

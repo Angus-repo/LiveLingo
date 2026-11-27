@@ -2,6 +2,7 @@ package app.livelingo.app
 
 import app.livelingo.core.*
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
@@ -43,6 +44,15 @@ internal fun needsTargetTranslation(text: String, target: Language): Boolean {
         words.any { it.lowercase() in wordsToTranslate } ||
             words.size >= 2 && words.any { word -> word.all { it in 'a'..'z' } }
     }
+}
+
+/** Hold an unfinished Latin word when the target uses another script. Validation still runs on the final result. */
+internal fun targetPreview(text: String, target: Language): String {
+    val draft = when (target) {
+        Language.ZH_TW, Language.JAPANESE, Language.KOREAN -> text.trimEnd { it.latin() || it in " '-’" }
+        else -> text
+    }
+    return if (needsTargetTranslation(draft, target)) "" else draft
 }
 
 internal val TranslationFailure.targetLanguageMismatch: Boolean
@@ -91,7 +101,9 @@ internal suspend fun deliverVoiceOutput(
             Language.KOREAN -> text.any { it.hangul() } && !text.any { it.latin() || it.kana() }
             Language.AUTO -> true
         }
-        if (native || text.lastOrNull() in listOf('。','！','？','!','?','\n') ||
+        val resumedTarget = old != null && delta.text.lastOrNull { it.isLetter() }?.speechScript()?.usedBy(target) == true &&
+            !needsTargetTranslation(text, target)
+        if (native || resumedTarget || text.lastOrNull() in listOf('。','！','？','!','?','\n') ||
             text.endsWith(". ") || text.length >= 512) flush()
     }
     flush()
@@ -126,6 +138,7 @@ internal suspend fun completeVoiceCaptions(
     repair: suspend (String) -> String,
     emit: suspend (TranscriptDelta) -> Unit,
     sourceLanguage: Language = Language.AUTO,
+    stream: StreamingText = { text, _ -> repair(text) },
     collect: suspend (suspend (TranscriptDelta) -> Unit, suspend () -> Unit) -> Unit,
 ) = coroutineScope {
     val native = Channel<TranscriptDelta>(32)
@@ -135,23 +148,48 @@ internal suspend fun completeVoiceCaptions(
     var sourceLed = false
     var sawNative = false
     var blocked = false
-    launch { deliverVoiceOutput(native, target, repair, emit) }
-    val sourceJob = launch { deliverSourceSentences(sources, target, sourceLanguage, repair, emit) }
-    suspend fun useSource() {
+    val nativePrefix = StringBuilder()
+    launch {
+        deliverVoiceOutput(native, target, repair) { event ->
+            if (event.voiceOrigin == VoiceOrigin.STANDARD || !sourceLed) {
+                if (event.channel == TranscriptChannel.OUTPUT) nativePrefix.append(event.text)
+                emit(event)
+            }
+        }
+    }
+    val sourceJob = launch { deliverSourceSentences(sources, target, sourceLanguage, stream, emit, live = true) }
+    var prefixJob: Job? = null
+    suspend fun switchToSource() {
         sourceLed = true
-        for (delta in backlog.sortedBy { it.startMs }) sources.send(delta)
+        if (backlog.isEmpty()) return
+        val earlier = backlog.sortedBy { it.startMs }
         backlog.clear()
+        if (nativePrefix.isNotBlank()) {
+            // Native and source clocks can differ by seconds. Anchor this temporary prefix
+            // before the new speech until all earlier source sentences have been reconciled.
+            emit(TranscriptDelta(TranscriptChannel.OUTPUT, nativePrefix.toString(), earlier.first().startMs,
+                earlier.maxOf { it.endMs }, voiceOrigin = VoiceOrigin.PREFIX_PREVIEW))
+        }
+        prefixJob = launch {
+            val history = Channel<TranscriptDelta>(earlier.size)
+            earlier.forEach { history.send(it) }
+            history.close()
+            val replacements = mutableListOf<TranscriptDelta>()
+            deliverSourceSentences(history, target, sourceLanguage, { text, _ -> repair(text) }, { replacements += it }, live = false)
+            replacements.forEachIndexed { index, event ->
+                emit(event.copy(voiceOrigin = if (index == replacements.lastIndex) VoiceOrigin.PREFIX_END else VoiceOrigin.PREFIX_PART))
+            }
+        }
     }
     collect({ delta ->
         if (delta.channel == TranscriptChannel.INPUT) {
             emit(delta)
             if (!blocked) {
-                if (sourceLed) sources.send(delta)
-                else {
-                    backlog += delta
+                if (!sourceLed) {
                     delta.text.mapNotNullTo(scripts) { it.speechScript() }
-                    if (scripts.size > 1 || scripts.any { it.usedBy(target) }) useSource()
+                    if (scripts.size > 1 || scripts.any { it.usedBy(target) }) switchToSource()
                 }
+                if (sourceLed) sources.send(delta) else backlog += delta
             }
         } else if (!sourceLed || blocked) {
             if (delta.text.isNotBlank()) sawNative = true
@@ -161,8 +199,9 @@ internal suspend fun completeVoiceCaptions(
         blocked = true
         backlog.clear()
         sourceJob.cancelAndJoin()
+        prefixJob?.cancelAndJoin()
     })
-    if (!blocked && !sourceLed && !sawNative) useSource()
+    if (!blocked && !sourceLed && !sawNative) for (delta in backlog.sortedBy { it.startMs }) sources.send(delta)
     sources.close()
     native.close()
 }
@@ -186,47 +225,75 @@ internal fun sentencePieces(text: String): List<String> = buildList {
     if (from < text.length) add(text.substring(from))
 }
 
+internal typealias StreamingText = suspend (String, suspend (String) -> Unit) -> String
+
+private fun withWordSpacing(previous: String, current: String): String =
+    if (previous in listOf(".", "?", "!") && current.firstOrNull()?.latin() == true) " $current"
+    else separatedTranscript(previous, current)
+
 @OptIn(ExperimentalCoroutinesApi::class)
 private suspend fun deliverSourceSentences(input: ReceiveChannel<TranscriptDelta>, target: Language, sourceLanguage: Language,
-    translate: suspend (String) -> String, emit: suspend (TranscriptDelta) -> Unit) {
+    translate: StreamingText, emit: suspend (TranscriptDelta) -> Unit, live: Boolean) = coroutineScope {
+    val ready = Channel<TranscriptDelta>(48)
+    var slot = 0
     var pending: TranscriptDelta? = null
-    var previousOutput = ""
-    suspend fun flush() {
-        val source = pending ?: return
+    suspend fun queue() {
+        val span = pending ?: return
         pending = null
-        if (source.text.isBlank()) return
-        val result = source.translateOrDefer {
-            if (it.none(Char::isLetter)) it else localChinese(it, target, sourceLanguage) ?: translate(it)
+        if (span.text.isBlank()) return
+        ready.send(span.copy(voiceSlot = if (live) slot++ else -1))
+    }
+    // The reader can still show newer local captions while an earlier HTTP request is in flight.
+    // Only this worker commits results, in source order, after language checks and final drain.
+    launch {
+        var previous = ""
+        for (span in ready) {
+            val result = span.translateOrDefer { text ->
+                if (text.none(Char::isLetter)) text else localChinese(text, target, sourceLanguage) ?: translate(text) { draft ->
+                    if (live) emit(span.copy(channel = TranscriptChannel.OUTPUT, text = withWordSpacing(previous, draft), previewOnly = true))
+                }
+            }
+            val final = if (result.translationPending) result else result.copy(text = withWordSpacing(previous, result.text))
+            if (!final.translationPending) previous = final.text.takeLast(1)
+            emit(final.copy(voiceOrigin = VoiceOrigin.FROM_SOURCE))
         }
-        val separated = if (result.translationPending) result else
-            result.copy(text = if (previousOutput in listOf(".", "?", "!") && result.text.firstOrNull()?.latin() == true)
-                " " + result.text else separatedTranscript(previousOutput, result.text)).also { previousOutput = it.text.takeLast(1) }
-        emit(separated.copy(voiceOrigin = VoiceOrigin.FROM_SOURCE))
     }
     while (true) {
         val next = if (pending == null) input.receiveCatching() else select<kotlinx.coroutines.channels.ChannelResult<TranscriptDelta>?> {
             input.onReceiveCatching { it }
-            onTimeout(1_500) { null }
+            onTimeout(450) { null }
         }
-        if (next == null) { flush(); continue }
+        if (next == null) { queue(); continue }
         val delta = next.getOrNull() ?: break
-        if (pending?.let { delta.startMs - it.endMs >= 1_500 } == true) flush()
+        if (pending?.let { delta.startMs - it.endMs >= 1_500 } == true) queue()
         val tail = pending?.text
         if (tail != null && delta.text.isNotBlank()) {
             val changesToChinese = target == Language.ZH_TW && tail.any { it.latin() } && !tail.any { it.han() } &&
                 localChinese(delta.text, target, sourceLanguage) != null
-            val decimalContinues = tail.endsWith('.') && tail.getOrNull(tail.lastIndex - 1)?.isDigit() == true &&
-                delta.text.first().isDigit()
-            if (changesToChinese || (tail.endsWith('.') && !decimalContinues)) flush()
+            val decimalContinues = tail.endsWith('.') && tail.getOrNull(tail.lastIndex - 1)?.isDigit() == true && delta.text.first().isDigit()
+            if (changesToChinese || (tail.endsWith('.') && !decimalContinues)) queue()
         }
         for (piece in sentencePieces(delta.text)) {
             val old = pending
-            pending = if (old == null) delta.copy(text = piece) else old.copy(
+            val span = if (old == null) delta.copy(text = piece) else old.copy(
                 text = old.text + piece, endMs = maxOf(old.endMs, delta.endMs))
-            // A period at the end of a packet can be the first half of a decimal.
+            pending = span
+            val local = localChinese(span.text, target, sourceLanguage)
+            if (live && local != null) emit(span.copy(channel = TranscriptChannel.OUTPUT, text = local, voiceSlot = slot, previewOnly = true))
             val possibleDecimal = piece.endsWith('.') && piece.getOrNull(piece.lastIndex - 1)?.isDigit() == true
-            if ((!possibleDecimal && sentenceEnd.containsMatchIn(piece)) || pending!!.text.length >= 1800) flush()
+            if ((!possibleDecimal && sentenceEnd.containsMatchIn(piece)) || span.text.length >= 1800) queue()
+            else if (live && local == null && span.endMs - span.startMs >= 1_800) {
+                // Continuous speech may have no sentence breaks. Send completed words and
+                // leave the trailing token intact for the next source packet.
+                val cut = span.text.indexOfLast { it.isWhitespace() || it in "，、,；;" } + 1
+                if (cut > 0 && span.text.take(cut).isNotBlank()) {
+                    pending = span.copy(text = span.text.take(cut))
+                    queue()
+                    pending = span.text.drop(cut).takeIf { it.isNotEmpty() }?.let { delta.copy(text = it) }
+                }
+            }
         }
     }
-    flush()
+    queue()
+    ready.close()
 }

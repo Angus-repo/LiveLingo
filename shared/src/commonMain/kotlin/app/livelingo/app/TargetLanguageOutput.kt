@@ -138,7 +138,7 @@ internal suspend fun completeVoiceCaptions(
     repair: suspend (String) -> String,
     emit: suspend (TranscriptDelta) -> Unit,
     sourceLanguage: Language = Language.AUTO,
-    stream: StreamingText = { text, _ -> repair(text) },
+    stream: StreamingText? = null,
     collect: suspend (suspend (TranscriptDelta) -> Unit, suspend () -> Unit) -> Unit,
 ) = coroutineScope {
     val native = Channel<TranscriptDelta>(32)
@@ -157,7 +157,8 @@ internal suspend fun completeVoiceCaptions(
             }
         }
     }
-    val sourceJob = launch { deliverSourceSentences(sources, target, sourceLanguage, stream, emit, live = true) }
+    val plain: StreamingText = { text, _ -> repair(text) }
+    val sourceJob = launch { deliverSourceSentences(sources, target, sourceLanguage, stream ?: plain, emit, live = true) }
     var prefixJob: Job? = null
     suspend fun switchToSource() {
         sourceLed = true
@@ -175,7 +176,7 @@ internal suspend fun completeVoiceCaptions(
             earlier.forEach { history.send(it) }
             history.close()
             val replacements = mutableListOf<TranscriptDelta>()
-            deliverSourceSentences(history, target, sourceLanguage, { text, _ -> repair(text) }, { replacements += it }, live = false)
+            deliverSourceSentences(history, target, sourceLanguage, plain, { replacements += it }, live = false)
             replacements.forEachIndexed { index, event ->
                 emit(event.copy(voiceOrigin = if (index == replacements.lastIndex) VoiceOrigin.PREFIX_END else VoiceOrigin.PREFIX_PART))
             }
